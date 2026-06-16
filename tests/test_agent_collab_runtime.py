@@ -44,7 +44,15 @@ class RuntimeContractTests(TestCase):
 
         prompt = runtime.build_prompt(req, REPO_ROOT, SCHEMA)
 
-        self.assertIn("STRICT PEER-ONLY CONTRACT", prompt)
+        self.assertIn("Agent Collab peer request", prompt)
+        self.assertIn("Objective:", prompt)
+        self.assertIn("Success criteria:", prompt)
+        self.assertIn("Constraints:", prompt)
+        self.assertIn("Task brief:", prompt)
+        self.assertIn("Use latest official documentation for external/API/platform/dependency/tooling claims.", prompt)
+        self.assertIn("Research online extensively when current external facts could affect the answer.", prompt)
+        self.assertIn("Review this diff with quotes", prompt)
+        self.assertNotIn("STRICT PEER-ONLY CONTRACT", prompt)
         self.assertIn("Do not modify files", prompt)
         self.assertIn("Do not invoke Agent Collab", prompt)
         self.assertIn("Respond with exactly one JSON object", prompt)
@@ -68,6 +76,10 @@ class RuntimeContractTests(TestCase):
         self.assertEqual(command.args[:3], ["claude", "-p", "prompt text"])
         self.assertIn("--json-schema", command.args)
         self.assertEqual(command.args[command.args.index("--permission-mode") + 1], "plan")
+        self.assertEqual(
+            command.args[command.args.index("--tools") + 1],
+            "Bash,Read,Grep,Glob,WebSearch,WebFetch",
+        )
         self.assertIn("--no-session-persistence", command.args)
         self.assertNotIn("--max-turns", command.args)
 
@@ -286,6 +298,29 @@ class SkillMetadataTests(TestCase):
         synthesis = (REPO_ROOT / "tools" / "agent-collab" / "synthesize.md").read_text()
         self.assertIn("While the peer is running, keep host work read-only", synthesis)
 
+    def test_readme_reflects_current_helper_agent_workflow(self):
+        readme = (REPO_ROOT / "README.md").read_text()
+
+        self.assertIn("Optional same-product helper agents are mapper, reviewer, and verifier", readme)
+        self.assertIn("There is no separate judge agent or synthesizer agent in the current implementation", readme)
+        self.assertIn("The host remains the final synthesizer", readme)
+
+    def test_host_docs_require_minimal_non_leading_peer_briefs(self):
+        docs = [
+            REPO_ROOT / "codex-skill" / "agent-collab" / "SKILL.md",
+            REPO_ROOT / ".claude" / "skills" / "agent-collab" / "SKILL.md",
+            REPO_ROOT / "tools" / "agent-collab" / "synthesize.md",
+        ]
+
+        for doc in docs:
+            text = doc.read_text()
+            self.assertIn("Decide what the peer needs before writing the brief", text, str(doc))
+            self.assertIn("Keep the peer brief natural, minimal, and non-leading", text, str(doc))
+            self.assertIn("Define the desired outcome, success criteria, scope, and hard constraints", text, str(doc))
+            self.assertIn("Ask the peer to use latest official documentation for external/API/platform/dependency/tooling claims", text, str(doc))
+            self.assertIn("Ask the peer to research online extensively when current external facts could affect the answer", text, str(doc))
+            self.assertIn("Do not include host analysis", text, str(doc))
+
     def test_readme_mentions_observed_codex_version(self):
         readme = (REPO_ROOT / "README.md").read_text()
 
@@ -301,8 +336,25 @@ class SkillMetadataTests(TestCase):
         for agent_file in (REPO_ROOT / ".codex" / "agents").glob("agent-collab-*.toml"):
             self.assertIn('model_reasoning_effort = "xhigh"', agent_file.read_text())
 
+    def test_codex_local_agents_require_official_docs_and_web_research(self):
+        for agent_file in (REPO_ROOT / ".codex" / "agents").glob("agent-collab-*.toml"):
+            text = agent_file.read_text()
+            self.assertIn("Use latest official documentation for external/API/platform/dependency/tooling claims.", text)
+            self.assertIn("Research online extensively when current external facts could affect the answer.", text)
+
     def test_claude_local_agents_use_highest_reasoning_effort(self):
         for agent_file in (REPO_ROOT / ".claude" / "agents").glob("agent-collab-*.md"):
             text = agent_file.read_text()
             self.assertIn("model: opus", text)
             self.assertIn("effort: max", text)
+
+    def test_claude_local_agents_have_web_tools(self):
+        for agent_file in (REPO_ROOT / ".claude" / "agents").glob("agent-collab-*.md"):
+            text = agent_file.read_text()
+            self.assertIn("tools: Read, Glob, Grep, Bash, WebSearch, WebFetch", text)
+
+    def test_claude_local_agents_require_official_docs_and_web_research(self):
+        for agent_file in (REPO_ROOT / ".claude" / "agents").glob("agent-collab-*.md"):
+            text = agent_file.read_text()
+            self.assertIn("Use latest official documentation for external/API/platform/dependency/tooling claims.", text)
+            self.assertIn("Research online extensively when current external facts could affect the answer.", text)

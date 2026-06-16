@@ -60,7 +60,12 @@ Claude can also invoke it implicitly when the request matches the skill `descrip
 8. The host snapshots git state again.
 9. The host synthesizes the final answer, separating confirmed, unverified, rejected, product-decision, and human-input-needed claims.
 
+Optional same-product helper agents are mapper, reviewer, and verifier. They are host-local helpers for repository inventory, focused review, and claim verification; they are instructed not to invoke Agent Collab, call the other product, recurse into more subagents, or edit files unless a bounded write scope is explicitly assigned.
+
+There is no separate judge agent or synthesizer agent in the current implementation. The host remains the final synthesizer and uses peer/helper output as evidence to verify, reject, or qualify claims.
+
 The peer is contractually forbidden from invoking Agent Collab again, calling the host product, or editing files when `edit_allowed=false`.
+Peer prompts also ask for latest official documentation on external/API/platform/dependency/tooling claims and extensive online research when current external facts could affect the answer.
 While the peer is running, host-side work also stays read-only so git-state mutation checks remain attributable.
 
 ## Install In This Repo
@@ -189,12 +194,22 @@ Environment variables:
 - `CODEX_EFFORT`: Codex peer reasoning effort. Defaults to `xhigh`.
 - `CLAUDE_MODEL`: Claude peer model. Defaults to `opus`.
 - `CLAUDE_EFFORT`: Claude peer reasoning effort. Defaults to `max`.
-- `CLAUDE_TOOLS`: Claude peer tool set. Defaults to `default`.
+- `CLAUDE_TOOLS`: Claude peer tool set. Defaults to `Bash,Read,Grep,Glob,WebSearch,WebFetch`.
 - `AGENT_COLLAB_SAFE_MODE=1`: Use read-only Codex sandbox and Claude `plan` permission mode.
 - `AGENT_COLLAB_TIMEOUT_SECONDS`: Optional peer timeout. Unset or `0` means no hard timeout.
 - `AGENT_COLLAB_PEER_ONLY=true` or `AGENT_COLLAB_DEPTH>=1`: Refuse nested invocation.
 
 Default mode is full-capability because this repo was built for high-trust local collaboration. Use safe mode for untrusted repositories.
+
+### Access Defaults
+
+- Codex peer runs use `--search` and default to `--sandbox danger-full-access` unless `AGENT_COLLAB_SAFE_MODE=1`.
+- Claude peer runs default to `Bash,Read,Grep,Glob,WebSearch,WebFetch` through `CLAUDE_TOOLS`.
+- Codex host-local helper agents inherit the parent Codex session's sandbox, approval, and live runtime overrides unless explicitly overridden in their agent files.
+- Claude host-local helper agents include `Read`, `Glob`, `Grep`, `Bash`, `WebSearch`, and `WebFetch`.
+
+Helper agents are still instructed to avoid edits and recursion. Broader tool access is for better investigation, not permission to mutate the repo.
+Peer and helper prompts prefer latest official documentation and source-backed web research for current external claims.
 
 ## Maintenance
 
