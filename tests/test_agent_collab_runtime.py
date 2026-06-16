@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import filecmp
 from pathlib import Path
 from unittest import TestCase, mock
 
@@ -236,8 +237,8 @@ class RuntimeContractTests(TestCase):
 
 class SkillMetadataTests(TestCase):
     def test_codex_and_claude_skill_metadata_match_contract(self):
-        codex_skill = REPO_ROOT / ".agents" / "skills" / "agent-collab" / "SKILL.md"
-        codex_openai = REPO_ROOT / ".agents" / "skills" / "agent-collab" / "agents" / "openai.yaml"
+        codex_skill = REPO_ROOT / "codex-skill" / "agent-collab" / "SKILL.md"
+        codex_openai = REPO_ROOT / "codex-skill" / "agent-collab" / "agents" / "openai.yaml"
         claude_skill = REPO_ROOT / ".claude" / "skills" / "agent-collab" / "SKILL.md"
 
         codex_text = codex_skill.read_text()
@@ -250,6 +251,46 @@ class SkillMetadataTests(TestCase):
         self.assertIn("when_to_use:", claude_text)
         self.assertIn("allowed-tools: Bash Read Grep Glob WebSearch WebFetch", claude_text)
         self.assertNotIn("disable-model-invocation: true", claude_text)
+        self.assertFalse((REPO_ROOT / ".agents" / "skills" / "agent-collab").exists())
+
+    def test_packaged_codex_runtime_matches_root_runtime(self):
+        root_runtime = REPO_ROOT / "tools" / "agent-collab"
+        packaged_runtime = REPO_ROOT / "codex-skill" / "agent-collab" / "tools" / "agent-collab"
+
+        comparison = filecmp.dircmp(root_runtime, packaged_runtime)
+
+        self.assertEqual(comparison.left_only, [])
+        self.assertEqual(comparison.right_only, [])
+        self.assertEqual(comparison.diff_files, [])
+
+    def test_maintenance_scripts_are_executable(self):
+        for script_name in ("sync-codex-skill.sh", "install-codex-skill.sh"):
+            script = REPO_ROOT / "scripts" / script_name
+            self.assertTrue(script.exists())
+            self.assertTrue(os.access(script, os.X_OK), f"{script} must be executable")
+
+    def test_host_docs_use_peer_first_flow(self):
+        docs = [
+            REPO_ROOT / "README.md",
+            REPO_ROOT / "codex-skill" / "agent-collab" / "SKILL.md",
+            REPO_ROOT / ".claude" / "skills" / "agent-collab" / "SKILL.md",
+            REPO_ROOT / "tools" / "agent-collab" / "synthesize.md",
+        ]
+
+        for doc in docs:
+            text = doc.read_text()
+            self.assertIn("Start the peer run before host analysis", text, str(doc))
+            self.assertNotIn("Produce a concise host first pass before reading peer output", text)
+            self.assertNotIn("The host produces a first pass before reading peer output", text)
+
+        synthesis = (REPO_ROOT / "tools" / "agent-collab" / "synthesize.md").read_text()
+        self.assertIn("While the peer is running, keep host work read-only", synthesis)
+
+    def test_readme_mentions_observed_codex_version(self):
+        readme = (REPO_ROOT / "README.md").read_text()
+
+        self.assertIn("codex-cli 0.140.0", readme)
+        self.assertNotIn("codex-cli 0.139.0", readme)
 
     def test_claude_slash_command_is_backed_by_skill_directory(self):
         skill = REPO_ROOT / ".claude" / "skills" / "agent-collab" / "SKILL.md"
