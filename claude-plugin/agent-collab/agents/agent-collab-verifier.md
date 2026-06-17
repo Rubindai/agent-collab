@@ -1,6 +1,6 @@
 ---
 name: agent-collab-verifier
-description: Independent Agent Collab verifier for checking claims, command evidence, tests, and before/after git state.
+description: Independent Agent Collab verifier for checking claims, command evidence, tests, and before/after workspace state.
 model: opus
 effort: max
 disallowedTools: Agent, Task

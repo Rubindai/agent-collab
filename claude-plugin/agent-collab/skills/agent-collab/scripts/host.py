@@ -95,6 +95,7 @@ RUN_ID_SAFE_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ012
 DEFAULT_FINISH_TIMEOUT_SECONDS = 2700
 FINISH_TIMEOUT_GRACE_SECONDS = 30
 FINISH_WAIT_POLL_SECONDS = 1
+PEER_REPORT_STABLE_SECONDS = 0.5
 RESET_SCOPES = {"local", "global", "all"}
 RUN_ARTIFACT_NAMES = {
     "host-request.json",
@@ -184,6 +185,17 @@ def load_peer_runtime() -> Any:
     spec = importlib.util.spec_from_file_location("agent_collab_peer", path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"cannot load peer runtime: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_snapshot_runtime() -> Any:
+    path = runtime_dir() / "snapshot.py"
+    spec = importlib.util.spec_from_file_location("agent_collab_snapshot", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load snapshot runtime: {path}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
@@ -447,23 +459,9 @@ def git_output(repo_root: Path, args: list[str]) -> str:
     return completed.stdout.strip()
 
 
-def run_snapshot(repo_root: Path, output_path: Path) -> None:
-    status = git_output(repo_root, ["status", "--porcelain=v1", "--untracked-files=all"])
-    lines = [
-        "agent_collab_git_snapshot_v1",
-        f"repo={repo_root}",
-        f"timestamp_utc={datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}",
-        f"branch={git_output(repo_root, ['branch', '--show-current'])}",
-        f"head={git_output(repo_root, ['rev-parse', '--verify', 'HEAD'])}",
-        f"dirty={'true' if status else 'false'}",
-        "-- status_porcelain_v1",
-        status,
-        "-- diff_name_status",
-        git_output(repo_root, ["diff", "--name-status"]),
-        "-- staged_name_status",
-        git_output(repo_root, ["diff", "--cached", "--name-status"]),
-    ]
-    output_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+def run_snapshot(repo_root: Path, output_path: Path, ignored_paths: list[Path] | None = None) -> None:
+    snapshot = load_snapshot_runtime()
+    snapshot.write_workspace_snapshot(repo_root, output_path, ignored_paths=ignored_paths)
 
 
 def process_alive(pid: int) -> bool:
@@ -618,17 +616,32 @@ def resolve_finish_wait_timeout(
 
 
 def wait_for_peer_report(peer_report_path: Path, pid: int, timeout_seconds: float | None) -> str:
-    if peer_report_path.exists() and peer_report_path.stat().st_size > 0:
-        return "report_ready"
-
-    deadline = None if timeout_seconds is None else time.time() + timeout_seconds
+    start = time.time()
+    deadline = None if timeout_seconds is None else start + timeout_seconds
+    last_signature: tuple[int, int] | None = None
+    stable_since: float | None = None
     while True:
         if peer_report_path.exists() and peer_report_path.stat().st_size > 0:
-            return "report_ready"
-        if not process_alive(pid):
+            stat = peer_report_path.stat()
+            signature = (stat.st_size, stat.st_mtime_ns)
+            alive = process_alive(pid)
+            if not alive:
+                return "report_ready"
+            now = time.time()
+            if signature != last_signature:
+                last_signature = signature
+                stable_since = now
+            if deadline is not None and now >= deadline:
+                return "timeout"
+            if stable_since is not None and now - stable_since >= PEER_REPORT_STABLE_SECONDS:
+                return "report_ready"
+        else:
+            alive = process_alive(pid)
+            now = time.time()
+            if deadline is not None and now >= deadline:
+                return "timeout"
+        if not alive:
             return "peer_exited"
-        if deadline is not None and time.time() >= deadline:
-            return "timeout"
         time.sleep(FINISH_WAIT_POLL_SECONDS)
 
 
@@ -674,7 +687,7 @@ def start(args: argparse.Namespace) -> int:
 
     request_path = run_dir / "host-request.json"
     write_json(request_path, request)
-    run_snapshot(repo_root, run_dir / "before.snapshot")
+    run_snapshot(repo_root, run_dir / "before.snapshot", ignored_paths=[run_dir])
     state.upsert_job(
         run_root,
         {
@@ -703,6 +716,7 @@ def start(args: argparse.Namespace) -> int:
         env[key] = value
     env["AGENT_COLLAB_PROFILE"] = profile
     env["AGENT_COLLAB_WEB_RESEARCH"] = settings["web_research"]
+    env["AGENT_COLLAB_RUN_DIR"] = str(run_dir)
     agent_timeout = peer_runtime.timeout_seconds(env)
     if agent_timeout is not None:
         env["AGENT_COLLAB_TIMEOUT_SECONDS"] = (
@@ -781,7 +795,12 @@ class PeerReportRequestMismatch(ArtifactValidationError):
     pass
 
 
-def validate_claim_shape(claim: Any, context: str, require_source: bool = False) -> None:
+def validate_claim_shape(
+    claim: Any,
+    context: str,
+    require_source: bool = False,
+    allow_extra: bool = True,
+) -> None:
     if not isinstance(claim, dict):
         raise ArtifactValidationError(f"{context} claim must be an object")
     for key in ("claim", "status", "evidence"):
@@ -794,6 +813,13 @@ def validate_claim_shape(claim: Any, context: str, require_source: bool = False)
     if require_source:
         if claim.get("source") not in CLAIM_SOURCES:
             raise ArtifactValidationError(f"{context} claim source is invalid")
+    if not allow_extra:
+        allowed = {"claim", "status", "evidence"}
+        if require_source:
+            allowed.add("source")
+        unknown = set(claim) - allowed
+        if unknown:
+            raise ArtifactValidationError(f"{context} claim has unknown keys: {sorted(unknown)}")
 
 
 def validate_host_first_pass(report: dict[str, Any], request: dict[str, Any]) -> None:
@@ -824,6 +850,9 @@ def validate_claim_matrix(report: dict[str, Any], request: dict[str, Any]) -> No
     missing = required - report.keys()
     if missing:
         raise ArtifactValidationError(f"claim-matrix missing required keys: {sorted(missing)}")
+    unknown = set(report) - required
+    if unknown:
+        raise ArtifactValidationError(f"claim-matrix has unknown keys: {sorted(unknown)}")
     if report["schema_version"] != "1.0":
         raise ArtifactValidationError("claim-matrix schema_version must be 1.0")
     if report["run_id"] != request.get("run_id"):
@@ -868,7 +897,7 @@ def validate_adjudicator_report(report: dict[str, Any], request: dict[str, Any])
         if not isinstance(report["claims"], list):
             raise ArtifactValidationError("adjudicator-report claims must be an array")
         for claim in report["claims"]:
-            validate_claim_shape(claim, "adjudicator-report")
+            validate_claim_shape(claim, "adjudicator-report", allow_extra=False)
 
 
 def claims_with_source(report: dict[str, Any], source: str) -> list[dict[str, Any]]:
@@ -1024,31 +1053,32 @@ def finish(args: argparse.Namespace) -> int:
     finish_wait_seconds, finish_timeout_source = resolve_finish_wait_timeout(args.timeout_seconds, process_info)
     wait_status = wait_for_peer_report(peer_report_path, pid, finish_wait_seconds)
 
-    if not peer_report_path.exists() or peer_report_path.stat().st_size == 0:
-        if wait_status == "timeout" and process_alive(pid):
-            output = {
-                "run_id": request["run_id"],
-                "run_dir": str(run_dir),
-                "status": "peer_running",
-                "phase": "waiting_for_peer",
-                "peer_pid": pid,
+    if wait_status == "timeout" and process_alive(pid):
+        output = {
+            "run_id": request["run_id"],
+            "run_dir": str(run_dir),
+            "status": "peer_running",
+            "phase": "waiting_for_peer",
+            "peer_pid": pid,
+            "finish_wait_seconds": json_number(finish_wait_seconds),
+            "finish_timeout_source": finish_timeout_source,
+            "peer_report": str(peer_report_path),
+            "message": "Peer is still running and produced no stable complete report before finish timeout.",
+        }
+        write_json(run_dir / "host-result.json", output)
+        state.upsert_job(
+            run_root,
+            {
+                **job_patch_from_run(run_dir, "running", "waiting_for_peer"),
+                "pid": pid,
                 "finish_wait_seconds": json_number(finish_wait_seconds),
                 "finish_timeout_source": finish_timeout_source,
-                "peer_report": str(peer_report_path),
-                "message": "Peer is still running and produced no report before finish timeout.",
-            }
-            write_json(run_dir / "host-result.json", output)
-            state.upsert_job(
-                run_root,
-                {
-                    **job_patch_from_run(run_dir, "running", "waiting_for_peer"),
-                    "pid": pid,
-                    "finish_wait_seconds": json_number(finish_wait_seconds),
-                    "finish_timeout_source": finish_timeout_source,
-                },
-            )
-            print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
-            return 1
+            },
+        )
+        print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
+        return 1
+
+    if not peer_report_path.exists() or peer_report_path.stat().st_size == 0:
         failure = {
             "schema_version": "1.0",
             "run_id": request["run_id"],
@@ -1090,7 +1120,7 @@ def finish(args: argparse.Namespace) -> int:
     write_json(run_dir / "claim-matrix.json", claim_matrix)
 
     repo_root = Path(process_info.get("repo_root", str(default_repo_root()))).resolve()
-    run_snapshot(repo_root, run_dir / "after.snapshot")
+    run_snapshot(repo_root, run_dir / "after.snapshot", ignored_paths=[run_dir])
     result = {
         "run_id": request["run_id"],
         "run_dir": str(run_dir),

@@ -16,7 +16,7 @@ Default to `profile=ultra`. Do not edit files unless the user explicitly asks to
 ## Flow
 
 1. Classify `mode`, `target`, `profile`, and `edit_allowed`. Default `profile` to `ultra`.
-2. Resolve the repository root with `repo_root=$(git rev-parse --show-toplevel)`.
+2. Resolve the workspace root with `repo_root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)` so the skill works in git and non-git directories.
 3. Resolve this skill directory from the first existing candidate. Prefer the installed skill/plugin path when Codex exposes one; otherwise check the personal marketplace source, plugin cache, direct-skill compatibility paths, and finally this repo's source tree:
 
 ```bash
@@ -100,7 +100,7 @@ Allowed modes: `review`, `audit`, `brainstorm`, `research`, `design`, `plan`, `p
 
 ## Guardrails
 
-Cross-agent depth is capped at 1. Local subagent depth is capped at 1 by default. Peer runs receive full repo, shell, tool, and network capability by default, and no-edit requests are enforced by prompt plus post-run git mutation detection. Use safe mode when technical read-only restrictions are required. The runtime prepends a PATH guard that blocks ordinary unqualified host CLI lookup, but it is not a sandbox and cannot block absolute host CLI paths or deliberate PATH rewriting.
+Cross-agent depth is capped at 1. Local subagent depth is capped at 1 by default. Peer runs receive full repo, shell, tool, and network capability by default, and no-edit requests are enforced by prompt plus post-run workspace mutation detection. Git repos use git status/diff snapshots; non-git directories use deterministic filesystem snapshots. Use safe mode when technical read-only restrictions are required. The runtime prepends a PATH guard that blocks ordinary unqualified host CLI lookup, but it is not a sandbox and cannot block absolute host CLI paths or deliberate PATH rewriting.
 
 Full capability is for investigation and validation. It is not blanket permission to mutate the repo.
 

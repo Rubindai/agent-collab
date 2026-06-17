@@ -53,8 +53,9 @@ tools/agent-collab/
 
 Runtime entrypoints:
 
-- `tools/agent-collab/scripts/host.py`: creates run directories, snapshots git state, starts the peer first, and validates finish artifacts.
+- `tools/agent-collab/scripts/host.py`: creates run directories, snapshots workspace state, starts the peer first, and validates finish artifacts.
 - `tools/agent-collab/scripts/peer.py`: invokes the opposite product once, preserves raw output, normalizes the report, and returns schema-validated JSON.
+- `tools/agent-collab/scripts/snapshot.py`: records git snapshots in git repos and deterministic filesystem snapshots in non-git directories.
 - `tools/agent-collab/scripts/state.py`: keeps a local ignored job ledger for status, result, cancellation, and cleanup commands. The ledger always keeps active jobs and prunes older terminal jobs toward a 50-entry retained history; `status` shows the newest 8 by default and `status --all` shows all retained jobs.
 
 The packaged Codex and Claude plugin skills both have the same `scripts/`, `references/`, and `schemas/` directories as `tools/agent-collab/`. They intentionally do not contain `runs/`, `settings.local.json`, a nested `tools/agent-collab/` compatibility copy, or duplicated runtime resources at the Claude plugin root.
@@ -112,13 +113,13 @@ The prompt contract uses compact reusable blocks for structured output, groundin
 
 Runs are written under the active runtime data directory. In this repository that is `tools/agent-collab/runs/<run-id>/`. Installed packages do not write state into plugin code directories: Claude uses `${CLAUDE_PLUGIN_DATA}` when Claude exposes it, Codex plugin-cache installs use `${CODEX_HOME:-$HOME/.codex}/agent-collab`, and other installs fall back to `${XDG_STATE_HOME:-$HOME/.local/state}/agent-collab`. Set `AGENT_COLLAB_STATE_HOME` to override the data root. The `start` output is the source of truth for the exact run path.
 
-History is retained so interrupted runs can be recovered, peer failures can be debugged, and `result` can reconstruct complete host/peer/adjudicator artifacts after the visible terminal turn has moved on. Because those artifacts may include prompts, reports, stderr tails, and git snapshots, use `clear-history` to remove old terminal run artifacts when they are no longer useful. Active runs are preserved by default.
+History is retained so interrupted runs can be recovered, peer failures can be debugged, and `result` can reconstruct complete host/peer/adjudicator artifacts after the visible terminal turn has moved on. Because those artifacts may include prompts, reports, stderr tails, and workspace snapshots, use `clear-history` to remove old terminal run artifacts when they are no longer useful. Active runs are preserved by default.
 
 Important files:
 
 ```text
 host-request.json       Neutral request passed to the peer; run IDs are safe basenames only
-before.snapshot         Git snapshot before peer work
+before.snapshot         Workspace snapshot before peer work
 peer-process.json       Peer PID and run metadata
 host-first-pass.json    Host analysis written before reading peer output
 peer.raw.json           Raw Claude/Codex CLI output envelope for debugging
@@ -127,18 +128,20 @@ peer-report.json        Schema-validated peer report or structured peer failure
 claim-matrix.json       Host, peer, helper, and adjudicator claims grouped for verification when supplied
 adjudicator-report.json Advisory judge output, optional advisory claims, or advisory_pending marker
 host-result.json        Finish command summary
-after.snapshot          Git snapshot after finish
+after.snapshot          Workspace snapshot after finish
 state.json              Ignored recent-job ledger stored under runs/
 ```
 
 ## Permissions
 
-Agent Collab defaults to full capability because it is designed for high-trust local repositories. These are runtime peer-launch defaults, not committed project-level `.codex/` or `.claude/` host configuration. This repo intentionally ignores active `.codex/` and `.claude/` folders so local permission choices are not uploaded.
+Agent Collab defaults to full capability because it is designed for high-trust local repositories. This is a deliberate design choice: the peer and helper agents are given broad permission and full tool access by default so they can inspect, execute, research, and cross-check without artificial tool bottlenecks. That posture is intended to maximize review performance and finding quality in trusted workspaces. These are runtime peer-launch defaults, not committed project-level `.codex/` or `.claude/` host configuration. This repo intentionally ignores active `.codex/` and `.claude/` folders so local permission choices are not uploaded.
 
 Codex peer defaults:
 
 ```text
 --model gpt-5.5
+--ephemeral
+--cd <repo-root>
 --config model_reasoning_effort="xhigh"
 --config web_search="live"
 --sandbox danger-full-access
@@ -162,7 +165,7 @@ The runtime uses Claude Code's documented CLI flags rather than relying on `clau
 
 Web research is a shared Agent Collab capability, not a shared tool-list abstraction. `web_research=live` and `web_research=cached` map to Codex as `-c web_search="..."` and keep Claude `WebSearch`/`WebFetch` available. `web_research=disabled` maps to Codex as `web_search="disabled"` and removes or disallows Claude `WebSearch`/`WebFetch` when the installed Claude CLI supports the relevant tool flags.
 
-Full capability is for investigation and validation. It is not blanket permission to mutate. The default no-edit posture is prompt-level policy plus post-run git mutation detection, not a technical read-only sandbox. This is intentional because strict read-only modes can block ordinary investigation commands that write caches or temporary artifacts. The mutation check compares git status plus unstaged and staged diffs, but it is still detective, not preventive, and it does not cover ignored files or effects outside the target repository. Peer and helper agents are still instructed not to edit unless `edit_allowed=true` and the user explicitly delegated edits.
+Full capability is for investigation and validation. It is not blanket permission to mutate. The default no-edit posture is prompt-level policy plus post-run workspace mutation detection, not a technical read-only sandbox. This is intentional because strict read-only modes can block ordinary investigation commands that write caches or temporary artifacts. In git repos the mutation check compares git status plus unstaged and staged diffs. In non-git directories it falls back to a deterministic filesystem snapshot so Agent Collab remains fully functional. Runtime artifacts, local Agent Collab settings, host config folders, VCS metadata, and common cache/build directories are excluded so the tool does not flag its own output. The check is still detective, not preventive, and it does not cover excluded paths or effects outside the target directory. Peer and helper agents are still instructed not to edit unless `edit_allowed=true` and the user explicitly delegated edits.
 
 Peer runs use structured output as the machine interface. Claude peers return a JSON envelope; the runtime preserves that raw envelope as `peer.raw.json`, normalizes `structured_output` into `peer-report.json`, and validates the normalized report against `schemas/peer-report.schema.json`.
 If a CLI envelope contains prose before the JSON report, the runtime records the recovery in `peer-normalization.json` and extracts the first schema-valid report from the raw `result` text before declaring failure.
@@ -229,11 +232,12 @@ Restart Codex or Claude Code if a running session does not pick up changed skill
 Verify:
 
 ```bash
-repo_root=$(git rev-parse --show-toplevel)
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s tests -v
 PYTHONDONTWRITEBYTECODE=1 python -m py_compile \
   "$repo_root/tools/agent-collab/scripts/host.py" \
-  "$repo_root/tools/agent-collab/scripts/peer.py"
+  "$repo_root/tools/agent-collab/scripts/peer.py" \
+  "$repo_root/tools/agent-collab/scripts/snapshot.py"
 for f in "$repo_root"/tools/agent-collab/schemas/*.schema.json; do python -m json.tool "$f" >/dev/null; done
 ```
 
@@ -254,7 +258,7 @@ Do not copy `.codex/`, `.claude/`, `.agents/`, or `codex-skill/` from this repos
 Agent Collab can be configured with setup:
 
 ```bash
-repo_root=$(git rev-parse --show-toplevel)
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 python "$repo_root/tools/agent-collab/scripts/host.py" setup
 python "$repo_root/tools/agent-collab/scripts/host.py" setup --scope global
 python "$repo_root/tools/agent-collab/scripts/host.py" setup --reset local
@@ -301,6 +305,7 @@ Environment variables:
 - `CLAUDE_AGENT_COLLAB_TOOLS`: Claude peer tool access. `default` uses Claude Code's default/full tool set; custom values are passed through Claude Code `--tools`. When web research is enabled, custom lists automatically include `WebSearch` and `WebFetch`.
 - `CLAUDE_AGENT_COLLAB_MAX_BUDGET_USD`: Optional Claude peer budget cap. Defaults to `25.00` when supported by the local CLI.
 - `CLAUDE_AGENT_COLLAB_MAX_TURNS`: Optional Claude peer turn cap. Defaults to `50` when supported by the local CLI.
+- `AGENT_COLLAB_CLAUDE_ASSUME_FLAGS`: Set to `1`, `true`, or `yes` to treat documented Claude flags as supported without probing `claude --help`.
 - `AGENT_COLLAB_HISTORY_RETAINED_RUNS`: Number of terminal run artifact directories cleanup keeps. Defaults to `50`; use `0` to clear all terminal history when cleanup runs.
 - `AGENT_COLLAB_TIMEOUT_SECONDS`: Peer subprocess timeout. Defaults to `2700` seconds, or 45 minutes. Positive values below `2700` seconds are raised to `2700` so every agent run gets at least 45 minutes. The general rule is to wait until the peer responds; use `0` only when you intentionally want no subprocess timeout. This does not change Codex's background terminal polling model.
 - `AGENT_COLLAB_SAFE_MODE`: Opt into reduced-permission peer runs with `1`, `true`, `yes`, or `on`.
@@ -311,7 +316,7 @@ Environment variables:
 Start a run:
 
 ```bash
-repo_root=$(git rev-parse --show-toplevel)
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 brief_file=$(mktemp)
 printf '%s\n' "Review the current diff for correctness, security, and missing tests." > "$brief_file"
 python "$repo_root/tools/agent-collab/scripts/host.py" start \

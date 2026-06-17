@@ -21,6 +21,7 @@ CLAUDE_SKILL_ROOT = CLAUDE_PLUGIN_ROOT / "skills" / "agent-collab"
 PEER_RUNTIME = RUNTIME_ROOT / "scripts" / "peer.py"
 HOST_RUNTIME = RUNTIME_ROOT / "scripts" / "host.py"
 STATE_RUNTIME = RUNTIME_ROOT / "scripts" / "state.py"
+SNAPSHOT_RUNTIME = RUNTIME_ROOT / "scripts" / "snapshot.py"
 SCHEMA = RUNTIME_ROOT / "schemas" / "peer-report.schema.json"
 
 
@@ -42,6 +43,10 @@ def load_host_runtime():
 
 def load_state_runtime():
     return load_module(STATE_RUNTIME, "agent_collab_state_test")
+
+
+def load_snapshot_runtime():
+    return load_module(SNAPSHOT_RUNTIME, "agent_collab_snapshot_test")
 
 
 def request(**overrides):
@@ -714,6 +719,33 @@ class RuntimeContractTests(TestCase):
         self.assertEqual(result["error"]["kind"], "unexpected_working_tree_mutation")
         self.assertEqual(result["error"]["details"]["peer_report"]["error"]["kind"], "invalid_json")
 
+    def test_peer_mutation_detection_works_without_git_repo(self):
+        runtime = load_peer_runtime()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp) / "plain-project"
+            repo_root.mkdir()
+            target = repo_root / "target.txt"
+            target.write_text("before\n", encoding="utf-8")
+            completed = subprocess.CompletedProcess(["peer-cli"], 0, stdout=json.dumps(valid_peer_report()), stderr="")
+
+            def mutate_workspace(args, *_unused_args, **_unused_kwargs):
+                if args and args[0] == "git":
+                    return subprocess.CompletedProcess(args, 1, stdout="", stderr="")
+                target.write_text("after\n", encoding="utf-8")
+                return completed
+
+            command = runtime.PeerCommand(args=["peer-cli"], stdin="prompt")
+            with mock.patch.object(runtime, "build_peer_command", return_value=command):
+                with mock.patch.object(runtime.shutil, "which", return_value="/usr/bin/peer-cli"):
+                    with mock.patch.object(runtime.subprocess, "run", side_effect=mutate_workspace):
+                        result = runtime.invoke_peer(request(), repo_root, env={})
+
+        self.assertEqual(result["status"], "peer_failed")
+        self.assertEqual(result["error"]["kind"], "unexpected_working_tree_mutation")
+        self.assertEqual(result["error"]["details"]["snapshot_mode"], "filesystem")
+        self.assertIn("target.txt", result["error"]["details"]["changed_paths"])
+
     def test_claude_api_error_envelope_returns_peer_api_error(self):
         runtime = load_peer_runtime()
         envelope = {
@@ -870,9 +902,96 @@ class RuntimeContractTests(TestCase):
             host.run_snapshot(REPO_ROOT, output)
             text = output.read_text()
 
-        self.assertIn("agent_collab_git_snapshot_v1", text)
+        self.assertIn("agent_collab_workspace_snapshot_v1", text)
+        self.assertIn("mode=git", text)
         self.assertIn("-- status_porcelain_v1", text)
         self.assertIn("-- diff_name_status", text)
+
+    def test_filesystem_snapshot_detects_non_git_changes_and_ignores_runtime_artifacts(self):
+        snapshot = load_snapshot_runtime()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp) / "plain-project"
+            repo_root.mkdir()
+            tracked = repo_root / "tracked.txt"
+            tracked.write_text("before\n", encoding="utf-8")
+            run_dir = repo_root / "tools" / "agent-collab" / "runs" / "run-1"
+            run_dir.mkdir(parents=True)
+            (run_dir / "peer-report.json").write_text("artifact before\n", encoding="utf-8")
+
+            before = snapshot.mutation_snapshot(repo_root, ignored_paths=[run_dir])
+            tracked.write_text("after\n", encoding="utf-8")
+            (run_dir / "peer-report.json").write_text("artifact after\n", encoding="utf-8")
+            after = snapshot.mutation_snapshot(repo_root, ignored_paths=[run_dir])
+            diff = snapshot.diff_snapshots(before, after)
+
+        self.assertEqual(before["mode"], "filesystem")
+        self.assertNotEqual(before["digest"], after["digest"])
+        self.assertIn("tracked.txt", diff["changed_paths"])
+        self.assertNotIn("tools/agent-collab/runs/run-1/peer-report.json", diff["changed_paths"])
+
+    def test_filesystem_snapshot_detects_empty_directory_changes(self):
+        snapshot = load_snapshot_runtime()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp) / "plain-project"
+            repo_root.mkdir()
+
+            before = snapshot.mutation_snapshot(repo_root)
+            (repo_root / "empty-dir").mkdir()
+            after = snapshot.mutation_snapshot(repo_root)
+            diff = snapshot.diff_snapshots(before, after)
+
+        self.assertTrue(diff["changed"])
+        self.assertIn("empty-dir", diff["changed_paths"])
+
+    def test_git_snapshot_ignores_explicit_runtime_artifacts(self):
+        snapshot = load_snapshot_runtime()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp) / "git-project"
+            repo_root.mkdir()
+            subprocess.run(["git", "init"], cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            source = repo_root / "source.txt"
+            source.write_text("before\n", encoding="utf-8")
+            subprocess.run(["git", "add", "source.txt"], cwd=repo_root, check=True)
+            run_dir = repo_root / ".agent-collab-run"
+            run_dir.mkdir()
+
+            before = snapshot.mutation_snapshot(repo_root, ignored_paths=[run_dir])
+            (run_dir / "peer-report.json").write_text("artifact\n", encoding="utf-8")
+            after_artifact = snapshot.mutation_snapshot(repo_root, ignored_paths=[run_dir])
+            source.write_text("after\n", encoding="utf-8")
+            after_source = snapshot.mutation_snapshot(repo_root, ignored_paths=[run_dir])
+
+        self.assertEqual(before["mode"], "git")
+        self.assertEqual(before["digest"], after_artifact["digest"])
+        self.assertNotEqual(before["digest"], after_source["digest"])
+
+    def test_git_snapshot_changed_paths_preserve_first_path(self):
+        snapshot = load_snapshot_runtime()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp) / "git-project"
+            repo_root.mkdir()
+            subprocess.run(["git", "init"], cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            source = repo_root / "alpha.txt"
+            source.write_text("before\n", encoding="utf-8")
+            subprocess.run(["git", "add", "alpha.txt"], cwd=repo_root, check=True)
+            subprocess.run(
+                ["git", "-c", "user.name=Agent Collab", "-c", "user.email=agent@example.test", "commit", "-m", "init"],
+                cwd=repo_root,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+
+            before = snapshot.mutation_snapshot(repo_root)
+            source.write_text("after\n", encoding="utf-8")
+            after = snapshot.mutation_snapshot(repo_root)
+            diff = snapshot.diff_snapshots(before, after)
+
+        self.assertEqual(diff["changed_paths"], ["alpha.txt"])
 
 
 class HostRunnerTests(TestCase):
@@ -1201,16 +1320,18 @@ class HostRunnerTests(TestCase):
             process.pid = 12345
             repo_root = tmp_path / "repo"
             repo_root.mkdir()
-            host.write_settings_file(
-                host.default_local_settings_path(repo_root),
-                {
-                    "profile": "max",
-                    "max_local_subagents": 3,
-                    "local_subagents_allowed": False,
-                    "codex_model": "gpt-settings",
-                    "agent_timeout_seconds": "3600",
-                },
-            )
+            env = {"AGENT_COLLAB_STATE_HOME": str(tmp_path / "state")}
+            with mock.patch.dict(host.os.environ, env, clear=True):
+                host.write_settings_file(
+                    host.default_local_settings_path(repo_root),
+                    {
+                        "profile": "max",
+                        "max_local_subagents": 3,
+                        "local_subagents_allowed": False,
+                        "codex_model": "gpt-settings",
+                        "agent_timeout_seconds": "3600",
+                    },
+                )
 
             parser = host.build_parser()
             args = parser.parse_args(
@@ -1232,7 +1353,7 @@ class HostRunnerTests(TestCase):
                     str(repo_root),
                 ]
             )
-            with mock.patch.dict(host.os.environ, {}, clear=True):
+            with mock.patch.dict(host.os.environ, env, clear=True):
                 with mock.patch.object(host, "run_snapshot"):
                     with mock.patch.object(host.subprocess, "Popen", return_value=process) as popen:
                         with redirect_stdout(io.StringIO()):
@@ -1341,10 +1462,12 @@ class HostRunnerTests(TestCase):
             process.pid = 12345
             repo_root = tmp_path / "repo"
             repo_root.mkdir()
-            host.write_settings_file(
-                host.default_local_settings_path(repo_root),
-                {"agent_timeout_seconds": "0"},
-            )
+            env = {"AGENT_COLLAB_STATE_HOME": str(tmp_path / "state")}
+            with mock.patch.dict(host.os.environ, env, clear=True):
+                host.write_settings_file(
+                    host.default_local_settings_path(repo_root),
+                    {"agent_timeout_seconds": "0"},
+                )
 
             parser = host.build_parser()
             args = parser.parse_args(
@@ -1366,7 +1489,7 @@ class HostRunnerTests(TestCase):
                     str(repo_root),
                 ]
             )
-            with mock.patch.dict(host.os.environ, {}, clear=True):
+            with mock.patch.dict(host.os.environ, env, clear=True):
                 with mock.patch.object(host, "run_snapshot"):
                     with mock.patch.object(host.subprocess, "Popen", return_value=process):
                         with redirect_stdout(io.StringIO()):
@@ -1511,6 +1634,28 @@ class HostRunnerTests(TestCase):
             with mock.patch.object(host, "run_snapshot"):
                 with self.assertRaises(SystemExit):
                     host.finish(args)
+
+    def test_claim_matrix_validator_rejects_unknown_top_level_keys(self):
+        host = load_host_runtime()
+        report = {"schema_version": "1.0", "run_id": "agent-collab-test", "claims": [], "extra": True}
+
+        with self.assertRaises(host.ArtifactValidationError):
+            host.validate_claim_matrix(report, request())
+
+    def test_adjudicator_claim_validator_rejects_unknown_claim_keys(self):
+        host = load_host_runtime()
+        report = host.default_adjudicator_report(request(), valid_peer_report())
+        report["claims"] = [
+            {
+                "claim": "Adjudicator claim",
+                "status": "confirmed",
+                "evidence": "evidence",
+                "extra": "not allowed",
+            }
+        ]
+
+        with self.assertRaises(host.ArtifactValidationError):
+            host.validate_adjudicator_report(report, request())
 
     def test_finish_rejects_invalid_adjudicator_verdict(self):
         host = load_host_runtime()
@@ -1714,6 +1859,39 @@ class HostRunnerTests(TestCase):
             self.assertEqual(parsed["status"], "peer_running")
             self.assertEqual(parsed["phase"], "waiting_for_peer")
             self.assertFalse((run_dir / "peer-report.json").exists())
+            snapshot.assert_not_called()
+
+    def test_finish_does_not_normalize_nonempty_unstable_report_while_peer_alive(self):
+        host = load_host_runtime()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            run_root = Path(tmp) / "runs"
+            (run_dir / "host-request.json").write_text(json.dumps(request()), encoding="utf-8")
+            (run_dir / "peer-process.json").write_text(
+                json.dumps({"pid": 12345, "repo_root": str(REPO_ROOT), "run_id": "agent-collab-test", "peer_timeout_seconds": 2700}),
+                encoding="utf-8",
+            )
+            (run_dir / "host-first-pass.json").write_text(
+                json.dumps({"schema_version": "1.0", "run_id": "agent-collab-test", "summary": "Independent host pass.", "claims": []}),
+                encoding="utf-8",
+            )
+            partial_report = '{"schema_version": "1.0",'
+            (run_dir / "peer-report.json").write_text(partial_report, encoding="utf-8")
+
+            parser = host.build_parser()
+            args = parser.parse_args(["finish", str(run_dir), "--timeout-seconds", "0.5", "--run-root", str(run_root)])
+            output = io.StringIO()
+            with mock.patch.object(host, "process_alive", return_value=True):
+                with mock.patch.object(host.time, "time", side_effect=[0, 0.1, 0.2, 2]):
+                    with mock.patch.object(host, "run_snapshot") as snapshot:
+                        with redirect_stdout(output):
+                            result = host.finish(args)
+
+            self.assertEqual(result, 1)
+            parsed = json.loads(output.getvalue())
+            self.assertEqual(parsed["status"], "peer_running")
+            self.assertEqual((run_dir / "peer-report.json").read_text(encoding="utf-8"), partial_report)
             snapshot.assert_not_called()
 
     def test_finish_recovers_from_raw_when_peer_report_is_parser_failure_wrapper(self):
@@ -2177,6 +2355,63 @@ class SkillMetadataTests(TestCase):
             self.assertIn(str(dest), completed.stdout)
             self.assertFalse(dest.exists())
 
+    def test_codex_skill_installer_copies_skill_contents_without_nested_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "agent-collab"
+            completed = subprocess.run(
+                [str(REPO_ROOT / "scripts" / "install-codex-skill.sh"), "--dest", str(dest)],
+                cwd=REPO_ROOT,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertTrue((dest / "SKILL.md").exists())
+            self.assertTrue((dest / "scripts" / "snapshot.py").exists())
+            self.assertFalse((dest / "agent-collab").exists())
+
+    def test_claude_plugin_installer_copies_plugin_contents_without_nested_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "agent-collab"
+            completed = subprocess.run(
+                [str(REPO_ROOT / "scripts" / "install-claude-plugin.sh"), "--dest", str(dest)],
+                cwd=REPO_ROOT,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertTrue((dest / ".claude-plugin" / "plugin.json").exists())
+            self.assertTrue((dest / "skills" / "agent-collab" / "scripts" / "snapshot.py").exists())
+            self.assertFalse((dest / "agent-collab").exists())
+
+    def test_skill_installers_reject_source_package_destinations(self):
+        cases = [
+            ("install-codex-skill.sh", CODEX_SKILL_ROOT),
+            ("install-claude-plugin.sh", CLAUDE_PLUGIN_ROOT),
+        ]
+        for script_name, dest in cases:
+            completed = subprocess.run(
+                [str(REPO_ROOT / "scripts" / script_name), "--dest", str(dest), "--dry-run"],
+                cwd=REPO_ROOT,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertNotEqual(completed.returncode, 0, script_name)
+            self.assertIn("refusing", completed.stderr.lower())
+
+    def test_skill_installers_use_mktemp_and_cleanup_traps(self):
+        for script_name in ("install-codex-skill.sh", "install-claude-plugin.sh"):
+            text = (REPO_ROOT / "scripts" / script_name).read_text(encoding="utf-8")
+            self.assertIn("mktemp", text)
+            self.assertIn("trap ", text)
+
     def test_docs_use_peer_first_unpolluted_ultra_flow(self):
         docs = [
             REPO_ROOT / "README.md",
@@ -2257,7 +2492,17 @@ class SkillMetadataTests(TestCase):
         self.assertIn("scripts/", readme)
         self.assertIn("references/", readme)
         self.assertIn("schemas/", readme)
-        self.assertIn("prompt-level policy plus post-run git mutation detection", readme)
+        self.assertIn("prompt-level policy plus post-run workspace mutation detection", readme)
+
+    def test_readme_documents_git_and_non_git_operation(self):
+        readme = (REPO_ROOT / "README.md").read_text()
+
+        self.assertIn("git rev-parse --show-toplevel 2>/dev/null || pwd", readme)
+        self.assertIn("workspace snapshot", readme)
+        self.assertIn("non-git", readme)
+        self.assertIn("--ephemeral", readme)
+        self.assertIn("--cd", readme)
+        self.assertIn("AGENT_COLLAB_CLAUDE_ASSUME_FLAGS", readme)
         self.assertIn("not a technical read-only sandbox", readme)
         self.assertIn("ordinary unqualified host CLI calls", readme)
         self.assertIn("not a sandbox", readme)
@@ -2339,6 +2584,9 @@ class SkillMetadataTests(TestCase):
             self.assertIn("Do not invoke Agent Collab", text)
             self.assertIn("$agent-collab", text)
             self.assertIn("/agent-collab", text)
+
+        adjudicator = (CLAUDE_PLUGIN_ROOT / "agents" / "agent-collab-adjudicator.md").read_text()
+        self.assertIn("must contain only `claim`, `status`, and `evidence`", adjudicator)
 
     def test_schema_files_are_valid_json(self):
         for schema in (RUNTIME_ROOT / "schemas").glob("*.schema.json"):

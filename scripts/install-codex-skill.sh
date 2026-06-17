@@ -25,6 +25,14 @@ docs_root="$HOME/.agents/skills"
 codex_home_root="${CODEX_HOME:-$HOME/.codex}/skills"
 dest=""
 dry_run=0
+tmp_dir=""
+
+cleanup() {
+  if [[ -n "${tmp_dir:-}" && -d "$tmp_dir" ]]; then
+    rm -rf "$tmp_dir"
+  fi
+}
+trap cleanup EXIT
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -62,8 +70,6 @@ if [[ -z "$dest" ]]; then
   dest="$docs_root/agent-collab"
 fi
 
-"$repo_root/scripts/sync-packages.sh" --codex-only --check >/dev/null
-
 source_dir="$repo_root/codex-plugin/agent-collab/skills/agent-collab"
 if [[ ! -f "$source_dir/SKILL.md" ]]; then
   echo "missing Codex skill source: $source_dir/SKILL.md" >&2
@@ -75,18 +81,41 @@ if [[ "$(basename "$dest")" != "agent-collab" ]]; then
   exit 2
 fi
 
+resolve_path() {
+  python3 - "$1" <<'PY'
+from pathlib import Path
+import sys
+print(Path(sys.argv[1]).expanduser().resolve(strict=False))
+PY
+}
+
+dest_abs="$(resolve_path "$dest")"
+repo_abs="$(resolve_path "$repo_root")"
+source_abs="$(resolve_path "$source_dir")"
+home_abs="$(resolve_path "$HOME")"
+if [[ -z "$dest_abs" || "$dest_abs" == "/" || "$dest_abs" == "$home_abs" || "$dest_abs" == "$repo_abs" ]]; then
+  echo "refusing unsafe destination: $dest" >&2
+  exit 2
+fi
+if [[ "$dest_abs" == "$source_abs" || "$dest_abs" == "$source_abs"/* ]]; then
+  echo "refusing to install over source package: $dest" >&2
+  exit 2
+fi
+
+"$repo_root/scripts/sync-packages.sh" --codex-only --check >/dev/null
+
 parent_dir="$(dirname "$dest")"
-tmp_dir="$parent_dir/.agent-collab.tmp.$$"
 if [[ "$dry_run" -eq 1 ]]; then
   echo "$source_dir -> $dest"
   exit 0
 fi
 mkdir -p "$parent_dir"
-rm -rf "$tmp_dir"
-cp -a "$source_dir" "$tmp_dir"
+tmp_dir="$(mktemp -d "$parent_dir/.agent-collab.tmp.XXXXXX")"
+cp -a "$source_dir/." "$tmp_dir"
 rm -rf "$tmp_dir/runs" "$tmp_dir/settings.local.json"
 find "$tmp_dir" -type d -name __pycache__ -prune -exec rm -rf {} +
 rm -rf "$dest"
 mv "$tmp_dir" "$dest"
+tmp_dir=""
 
 echo "$dest"

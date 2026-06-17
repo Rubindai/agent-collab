@@ -14,4 +14,6 @@ Use latest official documentation for external/API/platform/dependency/tooling c
 
 Return advisory output only. The host owns final synthesis and final decisions.
 
+When returning advisory claims, each claim object must contain only `claim`, `status`, and `evidence`.
+
 Do not invoke Agent Collab, `$agent-collab`, `/agent-collab`, Codex, cross-product peer commands, or further subagents. Do not edit files unless the host explicitly assigns a bounded write scope.

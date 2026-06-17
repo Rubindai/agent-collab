@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import shutil
@@ -145,6 +146,17 @@ def runtime_dir() -> Path:
 
 def resource_root() -> Path:
     return runtime_dir().parent
+
+
+def load_snapshot_runtime() -> Any:
+    path = runtime_dir() / "snapshot.py"
+    spec = importlib.util.spec_from_file_location("agent_collab_snapshot", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load snapshot runtime: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def default_schema_path() -> Path:
@@ -624,28 +636,45 @@ def git_status(repo_root: Path) -> str:
     return completed.stdout
 
 
-def git_mutation_snapshot(repo_root: Path) -> dict[str, str]:
-    snapshot: dict[str, str] = {}
-    commands = {
-        "status": ["git", "status", "--porcelain=v1", "--untracked-files=all"],
-        "diff": ["git", "diff", "--binary", "--no-ext-diff"],
-        "diff_cached": ["git", "diff", "--cached", "--binary", "--no-ext-diff"],
-    }
-    for name, command in commands.items():
-        try:
-            completed = subprocess.run(
-                command,
-                cwd=repo_root,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-            )
-        except FileNotFoundError:
-            snapshot[name] = ""
-        else:
-            snapshot[name] = completed.stdout
-    return snapshot
+def ignored_snapshot_paths(
+    env: dict[str, str],
+    raw_output_path: Path | None = None,
+    normalization_output_path: Path | None = None,
+) -> list[Path]:
+    paths: list[Path] = []
+    run_dir = env.get("AGENT_COLLAB_RUN_DIR", "").strip()
+    if run_dir:
+        paths.append(Path(run_dir))
+    extra = env.get("AGENT_COLLAB_IGNORED_PATHS", "").strip()
+    if extra:
+        paths.extend(Path(item) for item in extra.split(os.pathsep) if item)
+    if raw_output_path is not None:
+        paths.append(raw_output_path)
+    if normalization_output_path is not None:
+        paths.append(normalization_output_path)
+    return paths
+
+
+def git_mutation_snapshot(repo_root: Path, ignored_paths: list[Path] | None = None) -> dict[str, Any]:
+    snapshot = load_snapshot_runtime()
+    return snapshot.mutation_snapshot(repo_root, ignored_paths=ignored_paths)
+
+
+def mutation_error_details(before: dict[str, Any], after: dict[str, Any], peer_report: dict[str, Any]) -> dict[str, Any]:
+    try:
+        details = load_snapshot_runtime().diff_snapshots(before, after)
+    except Exception:
+        details = {
+            "changed": before != after,
+            "snapshot_mode": str(after.get("mode") or before.get("mode") or "unknown"),
+            "before_digest": before.get("digest", ""),
+            "after_digest": after.get("digest", ""),
+            "changed_path_count": 0,
+            "changed_paths": [],
+            "changed_paths_truncated": False,
+        }
+    details["peer_report"] = peer_report
+    return details
 
 
 def make_host_cli_guard(tmp: Path, host: str) -> Path:
@@ -883,20 +912,17 @@ def invoke_peer(
     effective_env["AGENT_COLLAB_WEB_RESEARCH"] = request["web_research"]
 
     schema_path = default_schema_path()
-    before_snapshot = git_mutation_snapshot(repo_root)
+    snapshot_ignored_paths = ignored_snapshot_paths(effective_env, raw_output_path, normalization_output_path)
+    before_snapshot = git_mutation_snapshot(repo_root, snapshot_ignored_paths)
 
     def with_mutation_check(report: dict[str, Any]) -> dict[str, Any]:
-        after_snapshot = git_mutation_snapshot(repo_root)
+        after_snapshot = git_mutation_snapshot(repo_root, snapshot_ignored_paths)
         if not request.get("edit_allowed", False) and after_snapshot != before_snapshot:
             return failure(
                 "unexpected_working_tree_mutation",
                 "Peer changed the working tree while edit_allowed=false",
                 request,
-                {
-                    "before": before_snapshot,
-                    "after": after_snapshot,
-                    "peer_report": report,
-                },
+                mutation_error_details(before_snapshot, after_snapshot, report),
             )
         return report
 
