@@ -119,6 +119,7 @@ class RuntimeContractTests(TestCase):
         expected_roles = {
             "review": "You are an independent senior software reviewer.",
             "audit": "You are an independent security and reliability auditor.",
+            "brainstorm": "You are an independent technical ideation partner focused on repo-grounded architecture and design options.",
             "research": "You are an independent technical researcher.",
             "design": "You are an independent software architect.",
             "plan": "You are an independent implementation planner.",
@@ -137,6 +138,26 @@ class RuntimeContractTests(TestCase):
                 prompt = runtime.build_prompt(req, REPO_ROOT, SCHEMA)
                 role_block = prompt.split("<role>\n", 1)[1].split("\n</role>", 1)[0]
                 self.assertIn(role, role_block)
+
+    def test_host_parser_accepts_brainstorm_mode(self):
+        host = load_host_runtime()
+
+        parser = host.build_parser()
+        args = parser.parse_args(
+            [
+                "start",
+                "--host",
+                "codex",
+                "--mode",
+                "brainstorm",
+                "--target",
+                "approach options",
+                "--brief-file",
+                "/tmp/brief.txt",
+            ]
+        )
+
+        self.assertEqual(args.mode, "brainstorm")
 
     def test_agent_timeout_defaults_to_45_minutes_and_floors_at_45_minutes(self):
         runtime = load_peer_runtime()
@@ -628,6 +649,13 @@ class RuntimeContractTests(TestCase):
         )
         with self.assertRaises(runtime.PeerReportValidationError):
             runtime.validate_peer_report(malformed)
+
+    def test_schema_mode_enums_include_brainstorm(self):
+        host_request_schema = json.loads((RUNTIME_ROOT / "schemas" / "host-request.schema.json").read_text())
+        peer_report_schema = json.loads((RUNTIME_ROOT / "schemas" / "peer-report.schema.json").read_text())
+
+        self.assertIn("brainstorm", host_request_schema["properties"]["mode"]["enum"])
+        self.assertIn("brainstorm", peer_report_schema["properties"]["mode"]["enum"])
 
     def test_git_snapshot_outputs_parseable_sections(self):
         host = load_host_runtime()
@@ -1549,6 +1577,36 @@ class SkillMetadataTests(TestCase):
             self.assertIn("latest official documentation", text, str(doc))
             self.assertIn("research online extensively", text, str(doc))
             self.assertNotIn("There is no separate judge agent", text)
+
+    def test_brainstorm_mode_is_documented_with_narrow_boundaries(self):
+        readme = (REPO_ROOT / "README.md").read_text()
+        codex_skill = (REPO_ROOT / "codex-skill" / "agent-collab" / "SKILL.md").read_text()
+        claude_skill = (REPO_ROOT / ".claude" / "skills" / "agent-collab" / "SKILL.md").read_text()
+
+        for text in (readme, codex_skill, claude_skill):
+            self.assertIn("brainstorm", text)
+            self.assertIn("repo-grounded architecture brainstorming", text)
+            self.assertIn("technical design ideation", text)
+            self.assertIn("architecture tradeoffs", text)
+            self.assertIn("casual brainstorming", text)
+            self.assertIn("simple idea generation", text)
+
+        self.assertIn("`brainstorm`: divergent repo-grounded option generation", readme)
+        self.assertIn("`research`: source-backed facts", readme)
+        self.assertIn("`design`: converge on one architecture", readme)
+        self.assertIn("`plan`: implementation sequence", readme)
+
+    def test_peer_guidance_distinguishes_brainstorm_research_design_and_plan(self):
+        peer_only = (RUNTIME_ROOT / "references" / "peer-only.md").read_text()
+
+        self.assertIn(
+            "`brainstorm`: generate multiple viable repo-grounded technical options, compare tradeoffs and decision criteria, surface unknowns, and recommend the next direction without turning it into a detailed architecture or implementation plan unless asked.",
+            peer_only,
+        )
+        self.assertIn("`research`: gather source-backed facts and current external evidence", peer_only)
+        self.assertIn("`design`: converge on one repo-grounded architecture", peer_only)
+        self.assertIn("`plan`: produce an implementation sequence", peer_only)
+        self.assertIn("`plan-critique`: check ordering, assumptions, missing steps, rollback/verification gaps, and readiness", peer_only)
 
     def test_readme_reflects_current_architecture(self):
         readme = (REPO_ROOT / "README.md").read_text()

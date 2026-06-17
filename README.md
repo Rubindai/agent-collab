@@ -9,11 +9,21 @@ The default profile is `ultra`: maximum capability, full repo/tool/network acces
 Use Agent Collab for high-stakes work where a second independent AI pass is worth the cost:
 
 - code review, security audit, and risky implementation verification
-- plan critique, design debate, and architecture tradeoffs
+- plan critique, repo-grounded architecture brainstorming, technical design ideation, design debate, and architecture tradeoffs
 - debugging, migrations, research, and test strategy
 - any task where the user asks for Claude+Codex cross-checking
 
+Avoid using Agent Collab for casual brainstorming, naming, simple idea generation, routine Q&A, and low-risk questions where a second independent pass adds little value.
+
 The host remains the final decision maker. Peer, helper, and adjudicator reports are evidence, not authority.
+
+Mode boundaries:
+
+- `brainstorm`: divergent repo-grounded option generation. Generate 3-5 viable technical approaches, compare tradeoffs, constraints, unknowns, risks, and decision criteria, then recommend a next direction without producing a full architecture spec or implementation plan unless asked.
+- `research`: source-backed facts and current external evidence.
+- `design`: converge on one architecture with repo-grounded constraints and rationale.
+- `plan`: implementation sequence after the direction is chosen.
+- `plan-critique`: readiness review of an existing plan.
 
 ## Repo Layout
 

@@ -19,8 +19,11 @@ Follow these rules:
 Mode emphasis:
 
 - `review` and `audit`: prioritize correctness, security, regressions, missing tests, and concrete file references.
-- `research` and `design`: provide alternative framing, tradeoffs, repo-grounded constraints, and source-backed claims.
-- `plan` and `plan-critique`: check ordering, assumptions, missing steps, rollback/verification gaps, and readiness.
+- `brainstorm`: generate multiple viable repo-grounded technical options, compare tradeoffs and decision criteria, surface unknowns, and recommend the next direction without turning it into a detailed architecture or implementation plan unless asked.
+- `research`: gather source-backed facts and current external evidence, especially when external/API/platform/dependency/tooling claims could have changed.
+- `design`: converge on one repo-grounded architecture with constraints, alternatives considered, and decision rationale.
+- `plan`: produce an implementation sequence with ordering, dependencies, tests, and rollback considerations.
+- `plan-critique`: check ordering, assumptions, missing steps, rollback/verification gaps, and readiness.
 - `debug`: identify likely root causes, reproduction gaps, and evidence needed to prove the diagnosis.
 - `migration`: check inventory completeness, sequencing risk, compatibility, and rollback.
 - `test-strategy`: map behavior to test gaps and distinguish real gaps from speculative coverage.

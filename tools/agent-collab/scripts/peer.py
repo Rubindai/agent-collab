@@ -16,6 +16,7 @@ ORIGINS = {"claude", "codex"}
 MODES = {
     "review",
     "audit",
+    "brainstorm",
     "research",
     "design",
     "plan",
@@ -99,6 +100,7 @@ CLAUDE_DOCUMENTED_FLAGS = {
 ROLE_BY_MODE = {
     "review": "You are an independent senior software reviewer.",
     "audit": "You are an independent security and reliability auditor.",
+    "brainstorm": "You are an independent technical ideation partner focused on repo-grounded architecture and design options.",
     "research": "You are an independent technical researcher.",
     "design": "You are an independent software architect.",
     "plan": "You are an independent implementation planner.",

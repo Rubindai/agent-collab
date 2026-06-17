@@ -19,6 +19,7 @@ ORIGINS = {"claude", "codex"}
 MODES = {
     "review",
     "audit",
+    "brainstorm",
     "research",
     "design",
     "plan",
