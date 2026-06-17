@@ -1,0 +1,32 @@
+{
+  "name": "agent-collab",
+  "version": "0.1.0",
+  "description": "Repo-grounded Claude and Codex collaboration workflow with independent peer verification, helper agents, and synthesis support.",
+  "author": {
+    "name": "Agent Collab"
+  },
+  "keywords": [
+    "agent-collaboration",
+    "code-review",
+    "codex",
+    "claude"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Agent Collab",
+    "shortDescription": "Independent Claude/Codex review and verification.",
+    "longDescription": "Run peer-first Claude and Codex collaboration for repo-grounded code review, security audits, plan critique, design tradeoffs, debugging, research, test strategy, and risky implementation verification.",
+    "developerName": "Agent Collab",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Use Agent Collab to review this diff.",
+      "Use Agent Collab to critique this plan.",
+      "Use Agent Collab to verify this fix."
+    ]
+  }
+}

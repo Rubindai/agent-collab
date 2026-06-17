@@ -19,6 +19,9 @@ htmlcov/
 .DS_Store
 .vscode/
 .idea/
+.agents/
+.codex/
+.claude/
 
 # Logs and temporary files
 *.log
@@ -29,6 +32,12 @@ temp/
 tools/agent-collab/runs/*
 !tools/agent-collab/runs/.gitkeep
 tools/agent-collab/settings.local.json
-codex-skill/agent-collab/runs/*
-!codex-skill/agent-collab/runs/.gitkeep
-codex-skill/agent-collab/settings.local.json
+codex-plugin/agent-collab/skills/agent-collab/runs/*
+!codex-plugin/agent-collab/skills/agent-collab/runs/.gitkeep
+codex-plugin/agent-collab/skills/agent-collab/settings.local.json
+claude-plugin/agent-collab/skills/agent-collab/runs/*
+!claude-plugin/agent-collab/skills/agent-collab/runs/.gitkeep
+claude-plugin/agent-collab/skills/agent-collab/settings.local.json
+
+# Legacy/generated package paths that must not be uploaded
+codex-skill/

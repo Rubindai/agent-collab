@@ -5,7 +5,7 @@ usage() {
   cat <<'USAGE'
 Usage: scripts/install-codex-skill.sh [--skills-root DIR | --dest DIR | --codex-home-path]
 
-Installs the packaged Codex Agent Collab skill globally.
+Installs the Codex Agent Collab skill from the packaged Codex plugin.
 
 Options:
   --skills-root DIR   Install as DIR/agent-collab.
@@ -55,9 +55,9 @@ if [[ -z "$dest" ]]; then
   dest="$docs_root/agent-collab"
 fi
 
-"$repo_root/scripts/sync-codex-skill.sh" >/dev/null
+"$repo_root/scripts/sync-packages.sh" --codex-only >/dev/null
 
-source_dir="$repo_root/codex-skill/agent-collab"
+source_dir="$repo_root/codex-plugin/agent-collab/skills/agent-collab"
 if [[ ! -f "$source_dir/SKILL.md" ]]; then
   echo "missing Codex skill source: $source_dir/SKILL.md" >&2
   exit 1
@@ -75,9 +75,5 @@ rm -rf "$tmp_dir"
 cp -a "$source_dir" "$tmp_dir"
 rm -rf "$dest"
 mv "$tmp_dir" "$dest"
-
-if [[ -d "$repo_root/.agents/skills/agent-collab" ]]; then
-  echo "warning: repo-local Codex skill still exists at .agents/skills/agent-collab" >&2
-fi
 
 echo "$dest"

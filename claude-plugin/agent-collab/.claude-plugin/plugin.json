@@ -1,0 +1,15 @@
+{
+  "name": "agent-collab",
+  "displayName": "Agent Collab",
+  "version": "0.1.0",
+  "description": "Repo-grounded Claude and Codex collaboration workflow with independent peer verification, helper agents, and synthesis support.",
+  "author": {
+    "name": "Agent Collab"
+  },
+  "keywords": [
+    "agent-collaboration",
+    "code-review",
+    "codex",
+    "claude"
+  ]
+}

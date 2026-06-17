@@ -28,11 +28,13 @@ Mode boundaries:
 ## Repo Layout
 
 ```text
-codex-skill/agent-collab/           Packaged Codex skill source for global install
-.claude/skills/agent-collab/        Claude Code repo-local skill
-.codex/config.toml                  Codex max-capability defaults
-.codex/agents/                      Codex host-local helper and adjudicator agents
-.claude/agents/                     Claude host-local helper and adjudicator agents
+codex-plugin/agent-collab/          Packaged Codex plugin source
+  .codex-plugin/plugin.json         Codex plugin manifest
+  skills/agent-collab/              Codex skill bundled by the plugin
+claude-plugin/agent-collab/         Packaged Claude Code plugin source
+  .claude-plugin/plugin.json        Claude plugin manifest
+  skills/agent-collab/              Claude skill bundled by the plugin
+  agents/                           Claude helper agents bundled by the plugin
 tools/agent-collab/                 Shared runtime, prompts, schemas, and run artifacts
 scripts/                            Sync and install helpers
 tests/test_agent_collab_runtime.py  Runtime and metadata tests
@@ -55,9 +57,9 @@ Runtime entrypoints:
 - `tools/agent-collab/scripts/peer.py`: invokes the opposite product once, preserves raw output, normalizes the report, and returns schema-validated JSON.
 - `tools/agent-collab/scripts/state.py`: keeps a local ignored job ledger for status, result, cancellation, and cleanup commands. The ledger always keeps active jobs and prunes older terminal jobs toward a 50-entry retained history; `status` shows the newest 8 by default and `status --all` shows all retained jobs.
 
-The packaged Codex skill has the same `scripts/`, `references/`, and `schemas/` directories at `codex-skill/agent-collab/`. It does not contain a nested `tools/agent-collab/` compatibility copy.
+The packaged Codex and Claude plugin skills both have the same `scripts/`, `references/`, and `schemas/` directories as `tools/agent-collab/`. Neither package contains a nested `tools/agent-collab/` compatibility copy, and the Claude plugin root does not duplicate runtime resources outside `skills/agent-collab/`.
 
-When you modify `tools/agent-collab/`, run `scripts/sync-codex-skill.sh` so the packaged Codex skill copy stays in sync.
+When you modify `tools/agent-collab/`, run `scripts/sync-packages.sh` so the packaged Codex and Claude skill copies stay in sync.
 
 ## Usage
 
@@ -78,7 +80,7 @@ Use $agent-collab to review the current diff.
 From Claude Code:
 
 ```text
-/agent-collab review the current diff
+/agent-collab:agent-collab review the current diff
 ```
 
 Claude may also invoke the skill implicitly when the request matches its description and `when_to_use` metadata. The Claude skill intentionally does not set `disable-model-invocation: true`.
@@ -91,7 +93,7 @@ Claude may also invoke the skill implicitly when the request matches its descrip
 4. The peer receives only the neutral brief, target, constraints, edit policy, and output schema.
 5. While the peer runs, the host performs independent analysis.
 6. All agents use latest official documentation for external/API/platform/dependency/tooling claims and research online extensively when current external facts could affect the answer.
-7. In `ultra`, the host uses local helper agents for independent lenses such as mapper, reviewer, researcher, architect, security-auditor, debugger, test-strategist, and verifier.
+7. In `ultra`, Claude hosts can use the helper agents packaged with the Claude plugin. Codex hosts use available host-local subagents or built-in Codex agents with independent lens prompts for mapping, review, research, architecture, security, debugging, test strategy, and verification.
 8. Do not read peer output until independent host work is complete. The host writes `host-first-pass.json` before reading `peer-report.json`.
 9. `finish` is the normal synchronization point after `host-first-pass.json`: it waits responsively for peer artifacts, validates `peer-report.json`, builds a claim matrix, and avoids repeated host-visible status polling.
 10. The host runs an advisory adjudicator.
@@ -131,23 +133,17 @@ state.json              Ignored recent-job ledger stored under runs/
 
 ## Permissions
 
-Agent Collab defaults to full capability because it is designed for high-trust local repositories.
+Agent Collab defaults to full capability because it is designed for high-trust local repositories. These are runtime peer-launch defaults, not committed project-level `.codex/` or `.claude/` host configuration. This repo intentionally ignores active `.codex/` and `.claude/` folders so local permission choices are not uploaded.
 
-Codex defaults in `.codex/config.toml`:
+Codex peer defaults:
 
-```toml
-model = "gpt-5.5"
-model_reasoning_effort = "xhigh"
-model_verbosity = "high"
-sandbox_mode = "danger-full-access"
-approval_policy = "never"
-web_search = "live"
-
-[agents]
-max_threads = 8
-max_depth = 1
-# 45 minutes; Agent Collab agent timeouts must stay at or above 2700 seconds.
-job_max_runtime_seconds = 2700
+```text
+--model gpt-5.5
+--config model_reasoning_effort="xhigh"
+--config web_search="live"
+--sandbox danger-full-access
+--ask-for-approval never when supported
+--dangerously-bypass-approvals-and-sandbox as fallback on older compatible Codex CLIs
 ```
 
 Claude peer defaults:
@@ -197,19 +193,35 @@ peer -> Agent Collab
 peer local subagent -> host CLI
 ```
 
-The runtime sets guard environment variables and prepends a run-local `bin/` directory to `PATH` so a peer cannot call the host CLI. Local subagent depth is capped by prompt and agent configuration; Claude helper agents disallow nested `Task`, and Codex config keeps `agents.max_depth = 1`.
+The runtime sets guard environment variables and prepends a run-local `bin/` directory to `PATH` so a peer cannot call the host CLI. Local subagent depth is capped by prompt and agent configuration; packaged Claude helper agents disallow nested `Task`, and Codex hosts should keep subagent depth at 1 in their user or project config when using custom helper agents.
 
 ## Install In This Repo
 
-Install the Codex skill globally:
+Install or validate the Codex plugin package:
+
+```bash
+scripts/install-codex-plugin.sh --dry-run
+```
+
+The Codex plugin installer copies `codex-plugin/agent-collab` to `$HOME/plugins/agent-collab` and creates or updates `$HOME/.agents/plugins/marketplace.json` with a local marketplace entry when run without `--dry-run`.
+
+Install the Codex skill directly for sessions that still load user skills without plugin installation:
 
 ```bash
 scripts/install-codex-skill.sh
 ```
 
-The installer defaults to the documented user skill path: `$HOME/.agents/skills/agent-collab`.
+The direct skill installer copies from `codex-plugin/agent-collab/skills/agent-collab` and defaults to the documented user skill path: `$HOME/.agents/skills/agent-collab`.
 
-The repository intentionally does not keep `.agents/skills/agent-collab`, so Codex will not see both a global and repo-local skill with the same name.
+Install the Claude plugin as a skills-directory plugin:
+
+```bash
+scripts/install-claude-plugin.sh
+```
+
+The Claude installer defaults to `$HOME/.claude/skills/agent-collab`. It copies the packaged plugin source, including `.claude-plugin/plugin.json`, `skills/agent-collab/SKILL.md`, helper agents, and bundled runtime resources.
+
+The repository intentionally does not keep `.agents/`, `.codex/`, `.claude/`, or `codex-skill/`, so host-local configuration and legacy duplicate package paths do not leak into source control.
 
 Restart Codex or Claude Code if a running session does not pick up changed skill or agent files.
 
@@ -226,27 +238,15 @@ for f in "$repo_root"/tools/agent-collab/schemas/*.schema.json; do python -m jso
 
 ## Install Into Another Repo
 
-Install or refresh the global Codex skill:
+Install or refresh the Codex and Claude packages from this repository:
 
 ```bash
+scripts/install-codex-plugin.sh --dry-run
 scripts/install-codex-skill.sh
+scripts/install-claude-plugin.sh
 ```
 
-Copy Claude/runtime files into the target repo:
-
-```bash
-target=/path/to/target-repo
-rsync -a .claude tools "$target"/
-```
-
-Copy Codex helper agents and merge config:
-
-```bash
-mkdir -p "$target/.codex/agents"
-cp .codex/agents/agent-collab-*.toml "$target/.codex/agents/"
-```
-
-If the target repo already has `.codex/config.toml`, merge the Agent Collab settings instead of overwriting it.
+Do not copy `.codex/`, `.claude/`, `.agents/`, or `codex-skill/` from this repository into another repo. Those directories are active host configuration or legacy generated package paths, not Agent Collab package source.
 
 ## Runtime Configuration
 
@@ -371,17 +371,20 @@ python "$repo_root/tools/agent-collab/scripts/host.py" doctor
 Use this loop for changes:
 
 ```bash
-scripts/sync-codex-skill.sh
+scripts/sync-packages.sh
 PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s tests -v
-python /home/rubin/.codex/skills/.system/skill-creator/scripts/quick_validate.py codex-skill/agent-collab
+python "${CODEX_HOME:-$HOME/.codex}/skills/.system/skill-creator/scripts/quick_validate.py" codex-plugin/agent-collab/skills/agent-collab
+python "${CODEX_HOME:-$HOME/.codex}/skills/.system/plugin-creator/scripts/validate_plugin.py" codex-plugin/agent-collab
+scripts/install-codex-plugin.sh --dry-run
 scripts/install-codex-skill.sh --codex-home-path
+scripts/install-claude-plugin.sh --dry-run
 ```
 
 After installing, start a fresh Codex process before live validation so it loads the refreshed skill instead of a stale in-memory copy.
 
 ## Caveats
 
-- This is skill-first, not plugin-packaged yet.
+- Codex is distributed as a Codex plugin with a direct skill installer for compatibility; Claude is distributed as a Claude Code plugin package.
 - Default full-access modes are powerful and should be used only in trusted local environments.
 - The automated tests mock peer CLI execution. They verify command construction, schemas, guards, metadata, and artifact behavior; they do not prove live authenticated Claude-to-Codex or Codex-to-Claude execution.
 - The local Codex CLI observed during development was `codex-cli 0.140.0`, which does not expose `--ask-for-approval` on `codex exec`. The runtime feature-detects support and falls back to `--dangerously-bypass-approvals-and-sandbox` when needed.

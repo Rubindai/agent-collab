@@ -1,0 +1,160 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.agent-collab/peer-report.schema.json",
+  "title": "Agent Collab Peer Report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "origin",
+    "host",
+    "peer",
+    "mode",
+    "target",
+    "status",
+    "verdict",
+    "summary",
+    "findings",
+    "claims",
+    "limitations",
+    "next_actions"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "origin": {
+      "enum": ["claude", "codex"]
+    },
+    "host": {
+      "enum": ["claude", "codex"]
+    },
+    "peer": {
+      "enum": ["claude", "codex"]
+    },
+    "mode": {
+      "enum": [
+        "review",
+        "audit",
+        "brainstorm",
+        "research",
+        "design",
+        "plan",
+        "plan-critique",
+        "debug",
+        "migration",
+        "test-strategy",
+        "verify",
+        "implement"
+      ]
+    },
+    "target": {
+      "type": "string"
+    },
+    "status": {
+      "enum": ["ok", "peer_failed"]
+    },
+    "verdict": {
+      "enum": [
+        "pass",
+        "pass_with_concerns",
+        "changes_recommended",
+        "ready",
+        "needs_revision",
+        "blocked",
+        "informational"
+      ]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["severity", "title", "details", "confidence"],
+        "properties": {
+          "severity": {
+            "enum": ["critical", "high", "medium", "low", "info"]
+          },
+          "title": {
+            "type": "string"
+          },
+          "details": {
+            "type": "string"
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          },
+          "recommendation": {
+            "type": "string"
+          },
+          "confidence": {
+            "enum": ["high", "medium", "low"]
+          }
+        }
+      }
+    },
+    "claims": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["claim", "status", "evidence"],
+        "properties": {
+          "claim": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "confirmed",
+              "plausible_unverified",
+              "rejected",
+              "product_decision",
+              "needs_human_input"
+            ]
+          },
+          "evidence": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "next_actions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "message"],
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "details": {}
+      }
+    }
+  }
+}

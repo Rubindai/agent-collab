@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.agent-collab/host-request.schema.json",
+  "title": "Agent Collab Host Request",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["origin", "host", "peer", "mode", "target", "brief", "edit_allowed", "run_id"],
+  "properties": {
+    "origin": {"enum": ["claude", "codex"]},
+    "host": {"enum": ["claude", "codex"]},
+    "peer": {"enum": ["claude", "codex"]},
+    "mode": {
+      "enum": ["review", "audit", "brainstorm", "research", "design", "plan", "plan-critique", "debug", "migration", "test-strategy", "verify", "implement"]
+    },
+    "target": {"type": "string", "minLength": 1},
+    "brief": {"type": "string", "minLength": 1},
+    "edit_allowed": {"type": "boolean"},
+    "run_id": {"type": "string", "minLength": 1},
+    "profile": {"enum": ["standard", "max", "ultra"], "default": "ultra"},
+    "local_subagents_allowed": {"type": "boolean", "default": true},
+    "max_local_subagents": {"type": "integer", "minimum": 0, "default": 6}
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.agent-collab/host-first-pass.schema.json",
+  "title": "Agent Collab Host First Pass",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["schema_version", "run_id", "summary", "claims"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "run_id": {"type": "string", "minLength": 1},
+    "summary": {"type": "string"},
+    "claims": {
+      "type": "array",
+      "items": {"type": "object"}
+    }
+  }
+}

@@ -14,6 +14,10 @@ from unittest import TestCase, mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_ROOT = REPO_ROOT / "tools" / "agent-collab"
+CODEX_PLUGIN_ROOT = REPO_ROOT / "codex-plugin" / "agent-collab"
+CODEX_SKILL_ROOT = CODEX_PLUGIN_ROOT / "skills" / "agent-collab"
+CLAUDE_PLUGIN_ROOT = REPO_ROOT / "claude-plugin" / "agent-collab"
+CLAUDE_SKILL_ROOT = CLAUDE_PLUGIN_ROOT / "skills" / "agent-collab"
 PEER_RUNTIME = RUNTIME_ROOT / "scripts" / "peer.py"
 HOST_RUNTIME = RUNTIME_ROOT / "scripts" / "host.py"
 STATE_RUNTIME = RUNTIME_ROOT / "scripts" / "state.py"
@@ -175,7 +179,7 @@ class RuntimeContractTests(TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             repo_root = Path(tmp) / "repo"
-            packaged_root = repo_root / "codex-skill" / "agent-collab"
+            packaged_root = repo_root / "codex-plugin" / "agent-collab" / "skills" / "agent-collab"
             with mock.patch.object(host, "resource_root", return_value=packaged_root):
                 self.assertEqual(host.default_run_root(repo_root), packaged_root / "runs")
                 self.assertEqual(host.default_local_settings_path(repo_root), packaged_root / "settings.local.json")
@@ -1525,35 +1529,51 @@ class HostRunnerTests(TestCase):
 
 class SkillMetadataTests(TestCase):
     def test_codex_and_claude_skill_metadata_allow_implicit_invocation(self):
-        codex_skill = REPO_ROOT / "codex-skill" / "agent-collab" / "SKILL.md"
-        codex_openai = REPO_ROOT / "codex-skill" / "agent-collab" / "agents" / "openai.yaml"
-        claude_skill = REPO_ROOT / ".claude" / "skills" / "agent-collab" / "SKILL.md"
+        codex_manifest = CODEX_PLUGIN_ROOT / ".codex-plugin" / "plugin.json"
+        codex_skill = CODEX_SKILL_ROOT / "SKILL.md"
+        codex_openai = CODEX_SKILL_ROOT / "agents" / "openai.yaml"
+        claude_manifest = CLAUDE_PLUGIN_ROOT / ".claude-plugin" / "plugin.json"
+        claude_skill = CLAUDE_SKILL_ROOT / "SKILL.md"
 
+        codex_plugin = json.loads(codex_manifest.read_text())
         codex_text = codex_skill.read_text()
         openai_text = codex_openai.read_text()
+        claude_plugin = json.loads(claude_manifest.read_text())
         claude_text = claude_skill.read_text()
 
+        self.assertEqual(codex_plugin["name"], "agent-collab")
+        self.assertEqual(codex_plugin["skills"], "./skills/")
+        self.assertEqual(codex_plugin["interface"]["displayName"], "Agent Collab")
         self.assertIn("name: agent-collab", codex_text)
         self.assertIn("allow_implicit_invocation: true", openai_text)
         self.assertIn('default_prompt: "Use $agent-collab', openai_text)
+        self.assertEqual(claude_plugin["name"], "agent-collab")
         self.assertIn("when_to_use:", claude_text)
         self.assertIn("allowed-tools: Bash Read Grep Glob WebSearch WebFetch Edit Write MultiEdit Task", claude_text)
         self.assertNotIn("disable-model-invocation: true", claude_text)
         self.assertFalse((REPO_ROOT / ".agents" / "skills" / "agent-collab").exists())
 
-    def test_packaged_codex_resources_match_root_resources(self):
-        packaged = REPO_ROOT / "codex-skill" / "agent-collab"
+    def test_packaged_resources_match_root_resources(self):
+        for packaged in (CODEX_SKILL_ROOT, CLAUDE_SKILL_ROOT):
+            for dirname in ("scripts", "references", "schemas"):
+                comparison = filecmp.dircmp(RUNTIME_ROOT / dirname, packaged / dirname, ignore=["__pycache__"])
+                self.assertEqual(comparison.left_only, [], f"{packaged}:{dirname}")
+                self.assertEqual(comparison.right_only, [], f"{packaged}:{dirname}")
+                self.assertEqual(comparison.diff_files, [], f"{packaged}:{dirname}")
+
+            self.assertFalse((packaged / "tools").exists())
 
         for dirname in ("scripts", "references", "schemas"):
-            comparison = filecmp.dircmp(RUNTIME_ROOT / dirname, packaged / dirname, ignore=["__pycache__"])
-            self.assertEqual(comparison.left_only, [], dirname)
-            self.assertEqual(comparison.right_only, [], dirname)
-            self.assertEqual(comparison.diff_files, [], dirname)
-
-        self.assertFalse((packaged / "tools").exists())
+            self.assertFalse((CLAUDE_PLUGIN_ROOT / dirname).exists())
 
     def test_maintenance_scripts_are_executable(self):
-        for script_name in ("sync-codex-skill.sh", "install-codex-skill.sh"):
+        for script_name in (
+            "sync-packages.sh",
+            "sync-codex-skill.sh",
+            "install-codex-skill.sh",
+            "install-codex-plugin.sh",
+            "install-claude-plugin.sh",
+        ):
             script = REPO_ROOT / "scripts" / script_name
             self.assertTrue(script.exists())
             self.assertTrue(os.access(script, os.X_OK), f"{script} must be executable")
@@ -1561,8 +1581,8 @@ class SkillMetadataTests(TestCase):
     def test_docs_use_peer_first_unpolluted_ultra_flow(self):
         docs = [
             REPO_ROOT / "README.md",
-            REPO_ROOT / "codex-skill" / "agent-collab" / "SKILL.md",
-            REPO_ROOT / ".claude" / "skills" / "agent-collab" / "SKILL.md",
+            CODEX_SKILL_ROOT / "SKILL.md",
+            CLAUDE_SKILL_ROOT / "SKILL.md",
             RUNTIME_ROOT / "references" / "synthesize.md",
         ]
 
@@ -1580,8 +1600,8 @@ class SkillMetadataTests(TestCase):
 
     def test_brainstorm_mode_is_documented_with_narrow_boundaries(self):
         readme = (REPO_ROOT / "README.md").read_text()
-        codex_skill = (REPO_ROOT / "codex-skill" / "agent-collab" / "SKILL.md").read_text()
-        claude_skill = (REPO_ROOT / ".claude" / "skills" / "agent-collab" / "SKILL.md").read_text()
+        codex_skill = (CODEX_SKILL_ROOT / "SKILL.md").read_text()
+        claude_skill = (CLAUDE_SKILL_ROOT / "SKILL.md").read_text()
 
         for text in (readme, codex_skill, claude_skill):
             self.assertIn("brainstorm", text)
@@ -1640,15 +1660,18 @@ class SkillMetadataTests(TestCase):
         self.assertIn("schemas/", readme)
 
     def test_docs_make_finish_the_normal_wait_path(self):
-        codex_skill = (REPO_ROOT / "codex-skill" / "agent-collab" / "SKILL.md").read_text()
+        codex_skill = (CODEX_SKILL_ROOT / "SKILL.md").read_text()
+        claude_skill = (CLAUDE_SKILL_ROOT / "SKILL.md").read_text()
         synth_docs = [
             RUNTIME_ROOT / "references" / "synthesize.md",
-            REPO_ROOT / "codex-skill" / "agent-collab" / "references" / "synthesize.md",
+            CODEX_SKILL_ROOT / "references" / "synthesize.md",
+            CLAUDE_SKILL_ROOT / "references" / "synthesize.md",
         ]
 
-        self.assertIn("Do not call `status --wait` during independent host analysis", codex_skill)
-        self.assertIn("`finish` is the normal synchronization point", codex_skill)
-        self.assertIn("Use `clear-history` to remove old terminal run artifacts", codex_skill)
+        for skill_text in (codex_skill, claude_skill):
+            self.assertIn("Do not call `status --wait` during independent host analysis", skill_text)
+            self.assertIn("`finish` is the normal synchronization point", skill_text)
+            self.assertIn("Use `clear-history` to remove old terminal run artifacts", skill_text)
 
         for path in synth_docs:
             text = path.read_text()
@@ -1659,9 +1682,10 @@ class SkillMetadataTests(TestCase):
         active_paths = [
             REPO_ROOT / "README.md",
             RUNTIME_ROOT / "references" / "synthesize.md",
-            REPO_ROOT / "codex-skill" / "agent-collab" / "references" / "synthesize.md",
-            REPO_ROOT / "codex-skill" / "agent-collab" / "SKILL.md",
-            REPO_ROOT / ".claude" / "skills" / "agent-collab" / "SKILL.md",
+            CODEX_SKILL_ROOT / "references" / "synthesize.md",
+            CLAUDE_SKILL_ROOT / "references" / "synthesize.md",
+            CODEX_SKILL_ROOT / "SKILL.md",
+            CLAUDE_SKILL_ROOT / "SKILL.md",
         ]
 
         for path in active_paths:
@@ -1669,38 +1693,26 @@ class SkillMetadataTests(TestCase):
             self.assertNotIn("agent-collab-host.py", text, str(path))
             self.assertNotIn("agent-collab-peer.py", text, str(path))
 
-    def test_codex_config_defaults_to_max_capability_with_depth_guard(self):
-        config = (REPO_ROOT / ".codex" / "config.toml").read_text()
+    def test_active_host_config_is_untracked_and_ignored(self):
+        tracked = subprocess.run(
+            ["git", "ls-files", ".codex", ".claude", ".agents", "codex-skill"],
+            cwd=REPO_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        gitignore = (REPO_ROOT / ".gitignore").read_text()
 
-        self.assertIn('model = "gpt-5.5"', config)
-        self.assertIn('model_reasoning_effort = "xhigh"', config)
-        self.assertIn('sandbox_mode = "danger-full-access"', config)
-        self.assertIn('approval_policy = "never"', config)
-        self.assertIn('web_search = "live"', config)
-        self.assertIn("max_threads = 8", config)
-        self.assertIn("max_depth = 1", config)
+        self.assertEqual(tracked.stdout.strip(), "")
+        self.assertIn(".codex/", gitignore)
+        self.assertIn(".claude/", gitignore)
+        self.assertIn(".agents/", gitignore)
+        self.assertIn("codex-skill/", gitignore)
+        self.assertIn("codex-plugin/agent-collab/skills/agent-collab/runs/*", gitignore)
+        self.assertIn("claude-plugin/agent-collab/skills/agent-collab/runs/*", gitignore)
 
-    def test_codex_local_agents_use_full_capability_and_research_policy(self):
-        agent_files = sorted((REPO_ROOT / ".codex" / "agents").glob("agent-collab-*.toml"))
-        names = {path.stem for path in agent_files}
-        self.assertIn("agent-collab-adjudicator", names)
-        self.assertIn("agent-collab-security-auditor", names)
-        self.assertIn("agent-collab-test-strategist", names)
-
-        for agent_file in agent_files:
-            text = agent_file.read_text()
-            self.assertIn('model = "gpt-5.5"', text)
-            self.assertIn('model_reasoning_effort = "xhigh"', text)
-            self.assertIn('sandbox_mode = "danger-full-access"', text)
-            self.assertIn('approval_policy = "never"', text)
-            self.assertIn('web_search = "live"', text)
-            self.assertIn("Use only the neutral brief", text) if "adjudicator" not in agent_file.name else None
-            self.assertIn("Use latest official documentation for external/API/platform/dependency/tooling claims.", text)
-            self.assertIn("Research online extensively when current external facts could affect the answer.", text)
-            self.assertIn("Do not invoke Agent Collab", text)
-
-    def test_claude_local_agents_use_max_effort_full_inherited_tools_and_depth_guard(self):
-        agent_files = sorted((REPO_ROOT / ".claude" / "agents").glob("agent-collab-*.md"))
+    def test_claude_plugin_agents_are_plugin_compatible(self):
+        agent_files = sorted((CLAUDE_PLUGIN_ROOT / "agents").glob("agent-collab-*.md"))
         names = {path.stem for path in agent_files}
         self.assertIn("agent-collab-adjudicator", names)
         self.assertIn("agent-collab-security-auditor", names)
@@ -1710,8 +1722,10 @@ class SkillMetadataTests(TestCase):
             text = agent_file.read_text()
             self.assertIn("model: opus", text)
             self.assertIn("effort: max", text)
-            self.assertIn("permissionMode: bypassPermissions", text)
             self.assertIn("disallowedTools: Task", text)
+            self.assertNotIn("permissionMode:", text)
+            self.assertNotIn("hooks:", text)
+            self.assertNotIn("mcpServers:", text)
             self.assertNotIn("tools: Read, Glob, Grep, Bash, WebSearch, WebFetch", text)
             self.assertIn("Use latest official documentation for external/API/platform/dependency/tooling claims.", text)
             self.assertIn("Research online extensively when current external facts could affect the answer.", text)
@@ -1725,4 +1739,6 @@ class SkillMetadataTests(TestCase):
         top_level_files = [path for path in RUNTIME_ROOT.iterdir() if path.is_file()]
 
         self.assertEqual(top_level_files, [])
-        self.assertFalse((REPO_ROOT / "codex-skill" / "agent-collab" / "tools").exists())
+        self.assertFalse((CODEX_SKILL_ROOT / "tools").exists())
+        self.assertFalse((CLAUDE_PLUGIN_ROOT / "tools").exists())
+        self.assertFalse((REPO_ROOT / "codex-skill").exists())

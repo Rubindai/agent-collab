@@ -1,0 +1,7 @@
+interface:
+  display_name: "Agent Collab"
+  short_description: "Cross-check work with Claude or Codex"
+  default_prompt: "Use $agent-collab to cross-check this task with an independent peer agent."
+
+policy:
+  allow_implicit_invocation: true
