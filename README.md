@@ -1,81 +1,179 @@
 # Agent Collab
 
-Agent Collab is a Codex global skill plus a Claude Code repo-local skill that lets the two products cross-check each other on review, audit, design, debugging, migration, test strategy, and verification work.
+Agent Collab is a repo-local collaboration workflow for Codex and Claude Code. It starts the opposite product as an independent peer first, lets the host do its own unpolluted analysis in parallel, then uses host-owned judging and synthesis to produce the final answer.
 
-This repository is intentionally skill-first, not plugin-first. Codex is installed globally under `$CODEX_HOME/skills` or `~/.codex/skills`; Claude Code is installed repo-locally under `.claude/skills`.
+The default profile is `ultra`: maximum capability, full repo/tool/network access, peer-first execution, host-local helper agents, and an advisory adjudicator.
 
-## What Is Included
+## What It Does
+
+Use Agent Collab for high-stakes work where a second independent AI pass is worth the cost:
+
+- code review, security audit, and risky implementation verification
+- plan critique, design debate, and architecture tradeoffs
+- debugging, migrations, research, and test strategy
+- any task where the user asks for Claude+Codex cross-checking
+
+The host remains the final decision maker. Peer, helper, and adjudicator reports are evidence, not authority.
+
+## Repo Layout
 
 ```text
 codex-skill/agent-collab/           Packaged Codex skill source for global install
 .claude/skills/agent-collab/        Claude Code repo-local skill
-.codex/agents/                      Codex host-local helper agents
-.claude/agents/                     Claude host-local helper agents
-tools/agent-collab/                 Shared peer runtime, schema, and contracts
+.codex/config.toml                  Codex max-capability defaults
+.codex/agents/                      Codex host-local helper and adjudicator agents
+.claude/agents/                     Claude host-local helper and adjudicator agents
+tools/agent-collab/                 Shared runtime, prompts, schemas, and run artifacts
 scripts/                            Sync and install helpers
 tests/test_agent_collab_runtime.py  Runtime and metadata tests
 ```
 
-The shared runtime is [tools/agent-collab/agent-collab-peer.py](tools/agent-collab/agent-collab-peer.py). The global Codex skill bundles the same runtime under its skill directory so Codex does not need a repo-local `.agents/skills` install. The runtime reads a request JSON file, builds a strict peer prompt, calls the other product once, validates structured JSON output, and checks whether a no-edit peer run changed the working tree.
+The shared runtime follows the standard skill resource shape:
 
-When you modify files in `tools/agent-collab/`, run [scripts/sync-codex-skill.sh](scripts/sync-codex-skill.sh) before testing or installing. The test suite checks that the packaged runtime stays in sync with the canonical root runtime.
+```text
+tools/agent-collab/
+  scripts/      host and peer runtime entrypoints
+  references/   peer-only and synthesis prompt contracts
+  schemas/      structured request/report schemas
+  runs/         local run artifacts, ignored except .gitkeep
+```
 
-## Requirements
+Runtime entrypoints:
 
-- Git repository.
-- Python 3.10 or newer.
-- Codex CLI installed and authenticated for Codex-peer runs.
-- Claude Code CLI installed and authenticated for Claude-peer runs.
-- Start Codex or Claude from the repository root or a subdirectory inside the repository. The skill resolves the repository root with Git before invoking shared runtime files.
+- `tools/agent-collab/scripts/host.py`: creates run directories, snapshots git state, starts the peer first, and validates finish artifacts.
+- `tools/agent-collab/scripts/peer.py`: invokes the opposite product once and returns schema-validated JSON.
 
-No Python package dependencies are required.
+The packaged Codex skill has the same `scripts/`, `references/`, and `schemas/` directories at `codex-skill/agent-collab/`. It does not contain a nested `tools/agent-collab/` compatibility copy.
+
+When you modify `tools/agent-collab/`, run `scripts/sync-codex-skill.sh` so the packaged Codex skill copy stays in sync.
 
 ## Usage
 
-From Codex, invoke the Codex skill explicitly:
+Implicit invocation is allowed by default.
+
+From Codex:
+
+```text
+Review this migration with Agent Collab.
+```
+
+Explicit Codex invocation also works:
 
 ```text
 Use $agent-collab to review the current diff.
 ```
 
-Codex can also invoke it implicitly for high-stakes prompts that match the skill description, such as code review, security audit, design debate, migration analysis, debugging, test strategy, or independent verification.
-
-From Claude Code, invoke the Claude skill explicitly:
+From Claude Code:
 
 ```text
 /agent-collab review the current diff
 ```
 
-Claude can also invoke it implicitly when the request matches the skill `description` and `when_to_use` metadata.
+Claude may also invoke the skill implicitly when the request matches its description and `when_to_use` metadata. The Claude skill intentionally does not set `disable-model-invocation: true`.
 
-## How It Works
+## Workflow
 
-1. The host agent classifies the mode, target, and whether edits are allowed.
-2. The host snapshots git state with `tools/agent-collab/git-snapshot.sh`.
-3. The host writes a neutral request JSON file.
-4. Start the peer run before host analysis by invoking the opposite product in the background and writing its JSON report to a temp file.
-5. While the peer runs, the host performs read-only analysis and may use same-product local helper agents for bounded read-heavy work.
-6. The host waits for the peer report.
-7. The host verifies important peer claims.
-8. The host snapshots git state again.
-9. The host synthesizes the final answer, separating confirmed, unverified, rejected, product-decision, and human-input-needed claims.
+1. The host classifies `mode`, `target`, `profile`, and `edit_allowed`. `profile` defaults to `ultra`.
+2. The host writes a neutral brief before host analysis begins.
+3. The host starts the peer immediately with `scripts/host.py start`.
+4. The peer receives only the neutral brief, target, constraints, edit policy, and output schema.
+5. While the peer runs, the host performs independent analysis.
+6. All agents use latest official documentation for external/API/platform/dependency/tooling claims and research online extensively when current external facts could affect the answer.
+7. In `ultra`, the host uses local helper agents for independent lenses such as mapper, reviewer, researcher, architect, security-auditor, debugger, test-strategist, and verifier.
+8. Do not read peer output until independent host work is complete. The host writes `host-first-pass.json` before reading `peer-report.json`.
+9. The host validates `peer-report.json`, builds a claim matrix, and runs an advisory adjudicator.
+10. The host verifies high-value claims and writes the final synthesis.
 
-Optional same-product helper agents are mapper, reviewer, and verifier. They are host-local helpers for repository inventory, focused review, and claim verification; they are instructed not to invoke Agent Collab, call the other product, recurse into more subagents, or edit files unless a bounded write scope is explicitly assigned.
+Independence rule:
 
-There is no separate judge agent or synthesizer agent in the current implementation. The host remains the final synthesizer and uses peer/helper output as evidence to verify, reject, or qualify claims.
+```text
+neutral brief -> launch peer -> independent host analysis -> host first pass -> read peer -> adjudicate -> synthesize
+```
 
-The peer is contractually forbidden from invoking Agent Collab again, calling the host product, or editing files when `edit_allowed=false`.
-Peer prompts also ask for latest official documentation on external/API/platform/dependency/tooling claims and extensive online research when current external facts could affect the answer.
-While the peer is running, host-side work also stays read-only so git-state mutation checks remain attributable.
+Peer prompts are intentionally natural and non-leading. For review and audit, the peer is asked for an independent review of the target, not a long list of host suspicions.
 
-## Install In This Repo
+## Run Artifacts
 
-Clone the repository:
+Runs are written under `tools/agent-collab/runs/<run-id>/` and ignored by Git except `.gitkeep`.
+
+Important files:
+
+```text
+host-request.json       Neutral request passed to the peer
+before.snapshot         Git snapshot before peer work
+peer-process.json       Peer PID and run metadata
+host-first-pass.json    Host analysis written before reading peer output
+peer.raw.json           Raw Claude/Codex CLI output envelope for debugging
+peer-report.json        Schema-validated peer report or structured peer failure
+claim-matrix.json       Host and peer claims grouped for verification
+adjudicator-report.json Advisory judge output or pending marker
+after.snapshot          Git snapshot after finish
+```
+
+## Permissions
+
+Agent Collab defaults to full capability because it is designed for high-trust local repositories.
+
+Codex defaults in `.codex/config.toml`:
+
+```toml
+model = "gpt-5.5"
+model_reasoning_effort = "xhigh"
+model_verbosity = "high"
+sandbox_mode = "danger-full-access"
+approval_policy = "never"
+web_search = "live"
+
+[agents]
+max_threads = 8
+max_depth = 1
+# 45 minutes; Agent Collab agent timeouts must stay at or above 2700 seconds.
+job_max_runtime_seconds = 2700
+```
+
+Claude peer defaults:
+
+```text
+--model opus
+--effort max
+--permission-mode bypassPermissions
+--tools default
+--no-session-persistence
+```
+
+Full capability is for investigation and validation. It is not blanket permission to mutate. Peer and helper agents are still instructed not to edit unless `edit_allowed=true` and the user explicitly delegated edits.
+
+Peer runs use structured output as the machine interface. Claude peers return a JSON envelope; the runtime preserves that raw envelope as `peer.raw.json`, normalizes `structured_output` into `peer-report.json`, and validates the normalized report against `schemas/peer-report.schema.json`.
+
+Use safe mode for untrusted repos:
 
 ```bash
-git clone git@github.com:Rubindai/agent-collab.git
-cd agent-collab
+AGENT_COLLAB_SAFE_MODE=1
 ```
+
+Safe mode uses Codex read-only sandboxing and Claude plan permissions for peer runs.
+
+## Recursion Guards
+
+Cross-agent depth is capped at 1:
+
+```text
+Codex host -> Claude peer
+Claude host -> Codex peer
+```
+
+Forbidden:
+
+```text
+Codex host -> Claude peer -> Codex
+Claude host -> Codex peer -> Claude
+peer -> Agent Collab
+peer local subagent -> host CLI
+```
+
+The runtime sets guard environment variables and prepends a run-local `bin/` directory to `PATH` so a peer cannot call the host CLI. Local subagent depth is capped by prompt and agent configuration; Claude helper agents disallow nested `Task`, and Codex config keeps `agents.max_depth = 1`.
+
+## Install In This Repo
 
 Install the Codex skill globally:
 
@@ -83,133 +181,83 @@ Install the Codex skill globally:
 scripts/install-codex-skill.sh
 ```
 
-The installer defaults to the active Codex-home style path, `${CODEX_HOME:-$HOME/.codex}/skills/agent-collab`, when that skills root exists. Current public Codex docs list `$HOME/.agents/skills` as the user-scope skills directory; use `scripts/install-codex-skill.sh --docs-path` if your Codex build has moved to that documented path. Do not install both paths at the same time unless you have verified your Codex build does not scan both, because duplicate skill names can appear separately.
+The installer defaults to the documented user skill path: `$HOME/.agents/skills/agent-collab`.
 
 The repository intentionally does not keep `.agents/skills/agent-collab`, so Codex will not see both a global and repo-local skill with the same name.
 
-If Codex or Claude Code was already running before these directories existed, restart the session if the new skill or agent files do not appear automatically.
+Restart Codex or Claude Code if a running session does not pick up changed skill or agent files.
 
-Verify the install:
+Verify:
 
 ```bash
 repo_root=$(git rev-parse --show-toplevel)
 PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s tests -v
-bash -n "$repo_root/tools/agent-collab/git-snapshot.sh"
-python -m json.tool "$repo_root/tools/agent-collab/peer-report.schema.json" >/dev/null
+PYTHONDONTWRITEBYTECODE=1 python -m py_compile \
+  "$repo_root/tools/agent-collab/scripts/host.py" \
+  "$repo_root/tools/agent-collab/scripts/peer.py"
+for f in "$repo_root"/tools/agent-collab/schemas/*.schema.json; do python -m json.tool "$f" >/dev/null; done
 ```
 
 ## Install Into Another Repo
 
-For a plain Codex global skill, the minimum install shape is `${CODEX_HOME:-$HOME/.codex}/skills/<skill-name>/SKILL.md`. For a plain Codex repo-local skill, the minimum install shape is `.agents/skills/<skill-name>/SKILL.md`; Agent Collab intentionally avoids that repo-local Codex path when installed globally to prevent duplicate discovery. For a plain Claude Code skill, the minimum repo-local install shape is `.claude/skills/<skill-name>/SKILL.md`.
-
-Agent Collab needs more than `SKILL.md` because the skills call a runtime and use optional same-product helper agents. Install the Codex side globally once, then copy the Claude/runtime files into target repos that should support Claude-hosted runs.
-
-From a checkout of this repository, install or refresh the global Codex skill:
+Install or refresh the global Codex skill:
 
 ```bash
 scripts/install-codex-skill.sh
 ```
 
-Then copy the Claude skill and root runtime into the target repo:
+Copy Claude/runtime files into the target repo:
 
 ```bash
 target=/path/to/target-repo
 rsync -a .claude tools "$target"/
 ```
 
-Then copy the optional test suite if you want install verification in the target repo:
-
-```bash
-rsync -a tests "$target"/
-```
-
-Then merge the Codex helper-agent files:
+Copy Codex helper agents and merge config:
 
 ```bash
 mkdir -p "$target/.codex/agents"
 cp .codex/agents/agent-collab-*.toml "$target/.codex/agents/"
 ```
 
-The Codex helper agents are optional, but recommended for host-local mapping, focused review, and peer-claim verification.
-
-If the target repo does not already have `.codex/config.toml`, copy this one:
-
-```bash
-cp .codex/config.toml "$target/.codex/config.toml"
-```
-
-If the target repo already has `.codex/config.toml`, merge this setting instead of overwriting the file:
-
-```toml
-[agents]
-max_depth = 1
-```
-
-This setting is optional because Codex currently defaults `agents.max_depth` to `1`, but keeping it makes Agent Collab's no-recursion intent explicit.
-
-Restart Codex or Claude Code if the session was already open and the new files do not appear automatically.
-
-## Upgrade
-
-In this repository:
-
-```bash
-git pull --ff-only
-scripts/install-codex-skill.sh
-PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s tests -v
-```
-
-In another repo where Agent Collab was copied in, pull this repository first, then repeat the copy steps from "Install Into Another Repo". Merge `.codex/config.toml`; do not blindly overwrite a target repo's existing Codex config.
-
-After upgrading, restart active Codex or Claude Code sessions if they do not pick up changed skill or agent files.
-
-## Uninstall
-
-Remove the Agent Collab files:
-
-```bash
-rm -rf "${CODEX_HOME:-$HOME/.codex}/skills/agent-collab"
-rm -rf .claude/skills/agent-collab
-rm -rf tools/agent-collab
-rm -f .codex/agents/agent-collab-*.toml
-rm -f .claude/agents/agent-collab-*.md
-rm -f tests/test_agent_collab_runtime.py
-```
-
-If `.codex/config.toml` only contains Agent Collab's `[agents] max_depth = 1`, remove that file too:
-
-```bash
-rm -f .codex/config.toml
-```
-
-If `.codex/config.toml` has other project settings, only remove the Agent Collab-specific setting if you no longer want it.
-
-Restart active Codex or Claude Code sessions after uninstalling.
+If the target repo already has `.codex/config.toml`, merge the Agent Collab settings instead of overwriting it.
 
 ## Runtime Configuration
 
 Environment variables:
 
-- `CODEX_MODEL`: Codex peer model. Defaults to `gpt-5.5`.
-- `CODEX_EFFORT`: Codex peer reasoning effort. Defaults to `xhigh`.
-- `CLAUDE_MODEL`: Claude peer model. Defaults to `opus`.
-- `CLAUDE_EFFORT`: Claude peer reasoning effort. Defaults to `max`.
-- `CLAUDE_TOOLS`: Claude peer tool set. Defaults to `Bash,Read,Grep,Glob,WebSearch,WebFetch`.
-- `AGENT_COLLAB_SAFE_MODE=1`: Use read-only Codex sandbox and Claude `plan` permission mode.
-- `AGENT_COLLAB_TIMEOUT_SECONDS`: Optional peer timeout. Unset or `0` means no hard timeout.
-- `AGENT_COLLAB_PEER_ONLY=true` or `AGENT_COLLAB_DEPTH>=1`: Refuse nested invocation.
+- `CODEX_AGENT_COLLAB_MODEL`: Codex peer model. Defaults to `gpt-5.5`.
+- `CODEX_AGENT_COLLAB_EFFORT`: Codex peer reasoning effort. Defaults to `xhigh`.
+- `CODEX_AGENT_COLLAB_WEB_SEARCH`: Codex peer web search mode passed as `-c web_search=...`. Defaults to `live`.
+- `CLAUDE_AGENT_COLLAB_MODEL`: Claude peer model. Defaults to `opus`.
+- `CLAUDE_AGENT_COLLAB_EFFORT`: Claude peer effort. Defaults to `max`.
+- `CLAUDE_AGENT_COLLAB_TOOLS`: Claude peer tool set. Defaults to `default`.
+- `CLAUDE_AGENT_COLLAB_MAX_BUDGET_USD`: Optional Claude peer budget cap. Defaults to `25.00` when supported by the local CLI.
+- `CLAUDE_AGENT_COLLAB_MAX_TURNS`: Optional Claude peer turn cap. Defaults to `50` when supported by the local CLI.
+- `AGENT_COLLAB_TIMEOUT_SECONDS`: Peer timeout. Defaults to `2700` seconds, or 45 minutes. Positive values below `2700` seconds are raised to `2700` so every agent run gets at least 45 minutes. The general rule is to wait until the peer responds; use `0` only when you intentionally want no subprocess timeout.
+- `AGENT_COLLAB_SAFE_MODE=1`: Opt into reduced-permission peer runs.
+- `AGENT_COLLAB_CODEX_APPROVAL_FLAG`: Force Codex approval flag detection with `ask` or `bypass`.
 
-Default mode is full-capability because this repo was built for high-trust local collaboration. Use safe mode for untrusted repositories.
+## Manual Runtime
 
-### Access Defaults
+Start a run:
 
-- Codex peer runs use `--search` and default to `--sandbox danger-full-access` unless `AGENT_COLLAB_SAFE_MODE=1`.
-- Claude peer runs default to `Bash,Read,Grep,Glob,WebSearch,WebFetch` through `CLAUDE_TOOLS`.
-- Codex host-local helper agents inherit the parent Codex session's sandbox, approval, and live runtime overrides unless explicitly overridden in their agent files.
-- Claude host-local helper agents include `Read`, `Glob`, `Grep`, `Bash`, `WebSearch`, and `WebFetch`.
+```bash
+repo_root=$(git rev-parse --show-toplevel)
+brief_file=$(mktemp)
+printf '%s\n' "Review the current diff for correctness, security, and missing tests." > "$brief_file"
+python "$repo_root/tools/agent-collab/scripts/host.py" start \
+  --host codex \
+  --mode review \
+  --target "current diff" \
+  --brief-file "$brief_file"
+```
 
-Helper agents are still instructed to avoid edits and recursion. Broader tool access is for better investigation, not permission to mutate the repo.
-Peer and helper prompts prefer latest official documentation and source-backed web research for current external claims.
+Write `host-first-pass.json` in the returned run directory before reading `peer-report.json`, then finish:
+
+```bash
+python "$repo_root/tools/agent-collab/scripts/host.py" finish "$run_dir"
+```
 
 ## Maintenance
 
@@ -219,50 +267,14 @@ Use this loop for changes:
 scripts/sync-codex-skill.sh
 PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s tests -v
 python /home/rubin/.codex/skills/.system/skill-creator/scripts/quick_validate.py codex-skill/agent-collab
-scripts/install-codex-skill.sh
+scripts/install-codex-skill.sh --codex-home-path
 ```
 
-Keep `tools/agent-collab/` as the canonical runtime. The packaged copy under `codex-skill/agent-collab/tools/agent-collab/` exists so the global Codex skill can run outside this repository.
+After installing, start a fresh Codex process before live validation so it loads the refreshed skill instead of a stale in-memory copy.
 
-## Manual Peer Runtime
+## Caveats
 
-Create a request file:
-
-```json
-{
-  "origin": "codex",
-  "host": "codex",
-  "peer": "claude",
-  "mode": "review",
-  "target": "current diff",
-  "brief": "Review the current diff for correctness, security, and missing tests.",
-  "edit_allowed": false,
-  "run_id": "agent-collab-manual-test"
-}
-```
-
-Run:
-
-```bash
-repo_root=$(git rev-parse --show-toplevel)
-python "$repo_root/tools/agent-collab/agent-collab-peer.py" /path/to/request.json --repo-root "$repo_root"
-```
-
-The command prints a JSON peer report or structured peer-failure JSON.
-
-## Known Caveats
-
-- This is not packaged as a Codex or Claude plugin yet. Install, uninstall, and upgrade are file-copy or git operations.
-- The automated tests mock peer CLI execution. They verify command construction, schema handling, failure handling, no-recursion checks, metadata, and git snapshot behavior. They do not prove a live Claude-to-Codex or Codex-to-Claude run succeeds in your authenticated environment.
-- The official Codex CLI reference documents `--ask-for-approval never`, but the local Codex CLI installed here is `codex-cli 0.140.0` and does not expose that flag. The runtime feature-detects support: newer Codex installs use `--ask-for-approval never`, while this local version falls back to `--dangerously-bypass-approvals-and-sandbox` for default full-permission Codex peer runs.
-- Current Claude docs list `--max-turns`, but this runtime does not depend on it. Add feature detection before using it so older Claude installs do not break.
-- `.codex/config.toml` can affect the whole target repo. Merge it carefully if the target repo already has Codex configuration.
-
-## References
-
-- Codex skills: https://developers.openai.com/codex/skills
-- Codex subagents: https://developers.openai.com/codex/subagents
-- Codex non-interactive mode: https://developers.openai.com/codex/noninteractive
-- Claude skills: https://code.claude.com/docs/en/skills
-- Claude subagents: https://code.claude.com/docs/en/sub-agents
-- Claude CLI reference: https://code.claude.com/docs/en/cli-reference
+- This is skill-first, not plugin-packaged yet.
+- Default full-access modes are powerful and should be used only in trusted local environments.
+- The automated tests mock peer CLI execution. They verify command construction, schemas, guards, metadata, and artifact behavior; they do not prove live authenticated Claude-to-Codex or Codex-to-Claude execution.
+- The local Codex CLI observed during development was `codex-cli 0.140.0`, which does not expose `--ask-for-approval` on `codex exec`. The runtime feature-detects support and falls back to `--dangerously-bypass-approvals-and-sandbox` when needed.

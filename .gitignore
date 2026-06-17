@@ -26,3 +26,5 @@ tmp/
 temp/
 .tmp/
 .temp/
+tools/agent-collab/runs/*
+!tools/agent-collab/runs/.gitkeep

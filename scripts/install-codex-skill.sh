@@ -3,26 +3,24 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/install-codex-skill.sh [--skills-root DIR | --dest DIR | --docs-path | --codex-home-path]
+Usage: scripts/install-codex-skill.sh [--skills-root DIR | --dest DIR | --codex-home-path]
 
 Installs the packaged Codex Agent Collab skill globally.
 
 Options:
   --skills-root DIR   Install as DIR/agent-collab.
   --dest DIR          Install directly to DIR. DIR basename should be agent-collab.
-  --docs-path         Install to the latest documented user path: $HOME/.agents/skills/agent-collab.
   --codex-home-path   Install to the current Codex-home path: ${CODEX_HOME:-$HOME/.codex}/skills/agent-collab.
   -h, --help          Show this help.
 
 Default:
-  Uses ${CODEX_HOME:-$HOME/.codex}/skills/agent-collab when that skills root exists,
-  otherwise uses $HOME/.agents/skills/agent-collab.
+  Uses the documented user skill path: $HOME/.agents/skills/agent-collab.
 USAGE
 }
 
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-codex_home_root="${CODEX_HOME:-$HOME/.codex}/skills"
 docs_root="$HOME/.agents/skills"
+codex_home_root="${CODEX_HOME:-$HOME/.codex}/skills"
 dest=""
 
 while [[ $# -gt 0 ]]; do
@@ -36,10 +34,6 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || { echo "--dest requires a directory" >&2; exit 2; }
       dest="${2%/}"
       shift 2
-      ;;
-    --docs-path)
-      dest="$docs_root/agent-collab"
-      shift
       ;;
     --codex-home-path)
       dest="$codex_home_root/agent-collab"
@@ -58,11 +52,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$dest" ]]; then
-  if [[ -d "$codex_home_root" ]]; then
-    dest="$codex_home_root/agent-collab"
-  else
-    dest="$docs_root/agent-collab"
-  fi
+  dest="$docs_root/agent-collab"
 fi
 
 "$repo_root/scripts/sync-codex-skill.sh" >/dev/null
