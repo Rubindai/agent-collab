@@ -28,3 +28,7 @@ temp/
 .temp/
 tools/agent-collab/runs/*
 !tools/agent-collab/runs/.gitkeep
+tools/agent-collab/settings.local.json
+codex-skill/agent-collab/runs/*
+!codex-skill/agent-collab/runs/.gitkeep
+codex-skill/agent-collab/settings.local.json

@@ -77,6 +77,38 @@ REQUEST_DEFAULTS = {
 }
 MIN_AGENT_TIMEOUT_SECONDS = 2700
 DEFAULT_AGENT_TIMEOUT_SECONDS = 2700
+WEB_RESEARCH_CHOICES = {"cached", "live", "disabled"}
+WEB_TOOLS = ("WebSearch", "WebFetch")
+EDIT_TOOLS = ("Edit", "Write", "MultiEdit")
+CLAUDE_DOCUMENTED_FLAGS = {
+    "--model",
+    "--effort",
+    "--json-schema",
+    "--output-format",
+    "--no-session-persistence",
+    "--permission-mode",
+    "--dangerously-skip-permissions",
+    "--tools",
+    "--allowedTools",
+    "--allowed-tools",
+    "--disallowedTools",
+    "--disallowed-tools",
+    "--max-budget-usd",
+    "--max-turns",
+}
+ROLE_BY_MODE = {
+    "review": "You are an independent senior software reviewer.",
+    "audit": "You are an independent security and reliability auditor.",
+    "research": "You are an independent technical researcher.",
+    "design": "You are an independent software architect.",
+    "plan": "You are an independent implementation planner.",
+    "plan-critique": "You are an independent plan reviewer.",
+    "debug": "You are an independent debugging investigator.",
+    "migration": "You are an independent migration architect.",
+    "test-strategy": "You are an independent test strategist.",
+    "verify": "You are an independent verifier.",
+    "implement": "You are an independent implementation reviewer.",
+}
 
 
 class PeerReportValidationError(ValueError):
@@ -91,6 +123,12 @@ class RequestValidationError(ValueError):
 class PeerCommand:
     args: list[str]
     stdin: str | None
+
+
+@dataclass(frozen=True)
+class NormalizedPeerOutput:
+    report: dict[str, Any]
+    metadata: dict[str, Any]
 
 
 def runtime_dir() -> Path:
@@ -161,6 +199,7 @@ def load_request(path: Path) -> dict[str, Any]:
 
 def build_prompt(request: dict[str, Any], repo_root: Path, schema_path: Path) -> str:
     contract = (resource_root() / "references" / "peer-only.md").read_text(encoding="utf-8").strip()
+    prompt_blocks = (resource_root() / "references" / "peer-prompt-blocks.md").read_text(encoding="utf-8").strip()
     schema = schema_path.read_text(encoding="utf-8").strip()
     request_json = json.dumps(request, ensure_ascii=False, indent=2, sort_keys=True)
     edit_line = (
@@ -170,45 +209,138 @@ def build_prompt(request: dict[str, Any], repo_root: Path, schema_path: Path) ->
     )
     return "\n".join(
         [
-            "Agent Collab peer request",
+            "# Agent Collab Peer Request",
             "",
-            "Objective:",
+            "<role>",
+            ROLE_BY_MODE[request["mode"]],
+            "You are the independent peer in Agent Collab. The host agent is the final synthesizer.",
+            "</role>",
+            "",
+            "<objective>",
             f"Independently evaluate the target for `{request['mode']}` and return evidence-grounded findings.",
+            "</objective>",
             "",
-            "Context:",
+            "<context>",
             f"- Repository root: {repo_root}",
             f"- Target: {request['target']}",
+            "</context>",
             "",
-            "Success criteria:",
+            "<success_criteria>",
             "- Inspect enough repository evidence to answer the task reliably.",
             "- Cite concrete files, commands, or observations for material claims.",
             "- Use latest official documentation for external/API/platform/dependency/tooling claims.",
             "- Research online extensively when current external facts could affect the answer. Prefer official sources and cite source-backed evidence.",
             "- Use native local subagents when that improves independent coverage or speed.",
+            "- If using local subagents, divide work by independent lenses, wait for their results, and merge only evidence-backed findings into this report.",
             "- Distinguish confirmed issues from uncertainty or product judgment.",
             "- Stop when the core request can be answered with useful evidence.",
+            "</success_criteria>",
             "",
-            "Constraints:",
+            "<constraints>",
             edit_line,
             f"Profile: {request['profile']}",
             f"Local subagents allowed: {str(request['local_subagents_allowed']).lower()}",
             f"Maximum local subagents: {request['max_local_subagents']}",
+            "</constraints>",
             "",
-            "Task brief:",
+            "<task_brief>",
+            "```text",
             request["brief"].strip(),
+            "```",
+            "</task_brief>",
             "",
-            "Peer-only contract:",
+            "<peer_contract>",
             contract,
+            "</peer_contract>",
             "",
-            "REQUEST JSON:",
+            "<prompt_contract>",
+            prompt_blocks,
+            "</prompt_contract>",
+            "",
+            "<request_json>",
+            "```json",
             request_json,
+            "```",
+            "</request_json>",
             "",
-            "RESPONSE SCHEMA:",
+            "<response_schema>",
+            "```json",
             schema,
+            "```",
+            "</response_schema>",
             "",
+            "<output_instruction>",
             "Respond with exactly one JSON object matching the schema.",
+            "</output_instruction>",
         ]
     )
+
+
+def web_research_mode(env: dict[str, str]) -> str:
+    value = env.get("AGENT_COLLAB_WEB_RESEARCH", "live").strip() or "live"
+    if value not in WEB_RESEARCH_CHOICES:
+        raise ValueError(f"AGENT_COLLAB_WEB_RESEARCH must be one of {sorted(WEB_RESEARCH_CHOICES)}")
+    return value
+
+
+def codex_config_values(env: dict[str, str]) -> list[str]:
+    raw = env.get("CODEX_AGENT_COLLAB_CONFIG", "").strip()
+    if not raw:
+        return []
+    if raw.startswith("["):
+        parsed = json.loads(raw)
+        if not isinstance(parsed, list):
+            raise ValueError("CODEX_AGENT_COLLAB_CONFIG must be a JSON list")
+        values = parsed
+    else:
+        values = [item.strip() for item in raw.splitlines() if item.strip()]
+    result: list[str] = []
+    for item in values:
+        text = str(item).strip()
+        if not text:
+            continue
+        key, separator, _ = text.partition("=")
+        if separator != "=" or not key.strip():
+            raise ValueError("CODEX_AGENT_COLLAB_CONFIG entries must use key=value syntax")
+        result.append(text)
+    return result
+
+
+def split_claude_tools(value: str) -> list[str]:
+    return [item.strip() for item in value.replace(",", " ").split() if item.strip()]
+
+
+def add_missing_tools(tools: list[str], additions: tuple[str, ...]) -> list[str]:
+    seen = {tool.lower() for tool in tools}
+    result = list(tools)
+    for tool in additions:
+        if tool.lower() not in seen:
+            result.append(tool)
+            seen.add(tool.lower())
+    return result
+
+
+def remove_tools(tools: list[str], removals: tuple[str, ...]) -> list[str]:
+    removal_set = {tool.lower() for tool in removals}
+    return [tool for tool in tools if tool.lower() not in removal_set]
+
+
+def claude_allowed_tools_for_web(claude_tools: str, web_research: str) -> str:
+    tools = split_claude_tools(claude_tools)
+    if web_research == "disabled":
+        tools = remove_tools(tools, WEB_TOOLS)
+    else:
+        tools = add_missing_tools(tools, WEB_TOOLS)
+    return ",".join(tools)
+
+
+def claude_disallowed_tools(safe_mode: bool, web_research: str) -> str:
+    tools: list[str] = []
+    if safe_mode:
+        tools.extend(EDIT_TOOLS)
+    if web_research == "disabled":
+        tools.extend(WEB_TOOLS)
+    return ",".join(tools)
 
 
 def build_peer_command(
@@ -220,10 +352,9 @@ def build_peer_command(
     env: dict[str, str],
 ) -> PeerCommand:
     safe_mode = env.get("AGENT_COLLAB_SAFE_MODE") == "1"
+    web_research = web_research_mode(env)
     if request["peer"] == "claude":
         schema_inline = schema_path.read_text(encoding="utf-8")
-        permission_mode = "plan" if safe_mode else "bypassPermissions"
-        claude_tools = env.get("CLAUDE_AGENT_COLLAB_TOOLS", "default")
         args = [
             "claude",
             "-p",
@@ -231,22 +362,19 @@ def build_peer_command(
             env.get("CLAUDE_AGENT_COLLAB_MODEL", "opus"),
             "--effort",
             env.get("CLAUDE_AGENT_COLLAB_EFFORT", "max"),
-            "--permission-mode",
-            permission_mode,
-            "--tools",
-            claude_tools,
             "--no-session-persistence",
             "--json-schema",
             schema_inline,
             "--output-format",
             "json",
         ]
+        add_claude_permission_flags(args, env, safe_mode)
+        add_claude_tool_flags(args, env, safe_mode, web_research)
         add_claude_optional_flags(args, env)
         return PeerCommand(args=args, stdin=prompt)
 
     sandbox = "read-only" if safe_mode else "danger-full-access"
     effort = env.get("CODEX_AGENT_COLLAB_EFFORT", "xhigh")
-    web_search = env.get("CODEX_AGENT_COLLAB_WEB_SEARCH", "live")
     args = [
         "codex",
         "exec",
@@ -261,11 +389,17 @@ def build_peer_command(
         str(output_path),
         "--model",
         env.get("CODEX_AGENT_COLLAB_MODEL", "gpt-5.5"),
-        "-c",
-        f'model_reasoning_effort="{effort}"',
-        "-c",
-        f'web_search="{web_search}"',
     ]
+    for config in codex_config_values(env):
+        args.extend(["-c", config])
+    args.extend(
+        [
+            "-c",
+            f'model_reasoning_effort="{effort}"',
+            "-c",
+            f'web_search="{web_research}"',
+        ]
+    )
     apply_codex_approval_flags(args, env, safe_mode)
     args.append("-")
     return PeerCommand(args=args, stdin=prompt)
@@ -274,6 +408,8 @@ def build_peer_command(
 def claude_supports_option(option: str, env: dict[str, str]) -> bool:
     override = env.get("AGENT_COLLAB_CLAUDE_ASSUME_FLAGS", "").strip().lower()
     if override in {"1", "true", "yes"}:
+        return True
+    if option in CLAUDE_DOCUMENTED_FLAGS:
         return True
     try:
         completed = subprocess.run(
@@ -288,6 +424,30 @@ def claude_supports_option(option: str, env: dict[str, str]) -> bool:
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
     return option in completed.stdout
+
+
+def add_claude_permission_flags(args: list[str], env: dict[str, str], safe_mode: bool) -> None:
+    if claude_supports_option("--permission-mode", env):
+        args.extend(["--permission-mode", "plan" if safe_mode else "bypassPermissions"])
+        return
+    if not safe_mode and claude_supports_option("--dangerously-skip-permissions", env):
+        args.append("--dangerously-skip-permissions")
+
+
+def add_claude_tool_flags(args: list[str], env: dict[str, str], safe_mode: bool, web_research: str) -> None:
+    claude_tools = env.get("CLAUDE_AGENT_COLLAB_TOOLS", "default").strip()
+    disallowed_tools = claude_disallowed_tools(safe_mode, web_research)
+    if disallowed_tools and claude_supports_option("--disallowedTools", env):
+        args.extend(["--disallowedTools", disallowed_tools])
+    if not claude_tools or claude_tools == "default":
+        if claude_supports_option("--tools", env):
+            args.extend(["--tools", "default"])
+        return
+    claude_tools = claude_allowed_tools_for_web(claude_tools, web_research)
+    if claude_supports_option("--tools", env):
+        args.extend(["--tools", claude_tools])
+        return
+    raise ValueError("custom Claude tool access requires Claude Code --tools support")
 
 
 def add_claude_optional_flags(args: list[str], env: dict[str, str]) -> None:
@@ -357,6 +517,39 @@ def failure(
     }
 
 
+def claude_api_error_details(stdout: str, stderr: str) -> tuple[str, dict[str, Any]] | None:
+    try:
+        envelope = json.loads(stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(envelope, dict) or envelope.get("is_error") is not True:
+        return None
+    result = envelope.get("result")
+    message = str(result).strip() if result is not None and str(result).strip() else "Claude peer returned an API error"
+    detail_keys = [
+        "api_error_status",
+        "session_id",
+        "duration_ms",
+        "duration_api_ms",
+        "num_turns",
+        "stop_reason",
+        "total_cost_usd",
+        "permission_denials",
+        "terminal_reason",
+        "fast_mode_state",
+    ]
+    details = {key: envelope.get(key) for key in detail_keys if key in envelope}
+    model_usage = envelope.get("modelUsage")
+    if isinstance(model_usage, dict):
+        details["modelUsage"] = model_usage
+    usage = envelope.get("usage")
+    if isinstance(usage, dict):
+        details["usage"] = usage
+    details["stdout_tail"] = stdout[-4000:]
+    details["stderr_tail"] = stderr[-4000:]
+    return message, details
+
+
 def nested_invocation_requested(env: dict[str, str]) -> bool:
     if env.get("AGENT_COLLAB_PEER_ONLY", "").lower() == "true":
         return True
@@ -407,24 +600,117 @@ def make_host_cli_guard(tmp: Path, host: str) -> Path:
     return bin_dir
 
 
+def write_json(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def default_normalization_path(raw_output_path: Path | None) -> Path | None:
+    if raw_output_path is None:
+        return None
+    return raw_output_path.with_name("peer-normalization.json")
+
+
+def _base_normalization_metadata(source: str, text: str, warnings: list[str] | None = None) -> dict[str, Any]:
+    return {
+        "schema_version": "1.0",
+        "source": source,
+        "input_bytes": len(text.encode("utf-8")),
+        "warnings": warnings or [],
+        "validation_status": "not_checked",
+    }
+
+
+def _looks_like_claude_envelope(value: dict[str, Any]) -> bool:
+    return value.get("type") == "result" or "subtype" in value or "structured_output" in value
+
+
+def _validated_embedded_report(text: str, source: str) -> NormalizedPeerOutput:
+    decoder = json.JSONDecoder()
+    last_error: Exception | None = None
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            candidate, _ = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError as exc:
+            last_error = exc
+            continue
+        if not isinstance(candidate, dict):
+            continue
+        try:
+            validate_peer_report(candidate)
+        except PeerReportValidationError as exc:
+            last_error = exc
+            continue
+        return NormalizedPeerOutput(
+            report=candidate,
+            metadata=_base_normalization_metadata(
+                source,
+                text,
+                ["Recovered a schema-valid peer report from surrounding text."],
+            ),
+        )
+    if last_error is not None:
+        raise ValueError(f"no schema-valid peer report found in text: {last_error}") from last_error
+    raise ValueError("no JSON object found in text")
+
+
+def normalize_json_payload(text: str) -> NormalizedPeerOutput:
+    """Return a normalized report candidate; callers must validate the report schema."""
+    if not text.strip():
+        raise ValueError("peer output was empty")
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return _validated_embedded_report(text, "embedded_json")
+
+    if not isinstance(parsed, dict):
+        raise ValueError("peer output must be a JSON object")
+
+    structured_output = parsed.get("structured_output")
+    if isinstance(structured_output, dict):
+        return NormalizedPeerOutput(
+            report=structured_output,
+            metadata=_base_normalization_metadata("structured_output", text),
+        )
+    if "structured_output" in parsed and structured_output is not None:
+        raise ValueError("structured_output must be a JSON object")
+
+    result = parsed.get("result")
+    if isinstance(result, dict):
+        return NormalizedPeerOutput(
+            report=result,
+            metadata=_base_normalization_metadata("result_object", text),
+        )
+    if isinstance(result, str):
+        try:
+            nested = json.loads(result)
+        except json.JSONDecodeError:
+            return _validated_embedded_report(result, "result_embedded_json")
+        if isinstance(nested, dict):
+            return NormalizedPeerOutput(
+                report=nested,
+                metadata=_base_normalization_metadata("result_json", text),
+            )
+        raise ValueError("result was not a JSON object")
+
+    if _looks_like_claude_envelope(parsed):
+        subtype = parsed.get("subtype")
+        errors = parsed.get("errors")
+        detail = f"Claude result envelope did not include structured_output or a JSON result; subtype={subtype!r}"
+        if errors:
+            detail = f"{detail}; errors={errors!r}"
+        raise ValueError(detail)
+
+    return NormalizedPeerOutput(
+        report=parsed,
+        metadata=_base_normalization_metadata("direct_json", text),
+    )
+
+
 def parse_json_payload(text: str) -> dict[str, Any]:
-    parsed = json.loads(text)
-    if isinstance(parsed, dict):
-        structured_output = parsed.get("structured_output")
-        if isinstance(structured_output, dict):
-            return structured_output
-        if "structured_output" in parsed and structured_output is not None:
-            raise ValueError("structured_output must be a JSON object")
-        if isinstance(parsed.get("result"), str):
-            try:
-                nested = json.loads(parsed["result"])
-            except json.JSONDecodeError as exc:
-                raise ValueError("result was not a JSON object") from exc
-            if isinstance(nested, dict):
-                return nested
-            raise ValueError("result was not a JSON object")
-        return parsed
-    raise ValueError("peer output must be a JSON object")
+    return normalize_json_payload(text).report
 
 
 def validate_peer_report(report: dict[str, Any]) -> None:
@@ -508,6 +794,7 @@ def invoke_peer(
     repo_root: Path,
     env: dict[str, str] | None = None,
     raw_output_path: Path | None = None,
+    normalization_output_path: Path | None = None,
 ) -> dict[str, Any]:
     effective_env = dict(os.environ)
     if env is not None:
@@ -525,7 +812,10 @@ def invoke_peer(
         tmp = Path(tmp_name)
         output_path = tmp / "peer-output.json"
         prompt = build_prompt(request, repo_root, schema_path)
-        command = build_peer_command(request, prompt, repo_root, schema_path, output_path, effective_env)
+        try:
+            command = build_peer_command(request, prompt, repo_root, schema_path, output_path, effective_env)
+        except ValueError as exc:
+            return failure("invalid_configuration", str(exc), request)
         executable = command.args[0]
         if shutil.which(executable, path=effective_env.get("PATH")) is None:
             return failure("missing_cli", f"Required peer CLI not found on PATH: {executable}", request)
@@ -562,6 +852,10 @@ def invoke_peer(
         if completed.returncode != 0:
             if raw_output_path is not None:
                 raw_output_path.write_text(completed.stdout, encoding="utf-8")
+            claude_api_error = claude_api_error_details(completed.stdout.strip(), completed.stderr)
+            if claude_api_error is not None:
+                message, details = claude_api_error
+                return failure("peer_api_error", message, request, details)
             return failure(
                 "peer_nonzero_exit",
                 f"Peer CLI exited with status {completed.returncode}",
@@ -575,15 +869,39 @@ def invoke_peer(
         output_text = output_path.read_text(encoding="utf-8") if output_path.exists() else completed.stdout
         if raw_output_path is not None:
             raw_output_path.write_text(output_text, encoding="utf-8")
+        normalization_output_path = normalization_output_path or default_normalization_path(raw_output_path)
         try:
-            report = parse_json_payload(output_text.strip())
+            normalized = normalize_json_payload(output_text.strip())
+            report = normalized.report
         except (json.JSONDecodeError, ValueError) as exc:
+            if normalization_output_path is not None:
+                write_json(
+                    normalization_output_path,
+                    {
+                        "schema_version": "1.0",
+                        "source": "none",
+                        "input_bytes": len(output_text.encode("utf-8")),
+                        "warnings": [],
+                        "validation_status": "invalid_json",
+                        "error": str(exc),
+                    },
+                )
             return failure("invalid_json", f"Peer output was not valid JSON: {exc}", request)
 
         try:
             validate_peer_report(report)
         except PeerReportValidationError as exc:
+            if normalization_output_path is not None:
+                metadata = dict(normalized.metadata)
+                metadata["validation_status"] = "schema_validation_failed"
+                metadata["error"] = str(exc)
+                write_json(normalization_output_path, metadata)
             return failure("schema_validation_failed", str(exc), request, report)
+
+        if normalization_output_path is not None:
+            metadata = dict(normalized.metadata)
+            metadata["validation_status"] = "ok"
+            write_json(normalization_output_path, metadata)
 
         after_status = git_status(repo_root)
         if not request.get("edit_allowed", False) and after_status != before_status:
@@ -606,6 +924,7 @@ def run_request(
     repo_root: Path,
     env: dict[str, str] | None = None,
     raw_output_path: Path | None = None,
+    normalization_output_path: Path | None = None,
 ) -> dict[str, Any]:
     effective_env = dict(os.environ)
     if env is not None:
@@ -616,7 +935,7 @@ def run_request(
         return failure("invalid_request", str(exc), request)
     if nested_invocation_requested(effective_env):
         return failure("nested_invocation_refused", "Agent Collab peer invocation is already in progress", request)
-    return invoke_peer(request, repo_root, effective_env, raw_output_path)
+    return invoke_peer(request, repo_root, effective_env, raw_output_path, normalization_output_path)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -624,6 +943,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("request_json", type=Path, help="Path to the Agent Collab request JSON file.")
     parser.add_argument("--repo-root", type=Path, default=None, help="Repository root. Defaults to git top-level.")
     parser.add_argument("--raw-output", type=Path, default=None, help="Optional path for the raw peer CLI JSON output.")
+    parser.add_argument(
+        "--normalization-output",
+        type=Path,
+        default=None,
+        help="Optional path for peer output normalization metadata. Defaults next to --raw-output.",
+    )
     args = parser.parse_args(argv)
 
     repo_root = (args.repo_root or default_repo_root()).resolve()
@@ -632,7 +957,12 @@ def main(argv: list[str] | None = None) -> int:
     except RequestValidationError as exc:
         result = failure("invalid_request", str(exc))
     else:
-        result = run_request(request, repo_root, raw_output_path=args.raw_output)
+        result = run_request(
+            request,
+            repo_root,
+            raw_output_path=args.raw_output,
+            normalization_output_path=args.normalization_output,
+        )
 
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
