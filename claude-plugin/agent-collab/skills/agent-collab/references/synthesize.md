@@ -9,10 +9,10 @@ Required flow:
 3. Start the peer run before host analysis. Use `scripts/host.py start` when possible so the run directory, request, git snapshot, and background peer process are created consistently.
 4. Do not read peer output until independent host work is complete and `host-first-pass.json` exists.
 5. While the peer is running, do host analysis independently. In `ultra`, use host-local subagents for independent lenses such as mapper, reviewer, researcher, architect, security-auditor, debugger, test-strategist, and verifier when available. Do not poll peer status during this independent phase.
-6. Give host-local subagents only the neutral brief and their lens. Do not provide peer findings, host conclusions, suspected answers, or implementation defense.
+6. Give host-local subagents only the neutral brief and their lens. Do not provide peer findings, host conclusions, suspected answers, or implementation defense. Explicitly tell helper subagents not to invoke Agent Collab, `$agent-collab`, `/agent-collab`, host/peer CLIs, or cross-product peer commands.
 7. Ask all agents to use latest official documentation for external/API/platform/dependency/tooling claims and to research online extensively when current external facts could affect the answer.
 8. Use `finish` as the synchronization point after `host-first-pass.json`; status polling is not part of the normal independent-host phase. `finish` waits for peer artifacts, validates/normalizes the report, and builds synthesis support artifacts.
-9. After host first pass and peer output exist, run an advisory host-local adjudicator in `ultra`. The adjudicator receives the neutral brief, host first pass, peer report, helper reports, and claim matrix. It must not call the other product or invoke Agent Collab.
+9. After host first pass and peer output exist, run an advisory host-local adjudicator in `ultra` when one is available. The adjudicator receives the neutral brief, host first pass, peer report, helper reports, and claim matrix. It must not call the other product or invoke Agent Collab. If no adjudicator artifact exists, `finish` writes an `advisory_pending` marker rather than claiming adjudication happened.
 10. Verify important peer, helper, and adjudicator claims yourself before final synthesis.
 11. Snapshot git state after the run and report unexpected mutations, especially when `edit_allowed=false`.
 12. Synthesize the final result in Markdown.

@@ -17,11 +17,15 @@ Default to `profile=ultra`. Do not edit files unless the user explicitly asks to
 
 1. Classify `mode`, `target`, `profile`, and `edit_allowed`. Default `profile` to `ultra`.
 2. Resolve the repository root with `repo_root=$(git rev-parse --show-toplevel)`.
-3. Resolve this skill directory from the first existing candidate:
+3. Resolve this skill directory from the first existing candidate. Prefer the installed skill/plugin path when Codex exposes one; otherwise check the personal marketplace source, plugin cache, direct-skill compatibility paths, and finally this repo's source tree:
 
 ```bash
-repo_root=$(git rev-parse --show-toplevel)
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 for candidate in \
+  "${AGENT_COLLAB_SKILL_DIR:-}" \
+  "${CODEX_SKILL_DIR:-}" \
+  "$HOME/plugins/agent-collab/skills/agent-collab" \
+  "${CODEX_HOME:-$HOME/.codex}"/plugins/cache/*/agent-collab/*/skills/agent-collab \
   "$HOME/.agents/skills/agent-collab" \
   "${CODEX_HOME:-$HOME/.codex}/skills/agent-collab" \
   "$repo_root/codex-plugin/agent-collab/skills/agent-collab" \
@@ -51,7 +55,7 @@ python "$skill_dir/scripts/host.py" start \
 
 Add `--edit-allowed` only when the user explicitly delegated edits.
 
-8. While the peer runs, do independent host analysis. In `ultra`, use available host-local Codex subagents for independent lenses when useful; if named Agent Collab helper agents are not installed, use built-in Codex agents with lens-specific prompts for mapping, review, research, architecture, security, debugging, test strategy, and verification. Give each subagent only the neutral brief and its lens. Do not call `status --wait` during independent host analysis; repeated status polling is not part of the normal flow.
+8. While the peer runs, do independent host analysis. In `ultra`, use available host-local Codex subagents for independent lenses when useful; if named Agent Collab helper agents are not installed, use built-in Codex agents with lens-specific prompts for mapping, review, research, architecture, security, debugging, test strategy, and verification. Give each subagent only the neutral brief and its lens. Tell every helper: "Do not invoke Agent Collab, `$agent-collab`, `/agent-collab`, host/peer CLIs, or cross-product peer commands." Do not call `status --wait` during independent host analysis; repeated status polling is not part of the normal flow.
 9. Do not read `peer-report.json` until independent host work is complete. Write `host-first-pass.json` first:
 
 ```json
@@ -69,7 +73,7 @@ Add `--edit-allowed` only when the user explicitly delegated edits.
 python "$skill_dir/scripts/host.py" finish "$run_dir"
 ```
 
-11. In `ultra`, use a host-local advisory adjudicator after the host first pass, peer report, helper reports, and claim matrix exist. The adjudicator is advisory only and must not call Claude, Codex peer commands, or Agent Collab.
+11. In `ultra`, use a host-local advisory adjudicator after the host first pass, peer report, helper reports, and claim matrix exist. The adjudicator is advisory only and must not call Claude, Codex peer commands, or Agent Collab. If no adjudicator artifact is supplied, `finish` writes an `advisory_pending` marker.
 12. Verify important claims yourself and synthesize the final answer using `"$skill_dir/references/synthesize.md"`.
 
 Useful runtime helpers:
@@ -88,13 +92,15 @@ python "$skill_dir/scripts/host.py" doctor
 
 Use `setup` to configure local or global Agent Collab peer defaults and reset them when needed, including web research capability, Codex config overrides, Claude tool access, safe mode, timeouts, and history retention. Use `status` and `status --wait` only for manual inspection and debugging, `result` to retrieve complete stored artifacts, `cancel RUN_ID` only when the user asks to stop a specific run, and `doctor` to check Agent Collab/Codex/Claude readiness without installing anything. Use `clear-history` to remove old terminal run artifacts; active runs are preserved by default.
 
+In this source repo, run artifacts and local settings live under `tools/agent-collab/`. Installed packages write runtime state under the Agent Collab data root (`AGENT_COLLAB_STATE_HOME`, Claude plugin data when provided, Codex home for plugin-cache installs, or XDG state fallback), not into plugin code directories.
+
 ## Request Modes
 
 Allowed modes: `review`, `audit`, `brainstorm`, `research`, `design`, `plan`, `plan-critique`, `debug`, `migration`, `test-strategy`, `verify`, `implement`.
 
 ## Guardrails
 
-Cross-agent depth is capped at 1. Local subagent depth is capped at 1 by default. Peer runs receive full repo, shell, tool, and network capability by default, but the runtime prepends a PATH guard that blocks the peer from calling the host CLI.
+Cross-agent depth is capped at 1. Local subagent depth is capped at 1 by default. Peer runs receive full repo, shell, tool, and network capability by default, and no-edit requests are enforced by prompt plus post-run git mutation detection. Use safe mode when technical read-only restrictions are required. The runtime prepends a PATH guard that blocks ordinary unqualified host CLI lookup, but it is not a sandbox and cannot block absolute host CLI paths or deliberate PATH rewriting.
 
 Full capability is for investigation and validation. It is not blanket permission to mutate the repo.
 

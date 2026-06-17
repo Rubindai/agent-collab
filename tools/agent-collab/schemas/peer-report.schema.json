@@ -20,13 +20,32 @@
     "limitations",
     "next_actions"
   ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {"status": {"const": "peer_failed"}},
+        "required": ["status"]
+      },
+      "then": {"required": ["error"]}
+    },
+    {
+      "if": {
+        "properties": {"status": {"const": "ok"}},
+        "required": ["status"]
+      },
+      "then": {
+        "not": {"required": ["error"]}
+      }
+    }
+  ],
   "properties": {
     "schema_version": {
       "const": "1.0"
     },
     "run_id": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9._-]+$"
     },
     "origin": {
       "enum": ["claude", "codex"]

@@ -11,7 +11,24 @@
     "summary": {"type": "string"},
     "claims": {
       "type": "array",
-      "items": {"type": "object"}
+      "items": {
+        "type": "object",
+        "required": ["claim", "status", "evidence"],
+        "additionalProperties": true,
+        "properties": {
+          "claim": {"type": "string"},
+          "status": {
+            "enum": [
+              "confirmed",
+              "plausible_unverified",
+              "rejected",
+              "product_decision",
+              "needs_human_input"
+            ]
+          },
+          "evidence": {"type": "string"}
+        }
+      }
     }
   }
 }

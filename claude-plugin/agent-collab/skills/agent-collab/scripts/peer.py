@@ -6,11 +6,14 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+
+sys.dont_write_bytecode = True
 
 ORIGINS = {"claude", "codex"}
 MODES = {
@@ -74,8 +77,11 @@ REQUIRED_REQUEST_KEYS = {
 REQUEST_DEFAULTS = {
     "profile": "ultra",
     "local_subagents_allowed": True,
-    "max_local_subagents": 6,
+    "max_local_subagents": 8,
+    "web_research": "live",
 }
+REQUEST_KEYS = REQUIRED_REQUEST_KEYS | set(REQUEST_DEFAULTS)
+RUN_ID_SAFE_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
 MIN_AGENT_TIMEOUT_SECONDS = 2700
 DEFAULT_AGENT_TIMEOUT_SECONDS = 2700
 WEB_RESEARCH_CHOICES = {"cached", "live", "disabled"}
@@ -162,6 +168,9 @@ def default_repo_root() -> Path:
 def validate_request(request: dict[str, Any]) -> None:
     for key, value in REQUEST_DEFAULTS.items():
         request.setdefault(key, value)
+    unknown = set(request) - REQUEST_KEYS
+    if unknown:
+        raise RequestValidationError(f"request has unknown keys: {sorted(unknown)}")
     missing = REQUIRED_REQUEST_KEYS - request.keys()
     if missing:
         raise RequestValidationError(f"request missing required keys: {sorted(missing)}")
@@ -183,9 +192,13 @@ def validate_request(request: dict[str, Any]) -> None:
         raise RequestValidationError("local_subagents_allowed must be a boolean")
     if not isinstance(request["max_local_subagents"], int) or request["max_local_subagents"] < 0:
         raise RequestValidationError("max_local_subagents must be a non-negative integer")
+    if request["web_research"] not in WEB_RESEARCH_CHOICES:
+        raise RequestValidationError(f"web_research must be one of {sorted(WEB_RESEARCH_CHOICES)}")
     for key in ("target", "brief", "run_id"):
         if not isinstance(request[key], str) or not request[key].strip():
             raise RequestValidationError(f"{key} must be a non-empty string")
+    if request["run_id"] in {".", ".."} or any(char not in RUN_ID_SAFE_CHARS for char in request["run_id"]):
+        raise RequestValidationError("run_id must be a basename using only letters, numbers, '.', '_', or '-'")
 
 
 def load_request(path: Path) -> dict[str, Any]:
@@ -199,6 +212,19 @@ def load_request(path: Path) -> dict[str, Any]:
     return data
 
 
+def fenced_block(info_string: str, text: str) -> str:
+    max_run = 0
+    current_run = 0
+    for char in text:
+        if char == "`":
+            current_run += 1
+            max_run = max(max_run, current_run)
+        else:
+            current_run = 0
+    fence = "`" * max(3, max_run + 1)
+    return "\n".join([f"{fence}{info_string}", text, fence])
+
+
 def build_prompt(request: dict[str, Any], repo_root: Path, schema_path: Path) -> str:
     contract = (resource_root() / "references" / "peer-only.md").read_text(encoding="utf-8").strip()
     prompt_blocks = (resource_root() / "references" / "peer-prompt-blocks.md").read_text(encoding="utf-8").strip()
@@ -209,6 +235,18 @@ def build_prompt(request: dict[str, Any], repo_root: Path, schema_path: Path) ->
         if request["edit_allowed"]
         else "Do not modify files or produce any working-tree changes."
     )
+    web_research = request.get("web_research", "live")
+    if web_research == "disabled":
+        web_line = "- Do not use online research. If current external facts are necessary, state that limitation explicitly."
+    else:
+        web_line = "- Use latest official documentation for external/API/platform/dependency/tooling claims. Research online when current external facts could affect the answer; prefer official sources and source-backed evidence."
+    if request["local_subagents_allowed"] and request["max_local_subagents"] > 0:
+        subagent_lines = [
+            "- Use native local subagents when that improves independent coverage or speed.",
+            "- If using local subagents, divide work by independent lenses, wait for their results, and merge only evidence-backed findings into this report.",
+        ]
+    else:
+        subagent_lines = ["- Do not use local subagents for this peer run."]
     return "\n".join(
         [
             "# Agent Collab Peer Request",
@@ -223,17 +261,17 @@ def build_prompt(request: dict[str, Any], repo_root: Path, schema_path: Path) ->
             "</objective>",
             "",
             "<context>",
-            f"- Repository root: {repo_root}",
-            f"- Target: {request['target']}",
+            "Repository root:",
+            fenced_block("text", str(repo_root)),
+            "Target:",
+            fenced_block("text", request["target"]),
             "</context>",
             "",
             "<success_criteria>",
             "- Inspect enough repository evidence to answer the task reliably.",
             "- Cite concrete files, commands, or observations for material claims.",
-            "- Use latest official documentation for external/API/platform/dependency/tooling claims.",
-            "- Research online extensively when current external facts could affect the answer. Prefer official sources and cite source-backed evidence.",
-            "- Use native local subagents when that improves independent coverage or speed.",
-            "- If using local subagents, divide work by independent lenses, wait for their results, and merge only evidence-backed findings into this report.",
+            web_line,
+            *subagent_lines,
             "- Distinguish confirmed issues from uncertainty or product judgment.",
             "- Stop when the core request can be answered with useful evidence.",
             "</success_criteria>",
@@ -241,14 +279,13 @@ def build_prompt(request: dict[str, Any], repo_root: Path, schema_path: Path) ->
             "<constraints>",
             edit_line,
             f"Profile: {request['profile']}",
+            f"Web research: {web_research}",
             f"Local subagents allowed: {str(request['local_subagents_allowed']).lower()}",
             f"Maximum local subagents: {request['max_local_subagents']}",
             "</constraints>",
             "",
             "<task_brief>",
-            "```text",
-            request["brief"].strip(),
-            "```",
+            fenced_block("text", request["brief"].strip()),
             "</task_brief>",
             "",
             "<peer_contract>",
@@ -260,15 +297,11 @@ def build_prompt(request: dict[str, Any], repo_root: Path, schema_path: Path) ->
             "</prompt_contract>",
             "",
             "<request_json>",
-            "```json",
-            request_json,
-            "```",
+            fenced_block("json", request_json),
             "</request_json>",
             "",
             "<response_schema>",
-            "```json",
-            schema,
-            "```",
+            fenced_block("json", schema),
             "</response_schema>",
             "",
             "<output_instruction>",
@@ -353,8 +386,8 @@ def build_peer_command(
     output_path: Path,
     env: dict[str, str],
 ) -> PeerCommand:
-    safe_mode = env.get("AGENT_COLLAB_SAFE_MODE") == "1"
-    web_research = web_research_mode(env)
+    safe_mode = env_bool(env, "AGENT_COLLAB_SAFE_MODE")
+    web_research = request.get("web_research") if request.get("web_research") in WEB_RESEARCH_CHOICES else web_research_mode(env)
     if request["peer"] == "claude":
         schema_inline = schema_path.read_text(encoding="utf-8")
         args = [
@@ -567,7 +600,10 @@ def timeout_seconds(env: dict[str, str]) -> float | None:
     raw = env.get("AGENT_COLLAB_TIMEOUT_SECONDS", str(DEFAULT_AGENT_TIMEOUT_SECONDS)).strip()
     if not raw or raw == "0":
         return None
-    value = float(raw)
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError("AGENT_COLLAB_TIMEOUT_SECONDS must be 0 or a positive number of seconds") from exc
     if value <= 0:
         return None
     return max(value, MIN_AGENT_TIMEOUT_SECONDS)
@@ -588,6 +624,30 @@ def git_status(repo_root: Path) -> str:
     return completed.stdout
 
 
+def git_mutation_snapshot(repo_root: Path) -> dict[str, str]:
+    snapshot: dict[str, str] = {}
+    commands = {
+        "status": ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        "diff": ["git", "diff", "--binary", "--no-ext-diff"],
+        "diff_cached": ["git", "diff", "--cached", "--binary", "--no-ext-diff"],
+    }
+    for name, command in commands.items():
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=repo_root,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+        except FileNotFoundError:
+            snapshot[name] = ""
+        else:
+            snapshot[name] = completed.stdout
+    return snapshot
+
+
 def make_host_cli_guard(tmp: Path, host: str) -> Path:
     bin_dir = tmp / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
@@ -605,6 +665,18 @@ def make_host_cli_guard(tmp: Path, host: str) -> Path:
 def write_json(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def env_bool(env: dict[str, str], key: str, default: bool = False) -> bool:
+    value = env.get(key)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off", ""}:
+        return False
+    raise ValueError(f"{key} must be one of 1/0, true/false, yes/no, or on/off")
 
 
 def default_normalization_path(raw_output_path: Path | None) -> Path | None:
@@ -779,6 +851,8 @@ def validate_peer_report(report: dict[str, Any]) -> None:
             raise PeerReportValidationError(f"{key} must contain strings")
     if report["status"] == "peer_failed" and "error" not in report:
         raise PeerReportValidationError("peer_failed reports must include error")
+    if report["status"] == "ok" and "error" in report:
+        raise PeerReportValidationError("ok reports must not include error")
     if "error" in report:
         error = report["error"]
         if not isinstance(error, dict):
@@ -806,9 +880,25 @@ def invoke_peer(
         validate_request(request)
     except RequestValidationError as exc:
         return failure("invalid_request", str(exc), request)
+    effective_env["AGENT_COLLAB_WEB_RESEARCH"] = request["web_research"]
 
     schema_path = default_schema_path()
-    before_status = git_status(repo_root)
+    before_snapshot = git_mutation_snapshot(repo_root)
+
+    def with_mutation_check(report: dict[str, Any]) -> dict[str, Any]:
+        after_snapshot = git_mutation_snapshot(repo_root)
+        if not request.get("edit_allowed", False) and after_snapshot != before_snapshot:
+            return failure(
+                "unexpected_working_tree_mutation",
+                "Peer changed the working tree while edit_allowed=false",
+                request,
+                {
+                    "before": before_snapshot,
+                    "after": after_snapshot,
+                    "peer_report": report,
+                },
+            )
+        return report
 
     with tempfile.TemporaryDirectory(prefix="agent-collab-") as tmp_name:
         tmp = Path(tmp_name)
@@ -816,11 +906,12 @@ def invoke_peer(
         prompt = build_prompt(request, repo_root, schema_path)
         try:
             command = build_peer_command(request, prompt, repo_root, schema_path, output_path, effective_env)
+            peer_timeout = timeout_seconds(effective_env)
         except ValueError as exc:
-            return failure("invalid_configuration", str(exc), request)
+            return with_mutation_check(failure("invalid_configuration", str(exc), request))
         executable = command.args[0]
         if shutil.which(executable, path=effective_env.get("PATH")) is None:
-            return failure("missing_cli", f"Required peer CLI not found on PATH: {executable}", request)
+            return with_mutation_check(failure("missing_cli", f"Required peer CLI not found on PATH: {executable}", request))
 
         peer_env = dict(effective_env)
         peer_env["AGENT_COLLAB_PEER_ONLY"] = "true"
@@ -843,13 +934,15 @@ def invoke_peer(
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                timeout=timeout_seconds(effective_env),
+                timeout=peer_timeout,
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
-            return failure("timeout", "Peer run exceeded AGENT_COLLAB_TIMEOUT_SECONDS", request, str(exc))
+            return with_mutation_check(
+                failure("timeout", "Peer run exceeded AGENT_COLLAB_TIMEOUT_SECONDS", request, str(exc))
+            )
         except FileNotFoundError as exc:
-            return failure("missing_cli", f"Required peer CLI not found: {executable}", request, str(exc))
+            return with_mutation_check(failure("missing_cli", f"Required peer CLI not found: {executable}", request, str(exc)))
 
         if completed.returncode != 0:
             if raw_output_path is not None:
@@ -857,15 +950,17 @@ def invoke_peer(
             claude_api_error = claude_api_error_details(completed.stdout.strip(), completed.stderr)
             if claude_api_error is not None:
                 message, details = claude_api_error
-                return failure("peer_api_error", message, request, details)
-            return failure(
-                "peer_nonzero_exit",
-                f"Peer CLI exited with status {completed.returncode}",
-                request,
-                {
-                    "stdout_tail": completed.stdout[-4000:],
-                    "stderr_tail": completed.stderr[-4000:],
-                },
+                return with_mutation_check(failure("peer_api_error", message, request, details))
+            return with_mutation_check(
+                failure(
+                    "peer_nonzero_exit",
+                    f"Peer CLI exited with status {completed.returncode}",
+                    request,
+                    {
+                        "stdout_tail": completed.stdout[-4000:],
+                        "stderr_tail": completed.stderr[-4000:],
+                    },
+                )
             )
 
         output_text = output_path.read_text(encoding="utf-8") if output_path.exists() else completed.stdout
@@ -888,7 +983,7 @@ def invoke_peer(
                         "error": str(exc),
                     },
                 )
-            return failure("invalid_json", f"Peer output was not valid JSON: {exc}", request)
+            return with_mutation_check(failure("invalid_json", f"Peer output was not valid JSON: {exc}", request))
 
         try:
             validate_peer_report(report)
@@ -898,27 +993,14 @@ def invoke_peer(
                 metadata["validation_status"] = "schema_validation_failed"
                 metadata["error"] = str(exc)
                 write_json(normalization_output_path, metadata)
-            return failure("schema_validation_failed", str(exc), request, report)
+            return with_mutation_check(failure("schema_validation_failed", str(exc), request, report))
 
         if normalization_output_path is not None:
             metadata = dict(normalized.metadata)
             metadata["validation_status"] = "ok"
             write_json(normalization_output_path, metadata)
 
-        after_status = git_status(repo_root)
-        if not request.get("edit_allowed", False) and after_status != before_status:
-            return failure(
-                "unexpected_working_tree_mutation",
-                "Peer changed the working tree while edit_allowed=false",
-                request,
-                {
-                    "before": before_status,
-                    "after": after_status,
-                    "peer_report": report,
-                },
-            )
-
-        return report
+        return with_mutation_check(report)
 
 
 def run_request(

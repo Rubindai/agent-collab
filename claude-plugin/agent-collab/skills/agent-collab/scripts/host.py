@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -14,6 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+
+sys.dont_write_bytecode = True
 
 ORIGINS = {"claude", "codex"}
 MODES = {
@@ -35,7 +38,7 @@ DEFAULT_HISTORY_RETAINED_RUNS = 50
 SETTING_DEFAULTS: dict[str, Any] = {
     "profile": "ultra",
     "local_subagents_allowed": True,
-    "max_local_subagents": 6,
+    "max_local_subagents": 8,
     "agent_timeout_seconds": "2700",
     "safe_mode": False,
     "codex_model": "gpt-5.5",
@@ -67,9 +70,28 @@ SETTING_ENV_KEYS = {
     "history_retained_runs": "AGENT_COLLAB_HISTORY_RETAINED_RUNS",
 }
 PROFILE_CHOICES = {"standard", "max", "ultra"}
-CODEX_EFFORT_CHOICES = {"low", "medium", "high", "xhigh"}
+CODEX_EFFORT_CHOICES = {"minimal", "low", "medium", "high", "xhigh"}
 CLAUDE_EFFORT_CHOICES = {"low", "medium", "high", "xhigh", "max"}
 WEB_RESEARCH_CHOICES = {"cached", "live", "disabled"}
+CLAIM_STATUSES = {
+    "confirmed",
+    "plausible_unverified",
+    "rejected",
+    "product_decision",
+    "needs_human_input",
+}
+CLAIM_SOURCES = {"host", "peer", "helper", "adjudicator"}
+ADJUDICATOR_STATUSES = {"advisory_pending", "ok", "needs_human_input", "blocked"}
+RECOMMENDED_VERDICTS = {
+    "pass",
+    "pass_with_concerns",
+    "changes_recommended",
+    "ready",
+    "needs_revision",
+    "blocked",
+    "informational",
+}
+RUN_ID_SAFE_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
 DEFAULT_FINISH_TIMEOUT_SECONDS = 2700
 FINISH_TIMEOUT_GRACE_SECONDS = 30
 FINISH_WAIT_POLL_SECONDS = 1
@@ -90,11 +112,35 @@ def resource_root() -> Path:
     return runtime_dir().parent
 
 
+def repo_storage_id(repo_root: Path) -> str:
+    digest = hashlib.sha256(str(repo_root).encode("utf-8")).hexdigest()[:12]
+    safe_name = "".join(char if char.isalnum() or char in "._-" else "-" for char in repo_root.name).strip(".-")
+    return f"{safe_name[:48] or 'repo'}-{digest}"
+
+
+def default_state_root() -> Path:
+    if os.environ.get("AGENT_COLLAB_STATE_HOME"):
+        return Path(os.environ["AGENT_COLLAB_STATE_HOME"]).expanduser()
+    if os.environ.get("CLAUDE_PLUGIN_DATA"):
+        return Path(os.environ["CLAUDE_PLUGIN_DATA"]).expanduser()
+
+    codex_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).expanduser()
+    try:
+        if resource_root().resolve().is_relative_to(codex_home.resolve()):
+            return codex_home / "agent-collab"
+    except OSError:
+        pass
+
+    base = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")).expanduser()
+    return base / "agent-collab"
+
+
 def default_storage_root(repo_root: Path) -> Path:
-    root = resource_root()
-    if root.name == "agent-collab" and root.parent.name == "tools":
-        return repo_root / "tools" / "agent-collab"
-    return root
+    root = resource_root().resolve()
+    source_root = (repo_root / "tools" / "agent-collab").resolve()
+    if root == source_root:
+        return source_root
+    return default_state_root() / "repos" / repo_storage_id(repo_root)
 
 
 def default_run_root(repo_root: Path) -> Path:
@@ -167,6 +213,16 @@ def utc_run_id(host: str, mode: str) -> str:
     return f"{stamp}-{host}-{mode}-{suffix}"
 
 
+def is_safe_run_id(run_id: str) -> bool:
+    return bool(run_id) and run_id not in {".", ".."} and all(char in RUN_ID_SAFE_CHARS for char in run_id)
+
+
+def require_safe_run_id(run_id: str) -> str:
+    if not is_safe_run_id(run_id):
+        raise ValueError("run_id must be a non-empty basename using only letters, numbers, '.', '_', or '-'")
+    return run_id
+
+
 def write_json(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -188,7 +244,10 @@ def normalize_timeout(value: Any) -> str:
     raw = str(value).strip()
     if raw in {"", "0"}:
         return "0"
-    seconds = float(raw)
+    try:
+        seconds = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("timeout must be 0 or a positive number of seconds") from exc
     if seconds <= 0:
         return "0"
     return str(int(seconds)) if seconds.is_integer() else str(seconds)
@@ -326,6 +385,21 @@ def resolve_settings(repo_root: Path, env: dict[str, str] | None = None) -> dict
     return {"settings": effective, "sources": sources, "layers": layers}
 
 
+def settings_error_messages(resolved: dict[str, Any]) -> list[str]:
+    return [
+        f"{scope} settings ({layer['path']}): {layer['error']}"
+        for scope, layer in resolved["layers"].items()
+        if layer.get("error")
+    ]
+
+
+def require_valid_settings(resolved: dict[str, Any]) -> None:
+    errors = settings_error_messages(resolved)
+    if errors:
+        detail = "\n".join(f"- {error}" for error in errors)
+        raise SystemExit(f"invalid Agent Collab settings; refusing to use defaults:\n{detail}")
+
+
 def settings_to_env(settings: dict[str, Any]) -> dict[str, str]:
     return {
         "AGENT_COLLAB_PROFILE": str(settings["profile"]),
@@ -408,6 +482,16 @@ def json_number(value: float | None) -> float | int | None:
     return int(value) if float(value).is_integer() else value
 
 
+def path_is_creatable(path: Path) -> bool:
+    current = path
+    while not current.exists():
+        parent = current.parent
+        if parent == current:
+            return False
+        current = parent
+    return os.access(current, os.W_OK)
+
+
 def file_info(path: Path) -> dict[str, Any]:
     return {
         "path": str(path),
@@ -431,25 +515,35 @@ def stderr_tail(path: Path, limit: int = 4000) -> str:
     return path.read_text(encoding="utf-8", errors="replace")[-limit:]
 
 
+def ensure_run_dir(path: Path, run_root: Path, *, allow_external: bool = False) -> Path:
+    resolved = path.resolve()
+    root = resolved.parent if allow_external else run_root
+    if is_direct_run_dir(root, resolved):
+        return resolved
+    scope = "a valid Agent Collab run directory" if allow_external else f"a direct child of {run_root}"
+    raise SystemExit(f"invalid Agent Collab run directory: {resolved} must be {scope}")
+
+
 def resolve_run_reference(repo_root: Path, reference: str | None, run_root: Path | None = None) -> Path:
     root = (run_root or default_run_root(repo_root)).resolve()
     if reference:
         candidate = Path(reference).expanduser()
-        if candidate.exists():
-            return candidate.resolve()
+        if (candidate.is_absolute() or len(candidate.parts) > 1) and candidate.exists():
+            return ensure_run_dir(candidate, root, allow_external=True)
         state = load_state_runtime()
-        job = state.find_job(root, reference)
-        if job and job.get("run_dir"):
-            return Path(str(job["run_dir"])).resolve()
+        if is_safe_run_id(reference):
+            job = state.find_job(root, reference)
+            if job and job.get("run_dir"):
+                return ensure_run_dir(Path(str(job["run_dir"])).expanduser(), root)
         candidate = root / reference
         if candidate.exists():
-            return candidate.resolve()
+            return ensure_run_dir(candidate, root)
         raise SystemExit(f"unknown Agent Collab run: {reference}")
 
     state = load_state_runtime()
     job = state.find_job(root, None)
     if job and job.get("run_dir"):
-        return Path(str(job["run_dir"])).resolve()
+        return ensure_run_dir(Path(str(job["run_dir"])).expanduser(), root)
     raise SystemExit(f"no Agent Collab runs found under {root}")
 
 
@@ -541,10 +635,14 @@ def wait_for_peer_report(peer_report_path: Path, pid: int, timeout_seconds: floa
 def start(args: argparse.Namespace) -> int:
     repo_root = (args.repo_root or default_repo_root()).resolve()
     resolved = resolve_settings(repo_root)
+    require_valid_settings(resolved)
     settings = resolved["settings"]
     host = args.host
     peer = "claude" if host == "codex" else "codex"
-    run_id = args.run_id or utc_run_id(host, args.mode)
+    try:
+        run_id = require_safe_run_id(args.run_id or utc_run_id(host, args.mode))
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     run_root = (args.run_root or default_run_root(repo_root)).resolve()
     run_dir = run_root / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
@@ -569,6 +667,7 @@ def start(args: argparse.Namespace) -> int:
         "profile": profile,
         "local_subagents_allowed": local_subagents_allowed,
         "max_local_subagents": max_local_subagents,
+        "web_research": settings["web_research"],
     }
     peer_runtime = load_peer_runtime()
     peer_runtime.validate_request(request)
@@ -601,8 +700,9 @@ def start(args: argparse.Namespace) -> int:
     peer_stderr = (run_dir / "peer.stderr.log").open("w", encoding="utf-8")
     env = dict(os.environ)
     for key, value in settings_to_env(settings).items():
-        env.setdefault(key, value)
+        env[key] = value
     env["AGENT_COLLAB_PROFILE"] = profile
+    env["AGENT_COLLAB_WEB_RESEARCH"] = settings["web_research"]
     agent_timeout = peer_runtime.timeout_seconds(env)
     if agent_timeout is not None:
         env["AGENT_COLLAB_TIMEOUT_SECONDS"] = (
@@ -633,6 +733,7 @@ def start(args: argparse.Namespace) -> int:
 
     process_info = {
         "pid": process.pid,
+        "pgid": process.pid,
         "run_id": run_id,
         "run_dir": str(run_dir),
         "repo_root": str(repo_root),
@@ -672,6 +773,171 @@ def load_json(path: Path) -> dict[str, Any]:
     return data
 
 
+class ArtifactValidationError(ValueError):
+    pass
+
+
+class PeerReportRequestMismatch(ArtifactValidationError):
+    pass
+
+
+def validate_claim_shape(claim: Any, context: str, require_source: bool = False) -> None:
+    if not isinstance(claim, dict):
+        raise ArtifactValidationError(f"{context} claim must be an object")
+    for key in ("claim", "status", "evidence"):
+        if key not in claim:
+            raise ArtifactValidationError(f"{context} claim missing {key}")
+        if not isinstance(claim[key], str):
+            raise ArtifactValidationError(f"{context} claim {key} must be a string")
+    if claim["status"] not in CLAIM_STATUSES:
+        raise ArtifactValidationError(f"{context} claim status is invalid")
+    if require_source:
+        if claim.get("source") not in CLAIM_SOURCES:
+            raise ArtifactValidationError(f"{context} claim source is invalid")
+
+
+def validate_host_first_pass(report: dict[str, Any], request: dict[str, Any]) -> None:
+    required = {"schema_version", "run_id", "summary", "claims"}
+    missing = required - report.keys()
+    if missing:
+        raise ArtifactValidationError(f"host-first-pass missing required keys: {sorted(missing)}")
+    if report["schema_version"] != "1.0":
+        raise ArtifactValidationError("host-first-pass schema_version must be 1.0")
+    if report["run_id"] != request.get("run_id"):
+        raise ArtifactValidationError("host-first-pass run_id does not match host request")
+    if not isinstance(report["summary"], str):
+        raise ArtifactValidationError("host-first-pass summary must be a string")
+    if not isinstance(report["claims"], list):
+        raise ArtifactValidationError("host-first-pass claims must be an array")
+    for claim in report["claims"]:
+        validate_claim_shape(claim, "host-first-pass")
+
+
+def validate_peer_report_matches_request(report: dict[str, Any], request: dict[str, Any]) -> None:
+    for key in ("run_id", "origin", "host", "peer", "mode", "target"):
+        if report.get(key) != request.get(key):
+            raise PeerReportRequestMismatch(f"peer report {key} does not match host request")
+
+
+def validate_claim_matrix(report: dict[str, Any], request: dict[str, Any]) -> None:
+    required = {"schema_version", "run_id", "claims"}
+    missing = required - report.keys()
+    if missing:
+        raise ArtifactValidationError(f"claim-matrix missing required keys: {sorted(missing)}")
+    if report["schema_version"] != "1.0":
+        raise ArtifactValidationError("claim-matrix schema_version must be 1.0")
+    if report["run_id"] != request.get("run_id"):
+        raise ArtifactValidationError("claim-matrix run_id does not match host request")
+    if not isinstance(report["claims"], list):
+        raise ArtifactValidationError("claim-matrix claims must be an array")
+    for claim in report["claims"]:
+        validate_claim_shape(claim, "claim-matrix", require_source=True)
+
+
+def validate_adjudicator_report(report: dict[str, Any], request: dict[str, Any]) -> None:
+    required = {
+        "schema_version",
+        "run_id",
+        "status",
+        "summary",
+        "false_positives",
+        "claims_needing_verification",
+        "recommended_verdict",
+    }
+    missing = required - report.keys()
+    if missing:
+        raise ArtifactValidationError(f"adjudicator-report missing required keys: {sorted(missing)}")
+    unknown = set(report) - (required | {"claims"})
+    if unknown:
+        raise ArtifactValidationError(f"adjudicator-report has unknown keys: {sorted(unknown)}")
+    if report["schema_version"] != "1.0":
+        raise ArtifactValidationError("adjudicator-report schema_version must be 1.0")
+    if report["run_id"] != request.get("run_id"):
+        raise ArtifactValidationError("adjudicator-report run_id does not match host request")
+    for key in ("status", "summary", "recommended_verdict"):
+        if not isinstance(report[key], str):
+            raise ArtifactValidationError(f"adjudicator-report {key} must be a string")
+    if report["status"] not in ADJUDICATOR_STATUSES:
+        raise ArtifactValidationError("adjudicator-report status is invalid")
+    if report["recommended_verdict"] not in RECOMMENDED_VERDICTS:
+        raise ArtifactValidationError("adjudicator-report recommended_verdict is invalid")
+    for key in ("false_positives", "claims_needing_verification"):
+        if not isinstance(report[key], list) or not all(isinstance(item, str) for item in report[key]):
+            raise ArtifactValidationError(f"adjudicator-report {key} must be an array of strings")
+    if "claims" in report:
+        if not isinstance(report["claims"], list):
+            raise ArtifactValidationError("adjudicator-report claims must be an array")
+        for claim in report["claims"]:
+            validate_claim_shape(claim, "adjudicator-report")
+
+
+def claims_with_source(report: dict[str, Any], source: str) -> list[dict[str, Any]]:
+    return [
+        {**claim, "source": source}
+        for claim in report.get("claims", [])
+        if isinstance(claim, dict)
+    ]
+
+
+def load_helper_claims(run_dir: Path) -> list[dict[str, Any]]:
+    path = run_dir / "helper-reports.json"
+    if not path.exists():
+        return []
+    data = json.loads(path.read_text(encoding="utf-8"))
+    reports: list[Any]
+    if isinstance(data, dict):
+        reports = []
+        if isinstance(data.get("claims"), list):
+            reports.append(data)
+        if isinstance(data.get("reports"), list):
+            reports.extend(data["reports"])
+    elif isinstance(data, list):
+        reports = data
+    else:
+        raise ArtifactValidationError("helper-reports must be an object or array")
+
+    claims: list[dict[str, Any]] = []
+    for report in reports:
+        if not isinstance(report, dict):
+            raise ArtifactValidationError("helper report must be an object")
+        claims.extend(claims_with_source(report, "helper"))
+    return claims
+
+
+def build_claim_matrix(
+    request: dict[str, Any],
+    host_report: dict[str, Any],
+    peer_report: dict[str, Any],
+    helper_claims: list[dict[str, Any]] | None = None,
+    adjudicator_report: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    claim_matrix = {
+        "schema_version": "1.0",
+        "run_id": request["run_id"],
+        "claims": (
+            claims_with_source(host_report, "host")
+            + claims_with_source(peer_report, "peer")
+            + (helper_claims or [])
+            + claims_with_source(adjudicator_report or {}, "adjudicator")
+        ),
+    }
+    validate_claim_matrix(claim_matrix, request)
+    return claim_matrix
+
+
+def default_adjudicator_report(request: dict[str, Any], peer_report: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": "1.0",
+        "run_id": request["run_id"],
+        "status": "advisory_pending",
+        "summary": "Ultra profile expects a host-local advisory adjudicator after independent reports. This placeholder means no adjudicator artifact was supplied before finish.",
+        "false_positives": [],
+        "claims_needing_verification": [],
+        "recommended_verdict": str(peer_report.get("verdict", "blocked")),
+        "claims": [],
+    }
+
+
 def normalize_peer_report_from_artifacts(
     peer_runtime: Any,
     run_dir: Path,
@@ -691,6 +957,7 @@ def normalize_peer_report_from_artifacts(
         try:
             normalized = peer_runtime.normalize_json_payload(source_path.read_text(encoding="utf-8").strip())
             peer_runtime.validate_peer_report(normalized.report)
+            validate_peer_report_matches_request(normalized.report, request)
         except Exception as exc:
             last_error = exc
             continue
@@ -714,6 +981,8 @@ def normalize_peer_report_from_artifacts(
     message = str(last_error) if last_error is not None else "peer report missing or empty"
     if isinstance(last_error, getattr(peer_runtime, "PeerReportValidationError")):
         failure_kind = "schema_validation_failed"
+    elif isinstance(last_error, PeerReportRequestMismatch):
+        failure_kind = "peer_report_mismatch"
     else:
         failure_kind = "invalid_json"
     peer_report = peer_runtime.failure(failure_kind, message, request)
@@ -742,6 +1011,11 @@ def finish(args: argparse.Namespace) -> int:
     host_first_pass = run_dir / "host-first-pass.json"
     if not host_first_pass.exists():
         raise SystemExit(f"missing required independent host analysis: {host_first_pass}")
+    host_report = load_json(host_first_pass)
+    try:
+        validate_host_first_pass(host_report, request)
+    except ArtifactValidationError as exc:
+        raise SystemExit(f"invalid independent host analysis {host_first_pass}: {exc}") from exc
     state.upsert_job(run_root, job_patch_from_run(run_dir, "running", "normalizing_peer"))
 
     process_info = load_json(run_dir / "peer-process.json")
@@ -797,34 +1071,23 @@ def finish(args: argparse.Namespace) -> int:
     peer_runtime = load_peer_runtime()
     peer_report, validation_status = normalize_peer_report_from_artifacts(peer_runtime, run_dir, request)
 
-    host_report = load_json(host_first_pass)
-    claim_matrix = {
-        "schema_version": "1.0",
-        "run_id": request["run_id"],
-        "claims": [
-            {**claim, "source": "host"}
-            for claim in host_report.get("claims", [])
-            if isinstance(claim, dict)
-        ]
-        + [
-            {**claim, "source": "peer"}
-            for claim in peer_report.get("claims", [])
-            if isinstance(claim, dict)
-        ],
-    }
-    write_json(run_dir / "claim-matrix.json", claim_matrix)
+    adjudicator_path = run_dir / "adjudicator-report.json"
+    if adjudicator_path.exists():
+        adjudicator = load_json(adjudicator_path)
+    else:
+        adjudicator = default_adjudicator_report(request, peer_report)
+        write_json(adjudicator_path, adjudicator)
+    try:
+        validate_adjudicator_report(adjudicator, request)
+    except ArtifactValidationError as exc:
+        raise SystemExit(f"invalid adjudicator report {adjudicator_path}: {exc}") from exc
 
-    adjudicator = {
-        "schema_version": "1.0",
-        "run_id": request["run_id"],
-        "status": "advisory_pending",
-        "summary": "Ultra profile expects a host-local adjudicator after independent reports. If no native subagent is available, the host performs this step directly.",
-        "false_positives": [],
-        "claims_needing_verification": [],
-        "recommended_verdict": peer_report.get("verdict", "blocked"),
-    }
-    if not (run_dir / "adjudicator-report.json").exists():
-        write_json(run_dir / "adjudicator-report.json", adjudicator)
+    try:
+        helper_claims = load_helper_claims(run_dir)
+        claim_matrix = build_claim_matrix(request, host_report, peer_report, helper_claims, adjudicator)
+    except ArtifactValidationError as exc:
+        raise SystemExit(f"invalid helper or claim-matrix artifact in {run_dir}: {exc}") from exc
+    write_json(run_dir / "claim-matrix.json", claim_matrix)
 
     repo_root = Path(process_info.get("repo_root", str(default_repo_root()))).resolve()
     run_snapshot(repo_root, run_dir / "after.snapshot")
@@ -981,15 +1244,16 @@ def delete_history_candidates(run_root: Path, state_runtime: Any, candidates: li
     if deleted and not dry_run:
         deleted_ids = {item["run_id"] for item in deleted}
         deleted_dirs = {item["run_dir"] for item in deleted}
-        loaded_state = state_runtime.load_state(run_root)
-        loaded_state["jobs"] = [
-            job
-            for job in loaded_state.get("jobs", [])
-            if isinstance(job, dict)
-            and str(job.get("id")) not in deleted_ids
-            and str(job.get("run_dir")) not in deleted_dirs
-        ]
-        state_runtime.save_state(run_root, loaded_state)
+        with state_runtime.state_lock(run_root):
+            loaded_state = state_runtime.load_state(run_root)
+            loaded_state["jobs"] = [
+                job
+                for job in loaded_state.get("jobs", [])
+                if isinstance(job, dict)
+                and str(job.get("id")) not in deleted_ids
+                and str(job.get("run_dir")) not in deleted_dirs
+            ]
+            state_runtime.save_state(run_root, loaded_state)
     return deleted
 
 
@@ -1078,6 +1342,16 @@ def terminate_process_group(pid: int) -> str:
     return "killed"
 
 
+def process_identity_matches(process_info: dict[str, Any]) -> bool:
+    expected_pgid = process_info.get("pgid")
+    if expected_pgid is None:
+        return True
+    try:
+        return os.getpgid(int(process_info["pid"])) == int(expected_pgid)
+    except (ProcessLookupError, PermissionError, KeyError, TypeError, ValueError):
+        return False
+
+
 def cancel(args: argparse.Namespace) -> int:
     repo_root = (args.repo_root or default_repo_root()).resolve()
     run_root = (args.run_root or default_run_root(repo_root)).resolve()
@@ -1085,7 +1359,7 @@ def cancel(args: argparse.Namespace) -> int:
     process_info = load_json(run_dir / "peer-process.json")
     request = load_json(run_dir / "host-request.json")
     pid = int(process_info["pid"])
-    outcome = terminate_process_group(pid)
+    outcome = terminate_process_group(pid) if process_identity_matches(process_info) else "pid_mismatch"
     peer_report_path = run_dir / "peer-report.json"
     if not peer_report_path.exists() or peer_report_path.stat().st_size == 0:
         peer_runtime = load_peer_runtime()
@@ -1218,7 +1492,7 @@ def interactive_setup(current: dict[str, Any]) -> dict[str, Any]:
     settings["local_subagents_allowed"] = choose_bool("Allow local subagents", bool(settings["local_subagents_allowed"]))
     settings["max_local_subagents"] = int(choose_text("Maximum local subagents", str(settings["max_local_subagents"])))
     settings["codex_model"] = choose_text("Codex peer model", str(settings["codex_model"]))
-    settings["codex_effort"] = choose_option("Codex reasoning effort", str(settings["codex_effort"]), ["xhigh", "high", "medium", "low"])
+    settings["codex_effort"] = choose_option("Codex reasoning effort", str(settings["codex_effort"]), ["xhigh", "high", "medium", "low", "minimal"])
     settings["web_research"] = choose_option("Web research capability", str(settings["web_research"]), ["live", "cached", "disabled"])
     settings["codex_config"] = choose_codex_config(list(settings["codex_config"]))
     settings["claude_model"] = choose_text("Claude peer model", str(settings["claude_model"]))
@@ -1461,7 +1735,7 @@ def doctor(args: argparse.Namespace) -> int:
         claude_web_tools_ok = True
     checks = {
         "repo_root": {"ok": repo_root.exists(), "value": str(repo_root)},
-        "run_root": {"ok": run_root.exists() or run_root.parent.exists(), "value": str(run_root)},
+        "run_root": {"ok": run_root.exists() or path_is_creatable(run_root), "value": str(run_root)},
         "python": {"ok": sys.version_info >= (3, 10), "value": sys.version.split()[0]},
         "git": {"ok": shutil.which("git") is not None, "value": shutil.which("git")},
         "claude": {"ok": claude_path is not None, "value": claude_path},

@@ -8,10 +8,42 @@
   "properties": {
     "schema_version": {"const": "1.0"},
     "run_id": {"type": "string", "minLength": 1},
-    "status": {"type": "string"},
+    "status": {"enum": ["advisory_pending", "ok", "needs_human_input", "blocked"]},
     "summary": {"type": "string"},
     "false_positives": {"type": "array", "items": {"type": "string"}},
     "claims_needing_verification": {"type": "array", "items": {"type": "string"}},
-    "recommended_verdict": {"type": "string"}
+    "recommended_verdict": {
+      "enum": [
+        "pass",
+        "pass_with_concerns",
+        "changes_recommended",
+        "ready",
+        "needs_revision",
+        "blocked",
+        "informational"
+      ]
+    },
+    "claims": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["claim", "status", "evidence"],
+        "properties": {
+          "claim": {"type": "string"},
+          "status": {
+            "enum": [
+              "confirmed",
+              "plausible_unverified",
+              "rejected",
+              "product_decision",
+              "needs_human_input"
+            ]
+          },
+          "evidence": {"type": "string"}
+        }
+      },
+      "default": []
+    }
   }
 }

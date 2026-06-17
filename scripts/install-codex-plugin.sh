@@ -18,7 +18,8 @@ Default install locations:
 USAGE
 }
 
-repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/.." && pwd)"
 plugin_name="agent-collab"
 source_dir="$repo_root/codex-plugin/$plugin_name"
 plugins_root="$HOME/plugins"
@@ -44,11 +45,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ "$dry_run" -eq 1 ]]; then
-  "$repo_root/scripts/sync-packages.sh" --codex-only --check >/dev/null
-else
-  "$repo_root/scripts/sync-packages.sh" --codex-only >/dev/null
-fi
+"$repo_root/scripts/sync-packages.sh" --codex-only --check >/dev/null
 
 manifest="$source_dir/.codex-plugin/plugin.json"
 skill="$source_dir/skills/$plugin_name/SKILL.md"
@@ -61,6 +58,20 @@ if [[ ! -f "$skill" ]]; then
   exit 1
 fi
 
+python_bin="${PYTHON:-}"
+if [[ -n "$python_bin" ]]; then
+  if ! command -v "$python_bin" >/dev/null 2>&1; then
+    echo "configured PYTHON is not executable: $python_bin" >&2
+    exit 1
+  fi
+else
+  python_bin="$(command -v python3 || command -v python || true)"
+  if [[ -z "$python_bin" ]]; then
+    echo "python3 or python is required to update the personal marketplace" >&2
+    exit 1
+  fi
+fi
+
 if [[ "$dry_run" -eq 1 ]]; then
   echo "$source_dir -> $dest"
   echo "marketplace: $marketplace_path"
@@ -68,19 +79,19 @@ if [[ "$dry_run" -eq 1 ]]; then
 fi
 
 tmp_dir="$plugins_root/.agent-collab.tmp.$$"
+marketplace_tmp="$marketplace_path.tmp.$$"
+trap 'rm -rf "$tmp_dir" "$marketplace_tmp"' EXIT
 mkdir -p "$plugins_root"
 rm -rf "$tmp_dir"
-cp -a "$source_dir" "$tmp_dir"
-rm -rf "$dest"
-mv "$tmp_dir" "$dest"
 
-python - "$marketplace_path" "$plugin_name" <<'PY'
+"$python_bin" - "$marketplace_path" "$marketplace_tmp" "$plugin_name" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 marketplace_path = Path(sys.argv[1])
-plugin_name = sys.argv[2]
+marketplace_tmp = Path(sys.argv[2])
+plugin_name = sys.argv[3]
 entry = {
     "name": plugin_name,
     "source": {
@@ -130,8 +141,17 @@ if not replaced:
 data["plugins"] = next_plugins
 
 marketplace_path.parent.mkdir(parents=True, exist_ok=True)
-marketplace_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+marketplace_tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 print(marketplace_path)
 PY
+
+cp -a "$source_dir" "$tmp_dir"
+rm -rf \
+  "$tmp_dir/skills/$plugin_name/runs" \
+  "$tmp_dir/skills/$plugin_name/settings.local.json"
+find "$tmp_dir" -type d -name __pycache__ -prune -exec rm -rf {} +
+rm -rf "$dest"
+mv "$tmp_dir" "$dest"
+mv "$marketplace_tmp" "$marketplace_path"
 
 echo "$dest"

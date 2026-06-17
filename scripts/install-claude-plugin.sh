@@ -19,7 +19,8 @@ Default:
 USAGE
 }
 
-repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/.." && pwd)"
 claude_home_root="${CLAUDE_HOME:-$HOME/.claude}/skills"
 dest=""
 dry_run=0
@@ -65,11 +66,7 @@ if [[ "$(basename "$dest")" != "agent-collab" ]]; then
   exit 2
 fi
 
-if [[ "$dry_run" -eq 1 ]]; then
-  "$repo_root/scripts/sync-packages.sh" --claude-only --check >/dev/null
-else
-  "$repo_root/scripts/sync-packages.sh" --claude-only >/dev/null
-fi
+"$repo_root/scripts/sync-packages.sh" --claude-only --check >/dev/null
 
 source_dir="$repo_root/claude-plugin/agent-collab"
 if [[ ! -f "$source_dir/.claude-plugin/plugin.json" ]]; then
@@ -91,6 +88,10 @@ tmp_dir="$parent_dir/.agent-collab.tmp.$$"
 mkdir -p "$parent_dir"
 rm -rf "$tmp_dir"
 cp -a "$source_dir" "$tmp_dir"
+rm -rf \
+  "$tmp_dir/skills/agent-collab/runs" \
+  "$tmp_dir/skills/agent-collab/settings.local.json"
+find "$tmp_dir" -type d -name __pycache__ -prune -exec rm -rf {} +
 rm -rf "$dest"
 mv "$tmp_dir" "$dest"
 

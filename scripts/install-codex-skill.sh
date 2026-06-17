@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/install-codex-skill.sh [--skills-root DIR | --dest DIR | --codex-home-path]
+Usage: scripts/install-codex-skill.sh [--skills-root DIR | --dest DIR | --codex-home-path] [--dry-run]
 
 Installs the Codex Agent Collab skill from the packaged Codex plugin.
 
@@ -11,6 +11,7 @@ Options:
   --skills-root DIR   Install as DIR/agent-collab.
   --dest DIR          Install directly to DIR. DIR basename should be agent-collab.
   --codex-home-path   Install to the current Codex-home path: ${CODEX_HOME:-$HOME/.codex}/skills/agent-collab.
+  --dry-run           Validate and print the destination without copying.
   -h, --help          Show this help.
 
 Default:
@@ -18,10 +19,12 @@ Default:
 USAGE
 }
 
-repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/.." && pwd)"
 docs_root="$HOME/.agents/skills"
 codex_home_root="${CODEX_HOME:-$HOME/.codex}/skills"
 dest=""
+dry_run=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -37,6 +40,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --codex-home-path)
       dest="$codex_home_root/agent-collab"
+      shift
+      ;;
+    --dry-run)
+      dry_run=1
       shift
       ;;
     -h|--help)
@@ -55,7 +62,7 @@ if [[ -z "$dest" ]]; then
   dest="$docs_root/agent-collab"
 fi
 
-"$repo_root/scripts/sync-packages.sh" --codex-only >/dev/null
+"$repo_root/scripts/sync-packages.sh" --codex-only --check >/dev/null
 
 source_dir="$repo_root/codex-plugin/agent-collab/skills/agent-collab"
 if [[ ! -f "$source_dir/SKILL.md" ]]; then
@@ -70,9 +77,15 @@ fi
 
 parent_dir="$(dirname "$dest")"
 tmp_dir="$parent_dir/.agent-collab.tmp.$$"
+if [[ "$dry_run" -eq 1 ]]; then
+  echo "$source_dir -> $dest"
+  exit 0
+fi
 mkdir -p "$parent_dir"
 rm -rf "$tmp_dir"
 cp -a "$source_dir" "$tmp_dir"
+rm -rf "$tmp_dir/runs" "$tmp_dir/settings.local.json"
+find "$tmp_dir" -type d -name __pycache__ -prune -exec rm -rf {} +
 rm -rf "$dest"
 mv "$tmp_dir" "$dest"
 

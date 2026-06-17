@@ -15,7 +15,8 @@ Options:
 USAGE
 }
 
-repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/.." && pwd)"
 source_dir="$repo_root/tools/agent-collab"
 check=0
 mode="all"
@@ -62,16 +63,26 @@ sync_package() {
   fi
 
   if [[ "$check" -eq 0 ]]; then
-    rm -rf "$package_dir/scripts" "$package_dir/references" "$package_dir/schemas" "$package_dir/tools"
+    rm -rf \
+      "$package_dir/scripts" \
+      "$package_dir/references" \
+      "$package_dir/schemas" \
+      "$package_dir/tools" \
+      "$package_dir/runs" \
+      "$package_dir/settings.local.json"
     cp -a "$source_dir/scripts" "$package_dir/scripts"
     cp -a "$source_dir/references" "$package_dir/references"
     cp -a "$source_dir/schemas" "$package_dir/schemas"
-    find "$package_dir/scripts" -type d -name __pycache__ -prune -exec rm -rf {} +
+    find "$package_dir" -type d -name __pycache__ -prune -exec rm -rf {} +
   fi
 
   diff -qr --exclude=__pycache__ "$source_dir/scripts" "$package_dir/scripts" >/dev/null
   diff -qr "$source_dir/references" "$package_dir/references" >/dev/null
   diff -qr "$source_dir/schemas" "$package_dir/schemas" >/dev/null
+  if [[ -e "$package_dir/runs" || -e "$package_dir/settings.local.json" ]]; then
+    echo "$label skill must not contain runtime state: $package_dir" >&2
+    exit 1
+  fi
   if [[ -d "$package_dir/tools" ]]; then
     echo "$label skill must not contain nested tools/: $package_dir/tools" >&2
     exit 1

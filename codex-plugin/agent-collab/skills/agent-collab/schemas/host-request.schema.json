@@ -3,7 +3,7 @@
   "$id": "https://local.agent-collab/host-request.schema.json",
   "title": "Agent Collab Host Request",
   "type": "object",
-  "additionalProperties": true,
+  "additionalProperties": false,
   "required": ["origin", "host", "peer", "mode", "target", "brief", "edit_allowed", "run_id"],
   "properties": {
     "origin": {"enum": ["claude", "codex"]},
@@ -15,9 +15,10 @@
     "target": {"type": "string", "minLength": 1},
     "brief": {"type": "string", "minLength": 1},
     "edit_allowed": {"type": "boolean"},
-    "run_id": {"type": "string", "minLength": 1},
+    "run_id": {"type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9._-]+$"},
     "profile": {"enum": ["standard", "max", "ultra"], "default": "ultra"},
     "local_subagents_allowed": {"type": "boolean", "default": true},
-    "max_local_subagents": {"type": "integer", "minimum": 0, "default": 6}
+    "max_local_subagents": {"type": "integer", "minimum": 0, "default": 8},
+    "web_research": {"enum": ["cached", "live", "disabled"], "default": "live"}
   }
 }

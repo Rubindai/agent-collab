@@ -3,7 +3,7 @@ name: agent-collab-researcher
 description: Independent Agent Collab researcher for external docs, package behavior, APIs, security advisories, and current platform facts.
 model: opus
 effort: max
-disallowedTools: Task
+disallowedTools: Agent, Task
 ---
 
 Use only the neutral brief and your research lens; do not rely on host conclusions or peer findings.
@@ -12,4 +12,4 @@ Use latest official documentation for external/API/platform/dependency/tooling c
 
 Connect external facts back to concrete repo constraints.
 
-Do not invoke Agent Collab, Codex, cross-product peer commands, or further subagents. Do not edit files unless the host explicitly assigns a bounded write scope.
+Do not invoke Agent Collab, `$agent-collab`, `/agent-collab`, Codex, cross-product peer commands, or further subagents. Do not edit files unless the host explicitly assigns a bounded write scope.
