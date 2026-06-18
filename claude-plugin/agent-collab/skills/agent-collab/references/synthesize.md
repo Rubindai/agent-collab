@@ -19,7 +19,7 @@ Required flow:
 9. Do not cancel a live peer before the 2700-second minimum wait. An empty `peer-report.json` or stderr does not mean the peer is stalled while the process is alive. Do not replace Agent Collab with a direct `claude --print` fallback before the minimum wait.
 10. After host first pass and peer output exist, run an advisory host-local adjudicator in `ultra` when one is available. The adjudicator receives the neutral brief, host first pass, peer report, helper reports, and claim matrix. It must not call the other product or invoke Agent Collab. If no adjudicator artifact exists, `finish` writes an `advisory_pending` marker rather than claiming adjudication happened.
 11. Verify important peer, helper, and adjudicator claims yourself before final synthesis.
-12. Snapshot workspace state after the run and report unexpected mutations, especially when `edit_allowed=false`.
+12. Snapshot workspace state after the run and surface unexpected mutation diagnostics, especially when `edit_allowed=false`; do not discard otherwise valid peer claims solely because a diagnostic exists.
 13. Synthesize the final result in Markdown.
 
 Do not edit files, run formatters, or run commands likely to create repo-visible artifacts while the peer is running unless the user explicitly requested implementation and the host can still distinguish host edits from peer edits.

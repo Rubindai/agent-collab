@@ -101,6 +101,7 @@ RUN_ARTIFACT_NAMES = {
     "peer-process.json",
     "peer-report.json",
     "host-result.json",
+    "workspace-mutation.json",
 }
 
 
@@ -712,6 +713,7 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
     process_info = read_json_if_exists(run_dir / "peer-process.json") or {}
     peer_report = read_json_if_exists(run_dir / "peer-report.json")
     normalization = read_json_if_exists(run_dir / "peer-normalization.json")
+    workspace_mutation = read_json_if_exists(run_dir / "workspace-mutation.json")
     pid = process_info.get("pid")
     peer_alive = process_alive(int(pid)) if isinstance(pid, int) else False
     elapsed_seconds = peer_elapsed_seconds(process_info, run_dir)
@@ -739,6 +741,7 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
         "peer_verdict": peer_report.get("verdict") if peer_report else None,
         "normalization_source": normalization.get("source") if normalization else None,
         "validation_status": normalization.get("validation_status") if normalization else None,
+        "workspace_mutation": workspace_mutation,
         "artifacts": {
             "host_request": file_info(run_dir / "host-request.json"),
             "before_snapshot": file_info(run_dir / "before.snapshot"),
@@ -750,6 +753,7 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
             "claim_matrix": file_info(run_dir / "claim-matrix.json"),
             "adjudicator_report": file_info(run_dir / "adjudicator-report.json"),
             "after_snapshot": file_info(run_dir / "after.snapshot"),
+            "workspace_mutation": file_info(run_dir / "workspace-mutation.json"),
             "peer_stderr": file_info(run_dir / "peer.stderr.log"),
         },
     }
@@ -1290,6 +1294,7 @@ def finish(args: argparse.Namespace) -> int:
 
     repo_root = Path(process_info.get("repo_root", str(default_repo_root()))).resolve()
     run_snapshot(repo_root, run_dir / "after.snapshot", ignored_paths=[run_dir])
+    workspace_mutation = read_json_if_exists(run_dir / "workspace-mutation.json")
     result = {
         "run_id": request["run_id"],
         "run_dir": str(run_dir),
@@ -1300,6 +1305,7 @@ def finish(args: argparse.Namespace) -> int:
         "normalization": str(run_dir / "peer-normalization.json"),
         "claim_matrix": str(run_dir / "claim-matrix.json"),
         "adjudicator_report": str(run_dir / "adjudicator-report.json"),
+        "workspace_mutation": workspace_mutation,
     }
     write_json(run_dir / "host-result.json", {**result, "phase": "done"})
     state_status = "completed" if peer_report.get("status") == "ok" else "failed"
@@ -1311,6 +1317,7 @@ def finish(args: argparse.Namespace) -> int:
             "peer_verdict": peer_report.get("verdict"),
             "validation_status": validation_status,
             "normalization_source": (read_json_if_exists(run_dir / "peer-normalization.json") or {}).get("source"),
+            "workspace_mutation": bool(workspace_mutation),
             "completed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "summary": peer_report.get("summary"),
         },
@@ -1366,6 +1373,7 @@ def result(args: argparse.Namespace) -> int:
         "claim_matrix": read_json_if_exists(run_dir / "claim-matrix.json"),
         "adjudicator_report": read_json_if_exists(run_dir / "adjudicator-report.json"),
         "host_result": read_json_if_exists(run_dir / "host-result.json"),
+        "workspace_mutation": read_json_if_exists(run_dir / "workspace-mutation.json"),
         "peer_stderr_tail": stderr_tail(run_dir / "peer.stderr.log"),
     }
     print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))

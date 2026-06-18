@@ -725,6 +725,21 @@ def default_normalization_path(raw_output_path: Path | None) -> Path | None:
     return raw_output_path.with_name("peer-normalization.json")
 
 
+def workspace_mutation_output_path(
+    env: dict[str, str],
+    raw_output_path: Path | None = None,
+    normalization_output_path: Path | None = None,
+) -> Path | None:
+    run_dir = env.get("AGENT_COLLAB_RUN_DIR", "").strip()
+    if run_dir:
+        return Path(run_dir) / "workspace-mutation.json"
+    if raw_output_path is not None:
+        return raw_output_path.with_name("workspace-mutation.json")
+    if normalization_output_path is not None:
+        return normalization_output_path.with_name("workspace-mutation.json")
+    return None
+
+
 def _base_normalization_metadata(source: str, text: str, warnings: list[str] | None = None) -> dict[str, Any]:
     return {
         "schema_version": "1.0",
@@ -925,16 +940,38 @@ def invoke_peer(
     schema_path = default_schema_path()
     snapshot_ignored_paths = ignored_snapshot_paths(effective_env, raw_output_path, normalization_output_path)
     before_snapshot = git_mutation_snapshot(repo_root, snapshot_ignored_paths)
+    mutation_output_path = workspace_mutation_output_path(effective_env, raw_output_path, normalization_output_path)
 
     def with_mutation_check(report: dict[str, Any]) -> dict[str, Any]:
         after_snapshot = git_mutation_snapshot(repo_root, snapshot_ignored_paths)
         if not request.get("edit_allowed", False) and after_snapshot != before_snapshot:
-            return failure(
-                "unexpected_working_tree_mutation",
-                "Peer changed the working tree while edit_allowed=false",
-                request,
-                mutation_error_details(before_snapshot, after_snapshot, report),
+            mutation = mutation_error_details(before_snapshot, after_snapshot, report)
+            mutation.pop("peer_report", None)
+            mutation.update(
+                {
+                    "edit_allowed": False,
+                    "message": "Workspace changed while edit_allowed=false; attribution is unknown.",
+                }
             )
+            if mutation_output_path is not None:
+                write_json(mutation_output_path, mutation)
+            if report.get("status") == "ok":
+                limitations = list(report.get("limitations", []))
+                warning = "Workspace changed while edit_allowed=false"
+                if warning not in limitations:
+                    limitations.append(warning)
+                return {**report, "limitations": limitations}
+            if isinstance(report.get("error"), dict):
+                error = dict(report["error"])
+                details = error.get("details")
+                if isinstance(details, dict):
+                    error["details"] = {**details, "workspace_mutation": mutation}
+                else:
+                    error["details"] = {
+                        "original_details": details,
+                        "workspace_mutation": mutation,
+                    }
+                return {**report, "error": error}
         return report
 
     with tempfile.TemporaryDirectory(prefix="agent-collab-") as tmp_name:

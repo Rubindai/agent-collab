@@ -783,8 +783,8 @@ class RuntimeContractTests(TestCase):
                     result = runtime.invoke_peer(request(), REPO_ROOT, env={})
 
         self.assertEqual(result["status"], "peer_failed")
-        self.assertEqual(result["error"]["kind"], "unexpected_working_tree_mutation")
-        self.assertEqual(result["error"]["details"]["peer_report"]["error"]["kind"], "invalid_json")
+        self.assertEqual(result["error"]["kind"], "invalid_json")
+        self.assertEqual(result["error"]["details"]["workspace_mutation"]["message"], "Workspace changed while edit_allowed=false; attribution is unknown.")
 
     def test_peer_mutation_detection_works_without_git_repo(self):
         runtime = load_peer_runtime()
@@ -808,10 +808,8 @@ class RuntimeContractTests(TestCase):
                     with mock.patch.object(runtime.subprocess, "run", side_effect=mutate_workspace):
                         result = runtime.invoke_peer(request(), repo_root, env={})
 
-        self.assertEqual(result["status"], "peer_failed")
-        self.assertEqual(result["error"]["kind"], "unexpected_working_tree_mutation")
-        self.assertEqual(result["error"]["details"]["snapshot_mode"], "filesystem")
-        self.assertIn("target.txt", result["error"]["details"]["changed_paths"])
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("Workspace changed while edit_allowed=false", result["limitations"])
 
     def test_claude_api_error_envelope_returns_peer_api_error(self):
         runtime = load_peer_runtime()
@@ -922,6 +920,37 @@ class RuntimeContractTests(TestCase):
             normalization = json.loads((Path(tmp) / "peer-normalization.json").read_text())
             self.assertEqual(normalization["source"], "structured_output")
             self.assertEqual(normalization["validation_status"], "ok")
+
+    def test_valid_peer_report_survives_workspace_mutation_with_warning_artifact(self):
+        runtime = load_peer_runtime()
+        peer_report = valid_peer_report(summary="Useful peer findings.")
+        completed = subprocess.CompletedProcess(["claude"], 0, stdout=json.dumps(peer_report), stderr="")
+        before_snapshot = {
+            "mode": "filesystem",
+            "digest": "before",
+            "entries": {"tracked.txt": "file sha256=before"},
+        }
+        after_snapshot = {
+            "mode": "filesystem",
+            "digest": "after",
+            "entries": {"tracked.txt": "file sha256=after"},
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            raw_output = Path(tmp) / "peer.raw.json"
+            with mock.patch.object(runtime.shutil, "which", return_value="/usr/bin/claude"):
+                with mock.patch.object(runtime.subprocess, "run", return_value=completed):
+                    with mock.patch.object(runtime, "git_mutation_snapshot", side_effect=[before_snapshot, after_snapshot]):
+                        result = runtime.invoke_peer(request(), REPO_ROOT, env={}, raw_output_path=raw_output)
+
+            mutation = json.loads((Path(tmp) / "workspace-mutation.json").read_text())
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["summary"], "Useful peer findings.")
+        self.assertIn("Workspace changed while edit_allowed=false", result["limitations"])
+        self.assertEqual(mutation["changed_paths"], ["tracked.txt"])
+        self.assertFalse(mutation["edit_allowed"])
+        self.assertIn("attribution is unknown", mutation["message"])
 
     def test_peer_report_schema_accepts_required_shape_and_rejects_missing_fields(self):
         runtime = load_peer_runtime()
@@ -1789,6 +1818,50 @@ class HostRunnerTests(TestCase):
             adjudicator = json.loads((run_dir / "adjudicator-report.json").read_text())
             self.assertEqual(adjudicator["status"], "advisory_pending")
 
+    def test_finish_surfaces_workspace_mutation_without_dropping_peer_claims(self):
+        host = load_host_runtime()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "host-request.json").write_text(json.dumps(request()), encoding="utf-8")
+            (run_dir / "peer-process.json").write_text(
+                json.dumps({"pid": 999999, "repo_root": str(REPO_ROOT)}),
+                encoding="utf-8",
+            )
+            (run_dir / "host-first-pass.json").write_text(
+                json.dumps({"schema_version": "1.0", "run_id": "agent-collab-test", "summary": "Independent host pass.", "claims": []}),
+                encoding="utf-8",
+            )
+            peer_report = valid_peer_report(
+                claims=[{"claim": "Peer claim", "status": "confirmed", "evidence": "peer evidence"}],
+                limitations=["Workspace changed while edit_allowed=false"],
+            )
+            mutation = {
+                "changed": True,
+                "snapshot_mode": "git",
+                "changed_path_count": 1,
+                "changed_paths": ["deno.lock"],
+                "changed_paths_truncated": False,
+                "edit_allowed": False,
+                "message": "Workspace changed while edit_allowed=false; attribution is unknown.",
+            }
+            (run_dir / "peer-report.json").write_text(json.dumps(peer_report), encoding="utf-8")
+            (run_dir / "workspace-mutation.json").write_text(json.dumps(mutation), encoding="utf-8")
+
+            parser = host.build_parser()
+            args = parser.parse_args(["finish", str(run_dir), "--timeout-seconds", "0", "--run-root", str(Path(tmp) / "runs")])
+            output = io.StringIO()
+            with mock.patch.object(host, "run_snapshot"):
+                with redirect_stdout(output):
+                    host.finish(args)
+
+            parsed = json.loads(output.getvalue())
+            claim_matrix = json.loads((run_dir / "claim-matrix.json").read_text())
+
+        self.assertEqual([claim["source"] for claim in claim_matrix["claims"]], ["peer"])
+        self.assertEqual(parsed["peer_status"], "ok")
+        self.assertEqual(parsed["workspace_mutation"]["changed_paths"], ["deno.lock"])
+
     def test_finish_rejects_invalid_adjudicator_status(self):
         host = load_host_runtime()
 
@@ -2145,6 +2218,16 @@ class HostRunnerTests(TestCase):
                 encoding="utf-8",
             )
             (run_dir / "peer-report.json").write_text(json.dumps(valid_peer_report()), encoding="utf-8")
+            mutation = {
+                "changed": True,
+                "snapshot_mode": "git",
+                "changed_path_count": 1,
+                "changed_paths": ["deno.lock"],
+                "changed_paths_truncated": False,
+                "edit_allowed": False,
+                "message": "Workspace changed while edit_allowed=false; attribution is unknown.",
+            }
+            (run_dir / "workspace-mutation.json").write_text(json.dumps(mutation), encoding="utf-8")
             state = host.load_state_runtime()
             state.upsert_job(run_root, {"id": "agent-collab-test", "run_dir": str(run_dir), "status": "completed", "phase": "done"})
 
@@ -2155,11 +2238,19 @@ class HostRunnerTests(TestCase):
                 host.status(status_args)
             self.assertEqual(json.loads(status_out.getvalue())["jobs"][0]["id"], "agent-collab-test")
 
+            run_status_args = parser.parse_args(["status", "agent-collab", "--run-root", str(run_root), "--repo-root", str(REPO_ROOT)])
+            run_status_out = io.StringIO()
+            with redirect_stdout(run_status_out):
+                host.status(run_status_args)
+            self.assertEqual(json.loads(run_status_out.getvalue())["workspace_mutation"]["changed_paths"], ["deno.lock"])
+
             result_args = parser.parse_args(["result", "agent-collab", "--run-root", str(run_root), "--repo-root", str(REPO_ROOT)])
             result_out = io.StringIO()
             with redirect_stdout(result_out):
                 host.result(result_args)
-            self.assertEqual(json.loads(result_out.getvalue())["peer_report"]["status"], "ok")
+            result_output = json.loads(result_out.getvalue())
+            self.assertEqual(result_output["peer_report"]["status"], "ok")
+            self.assertEqual(result_output["workspace_mutation"]["changed_paths"], ["deno.lock"])
 
             doctor_args = parser.parse_args(["doctor", "--run-root", str(run_root), "--repo-root", str(REPO_ROOT)])
             doctor_out = io.StringIO()
