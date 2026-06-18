@@ -97,8 +97,9 @@ Claude may also invoke the skill implicitly when the request matches its descrip
 7. In `ultra`, Claude hosts can use the helper agents packaged with the Claude plugin. Codex hosts use available host-local subagents or built-in Codex agents with independent lens prompts for mapping, review, research, architecture, security, debugging, test strategy, and verification.
 8. Do not read peer output until independent host work is complete. The host writes `host-first-pass.json` before reading `peer-report.json`.
 9. `finish` is the normal synchronization point after `host-first-pass.json`: it waits responsively for peer artifacts, validates `peer-report.json`, builds a claim matrix, and avoids repeated host-visible status polling.
-10. The host runs an advisory adjudicator when available; otherwise `finish` writes an `advisory_pending` marker.
-11. The host verifies high-value claims and writes the final synthesis.
+10. The minimum wait is 2700 seconds for a live peer. An empty `peer-report.json` or stderr does not mean the peer is stalled, and the host must not cancel the run or replace it with a direct fallback before that floor unless the user explicitly asks to stop.
+11. The host runs an advisory adjudicator when available; otherwise `finish` writes an `advisory_pending` marker.
+12. The host verifies high-value claims and writes the final synthesis.
 
 Independence rule:
 
@@ -363,6 +364,8 @@ Cancel a long-running peer:
 run_id=$(python "$repo_root/tools/agent-collab/scripts/host.py" status | python -c 'import json,sys; print(json.load(sys.stdin)["jobs"][0]["id"])')
 python "$repo_root/tools/agent-collab/scripts/host.py" cancel "$run_id"
 ```
+
+For a live peer, early cancellation before the minimum wait is refused by default. If the user explicitly asks to stop before the floor, it requires `--force-before-min-wait --reason USER_REQUESTED_STOP`.
 
 Check local prerequisites without installing anything:
 

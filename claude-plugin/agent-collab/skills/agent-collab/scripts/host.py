@@ -92,7 +92,8 @@ RECOMMENDED_VERDICTS = {
     "informational",
 }
 RUN_ID_SAFE_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
-DEFAULT_FINISH_TIMEOUT_SECONDS = 2700
+MIN_PEER_WAIT_SECONDS = 2700
+DEFAULT_FINISH_TIMEOUT_SECONDS = MIN_PEER_WAIT_SECONDS
 FINISH_TIMEOUT_GRACE_SECONDS = 30
 FINISH_WAIT_POLL_SECONDS = 1
 PEER_REPORT_STABLE_SECONDS = 0.5
@@ -480,6 +481,49 @@ def json_number(value: float | None) -> float | int | None:
     return int(value) if float(value).is_integer() else value
 
 
+def utc_timestamp(epoch_seconds: float | None = None) -> str:
+    if epoch_seconds is None:
+        epoch_seconds = time.time()
+    return datetime.fromtimestamp(epoch_seconds, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_utc_timestamp(value: Any) -> float | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return datetime.fromisoformat(value.strip().replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def peer_started_at_epoch(process_info: dict[str, Any], run_dir: Path) -> float | None:
+    raw_epoch = process_info.get("started_at_epoch")
+    if raw_epoch is not None:
+        try:
+            return float(raw_epoch)
+        except (TypeError, ValueError):
+            pass
+
+    parsed = parse_utc_timestamp(process_info.get("started_at"))
+    if parsed is not None:
+        return parsed
+
+    process_path = run_dir / "peer-process.json"
+    try:
+        return process_path.stat().st_mtime
+    except FileNotFoundError:
+        return None
+
+
+def peer_elapsed_seconds(process_info: dict[str, Any], run_dir: Path, now: float | None = None) -> float | None:
+    started_at = peer_started_at_epoch(process_info, run_dir)
+    if started_at is None:
+        return None
+    if now is None:
+        now = time.time()
+    return max(0.0, now - started_at)
+
+
 def path_is_creatable(path: Path) -> bool:
     current = path
     while not current.exists():
@@ -568,11 +612,27 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
     peer_report = read_json_if_exists(run_dir / "peer-report.json")
     normalization = read_json_if_exists(run_dir / "peer-normalization.json")
     pid = process_info.get("pid")
+    peer_alive = process_alive(int(pid)) if isinstance(pid, int) else False
+    elapsed_seconds = peer_elapsed_seconds(process_info, run_dir)
+    early_cancel_blocked = (
+        peer_alive
+        and elapsed_seconds is not None
+        and elapsed_seconds < MIN_PEER_WAIT_SECONDS
+    )
     return {
         "run_id": process_info.get("run_id", run_dir.name),
         "run_dir": str(run_dir),
         "peer_pid": pid,
-        "peer_alive": process_alive(int(pid)) if isinstance(pid, int) else False,
+        "peer_alive": peer_alive,
+        "elapsed_seconds": json_number(elapsed_seconds),
+        "minimum_wait_seconds": MIN_PEER_WAIT_SECONDS,
+        "minimum_wait_remaining_seconds": (
+            json_number(max(0.0, MIN_PEER_WAIT_SECONDS - elapsed_seconds))
+            if elapsed_seconds is not None
+            else None
+        ),
+        "early_cancel_blocked": early_cancel_blocked,
+        "empty_output_guidance": "Empty peer-report.json or stderr does not imply a stalled peer while the peer process is alive.",
         "phase": (read_json_if_exists(run_dir / "host-result.json") or {}).get("phase"),
         "peer_status": peer_report.get("status") if peer_report else None,
         "peer_verdict": peer_report.get("verdict") if peer_report else None,
@@ -601,6 +661,8 @@ def resolve_finish_wait_timeout(
     if explicit_timeout_seconds is not None:
         if explicit_timeout_seconds <= 0:
             return None, "explicit_indefinite"
+        if explicit_timeout_seconds < MIN_PEER_WAIT_SECONDS:
+            return float(MIN_PEER_WAIT_SECONDS), "explicit_minimum_floor"
         return explicit_timeout_seconds, "explicit"
 
     if "peer_timeout_seconds" in process_info:
@@ -608,7 +670,10 @@ def resolve_finish_wait_timeout(
         if peer_timeout is None:
             return None, "peer_timeout_indefinite"
         try:
-            return float(peer_timeout) + FINISH_TIMEOUT_GRACE_SECONDS, "peer_timeout_plus_grace"
+            derived = float(peer_timeout) + FINISH_TIMEOUT_GRACE_SECONDS
+            if derived < MIN_PEER_WAIT_SECONDS:
+                return float(MIN_PEER_WAIT_SECONDS), "peer_timeout_minimum_floor"
+            return derived, "peer_timeout_plus_grace"
         except (TypeError, ValueError):
             return DEFAULT_FINISH_TIMEOUT_SECONDS, "invalid_peer_timeout_fallback"
 
@@ -722,6 +787,7 @@ def start(args: argparse.Namespace) -> int:
         env["AGENT_COLLAB_TIMEOUT_SECONDS"] = (
             str(int(agent_timeout)) if float(agent_timeout).is_integer() else str(agent_timeout)
         )
+    started_at_epoch = time.time()
     process = subprocess.Popen(
         [
             sys.executable,
@@ -754,6 +820,8 @@ def start(args: argparse.Namespace) -> int:
         "host": host,
         "peer": peer,
         "profile": profile,
+        "started_at": utc_timestamp(started_at_epoch),
+        "started_at_epoch": started_at_epoch,
         "peer_timeout_seconds": json_number(agent_timeout),
         "settings": {
             "local": resolved["layers"]["local"]["path"],
@@ -1389,11 +1457,49 @@ def cancel(args: argparse.Namespace) -> int:
     process_info = load_json(run_dir / "peer-process.json")
     request = load_json(run_dir / "host-request.json")
     pid = int(process_info["pid"])
-    outcome = terminate_process_group(pid) if process_identity_matches(process_info) else "pid_mismatch"
+    force_before_min_wait = bool(getattr(args, "force_before_min_wait", False))
+    reason = str(getattr(args, "reason", "") or "").strip()
+    if force_before_min_wait and not reason:
+        raise SystemExit("--reason is required with --force-before-min-wait")
+
+    identity_matches = process_identity_matches(process_info)
+    peer_alive = process_alive(pid) if identity_matches else False
+    elapsed_seconds = peer_elapsed_seconds(process_info, run_dir)
+    before_minimum_wait = (
+        peer_alive
+        and elapsed_seconds is not None
+        and elapsed_seconds < MIN_PEER_WAIT_SECONDS
+    )
+    if before_minimum_wait and not force_before_min_wait:
+        output = {
+            "run_id": request["run_id"],
+            "run_dir": str(run_dir),
+            "pid": pid,
+            "outcome": "refused",
+            "reason": "minimum_wait_not_elapsed",
+            "elapsed_seconds": json_number(elapsed_seconds),
+            "minimum_wait_seconds": MIN_PEER_WAIT_SECONDS,
+            "minimum_wait_remaining_seconds": json_number(MIN_PEER_WAIT_SECONDS - elapsed_seconds),
+            "message": "Peer is still inside the minimum wait window; use finish/status and keep waiting. Empty peer-report.json or stderr is normal while the peer is alive.",
+        }
+        print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
+        return 1
+
+    outcome = terminate_process_group(pid) if identity_matches else "pid_mismatch"
+    cancel_details = {
+        "forced": force_before_min_wait,
+        "reason": reason or ("minimum_wait_elapsed" if not before_minimum_wait else "unspecified"),
+        "elapsed_seconds": json_number(elapsed_seconds),
+        "minimum_wait_seconds": MIN_PEER_WAIT_SECONDS,
+        "before_minimum_wait": before_minimum_wait,
+    }
     peer_report_path = run_dir / "peer-report.json"
     if not peer_report_path.exists() or peer_report_path.stat().st_size == 0:
         peer_runtime = load_peer_runtime()
-        write_json(peer_report_path, peer_runtime.failure("cancelled", "Peer run was cancelled by host.", request))
+        write_json(
+            peer_report_path,
+            peer_runtime.failure("cancelled", "Peer run was cancelled by host.", request, cancel_details),
+        )
     state = load_state_runtime()
     state.upsert_job(
         run_root,
@@ -1401,9 +1507,19 @@ def cancel(args: argparse.Namespace) -> int:
             **job_patch_from_run(run_dir, "cancelled", "cancelled"),
             "pid": None,
             "completed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "cancel": cancel_details,
         },
     )
-    output = {"run_id": request["run_id"], "run_dir": str(run_dir), "pid": pid, "outcome": outcome}
+    output = {
+        "run_id": request["run_id"],
+        "run_dir": str(run_dir),
+        "pid": pid,
+        "outcome": outcome,
+        "forced": force_before_min_wait,
+        "reason": reason or cancel_details["reason"],
+        "elapsed_seconds": json_number(elapsed_seconds),
+        "minimum_wait_seconds": MIN_PEER_WAIT_SECONDS,
+    }
     print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
 
@@ -1920,6 +2036,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     cancel_parser = sub.add_parser("cancel", help="Cancel an active peer run.")
     cancel_parser.add_argument("run", help="Run ID, unique prefix, or run directory.")
+    cancel_parser.add_argument(
+        "--force-before-min-wait",
+        action="store_true",
+        help="Allow cancellation before the minimum peer wait; requires --reason.",
+    )
+    cancel_parser.add_argument("--reason", help="Required with --force-before-min-wait; use USER_REQUESTED_STOP for user stop requests.")
     cancel_parser.add_argument("--run-root", type=Path)
     cancel_parser.add_argument("--repo-root", type=Path)
     cancel_parser.set_defaults(func=cancel)

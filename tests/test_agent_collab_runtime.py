@@ -1513,6 +1513,10 @@ class HostRunnerTests(TestCase):
         self.assertIsNone(timeout)
         self.assertEqual(source, "explicit_indefinite")
 
+        timeout, source = host.resolve_finish_wait_timeout(120, {"peer_timeout_seconds": 3600})
+        self.assertEqual(timeout, host.MIN_PEER_WAIT_SECONDS)
+        self.assertEqual(source, "explicit_minimum_floor")
+
         timeout, source = host.resolve_finish_wait_timeout(None, {})
         self.assertEqual(timeout, 2700)
         self.assertEqual(source, "legacy_default")
@@ -1849,7 +1853,7 @@ class HostRunnerTests(TestCase):
             args = parser.parse_args(["finish", str(run_dir), "--timeout-seconds", "0.5", "--run-root", str(run_root)])
             output = io.StringIO()
             with mock.patch.object(host, "process_alive", return_value=True):
-                with mock.patch.object(host.time, "time", side_effect=[0, 2]):
+                with mock.patch.object(host, "wait_for_peer_report", return_value="timeout") as wait:
                     with mock.patch.object(host, "run_snapshot") as snapshot:
                         with redirect_stdout(output):
                             result = host.finish(args)
@@ -1858,7 +1862,10 @@ class HostRunnerTests(TestCase):
             parsed = json.loads(output.getvalue())
             self.assertEqual(parsed["status"], "peer_running")
             self.assertEqual(parsed["phase"], "waiting_for_peer")
+            self.assertEqual(parsed["finish_wait_seconds"], host.MIN_PEER_WAIT_SECONDS)
+            self.assertEqual(parsed["finish_timeout_source"], "explicit_minimum_floor")
             self.assertFalse((run_dir / "peer-report.json").exists())
+            wait.assert_called_once()
             snapshot.assert_not_called()
 
     def test_finish_does_not_normalize_nonempty_unstable_report_while_peer_alive(self):
@@ -1883,7 +1890,7 @@ class HostRunnerTests(TestCase):
             args = parser.parse_args(["finish", str(run_dir), "--timeout-seconds", "0.5", "--run-root", str(run_root)])
             output = io.StringIO()
             with mock.patch.object(host, "process_alive", return_value=True):
-                with mock.patch.object(host.time, "time", side_effect=[0, 0.1, 0.2, 2]):
+                with mock.patch.object(host, "wait_for_peer_report", return_value="timeout") as wait:
                     with mock.patch.object(host, "run_snapshot") as snapshot:
                         with redirect_stdout(output):
                             result = host.finish(args)
@@ -1891,7 +1898,10 @@ class HostRunnerTests(TestCase):
             self.assertEqual(result, 1)
             parsed = json.loads(output.getvalue())
             self.assertEqual(parsed["status"], "peer_running")
+            self.assertEqual(parsed["finish_wait_seconds"], host.MIN_PEER_WAIT_SECONDS)
+            self.assertEqual(parsed["finish_timeout_source"], "explicit_minimum_floor")
             self.assertEqual((run_dir / "peer-report.json").read_text(encoding="utf-8"), partial_report)
+            wait.assert_called_once()
             snapshot.assert_not_called()
 
     def test_finish_recovers_from_raw_when_peer_report_is_parser_failure_wrapper(self):
@@ -2184,7 +2194,14 @@ class HostRunnerTests(TestCase):
             run_dir.mkdir(parents=True)
             (run_dir / "host-request.json").write_text(json.dumps(request()), encoding="utf-8")
             (run_dir / "peer-process.json").write_text(
-                json.dumps({"pid": 12345, "repo_root": str(REPO_ROOT), "run_id": "agent-collab-test"}),
+                json.dumps(
+                    {
+                        "pid": 12345,
+                        "repo_root": str(REPO_ROOT),
+                        "run_id": "agent-collab-test",
+                        "started_at_epoch": host.time.time() - host.MIN_PEER_WAIT_SECONDS - 1,
+                    }
+                ),
                 encoding="utf-8",
             )
             state = host.load_state_runtime()
@@ -2200,6 +2217,118 @@ class HostRunnerTests(TestCase):
             jobs = state.list_jobs(run_root)
             self.assertEqual(peer_report["error"]["kind"], "cancelled")
             self.assertEqual(jobs[0]["status"], "cancelled")
+
+    def test_cancel_refuses_live_peer_before_minimum_wait_without_writing_failure(self):
+        host = load_host_runtime()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_root = Path(tmp) / "runs"
+            run_dir = run_root / "agent-collab-test"
+            run_dir.mkdir(parents=True)
+            (run_dir / "host-request.json").write_text(json.dumps(request()), encoding="utf-8")
+            (run_dir / "peer-process.json").write_text(
+                json.dumps(
+                    {
+                        "pid": 12345,
+                        "pgid": 12345,
+                        "repo_root": str(REPO_ROOT),
+                        "run_id": "agent-collab-test",
+                        "started_at_epoch": host.time.time() - 120,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state = host.load_state_runtime()
+            state.upsert_job(run_root, {"id": "agent-collab-test", "run_dir": str(run_dir), "status": "running", "phase": "peer_running"})
+
+            parser = host.build_parser()
+            args = parser.parse_args(["cancel", "agent-collab-test", "--run-root", str(run_root), "--repo-root", str(REPO_ROOT)])
+            output = io.StringIO()
+            with mock.patch.object(host, "process_alive", return_value=True):
+                with mock.patch.object(host, "process_identity_matches", return_value=True):
+                    with mock.patch.object(host, "terminate_process_group") as terminate:
+                        with redirect_stdout(output):
+                            status = host.cancel(args)
+
+            terminate.assert_not_called()
+            parsed = json.loads(output.getvalue())
+            self.assertEqual(status, 1)
+            self.assertEqual(parsed["outcome"], "refused")
+            self.assertEqual(parsed["reason"], "minimum_wait_not_elapsed")
+            self.assertEqual(parsed["minimum_wait_seconds"], host.MIN_PEER_WAIT_SECONDS)
+            self.assertFalse((run_dir / "peer-report.json").exists())
+            self.assertEqual(state.list_jobs(run_root)[0]["status"], "running")
+
+    def test_forced_cancel_before_minimum_wait_requires_reason_and_records_metadata(self):
+        host = load_host_runtime()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_root = Path(tmp) / "runs"
+            run_dir = run_root / "agent-collab-test"
+            run_dir.mkdir(parents=True)
+            (run_dir / "host-request.json").write_text(json.dumps(request()), encoding="utf-8")
+            (run_dir / "peer-process.json").write_text(
+                json.dumps(
+                    {
+                        "pid": 12345,
+                        "pgid": 12345,
+                        "repo_root": str(REPO_ROOT),
+                        "run_id": "agent-collab-test",
+                        "started_at_epoch": host.time.time() - 120,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state = host.load_state_runtime()
+            state.upsert_job(run_root, {"id": "agent-collab-test", "run_dir": str(run_dir), "status": "running", "phase": "peer_running"})
+
+            parser = host.build_parser()
+            missing_reason_args = parser.parse_args(
+                [
+                    "cancel",
+                    "agent-collab-test",
+                    "--force-before-min-wait",
+                    "--run-root",
+                    str(run_root),
+                    "--repo-root",
+                    str(REPO_ROOT),
+                ]
+            )
+            with self.assertRaises(SystemExit):
+                with mock.patch.object(host, "terminate_process_group") as terminate:
+                    host.cancel(missing_reason_args)
+            terminate.assert_not_called()
+
+            args = parser.parse_args(
+                [
+                    "cancel",
+                    "agent-collab-test",
+                    "--force-before-min-wait",
+                    "--reason",
+                    "USER_REQUESTED_STOP",
+                    "--run-root",
+                    str(run_root),
+                    "--repo-root",
+                    str(REPO_ROOT),
+                ]
+            )
+            output = io.StringIO()
+            with mock.patch.object(host, "process_alive", return_value=True):
+                with mock.patch.object(host, "process_identity_matches", return_value=True):
+                    with mock.patch.object(host, "terminate_process_group", return_value="terminated"):
+                        with redirect_stdout(output):
+                            status = host.cancel(args)
+
+            parsed = json.loads(output.getvalue())
+            peer_report = json.loads((run_dir / "peer-report.json").read_text())
+            details = peer_report["error"]["details"]
+            self.assertEqual(status, 0)
+            self.assertEqual(parsed["outcome"], "terminated")
+            self.assertTrue(parsed["forced"])
+            self.assertEqual(parsed["reason"], "USER_REQUESTED_STOP")
+            self.assertTrue(details["forced"])
+            self.assertEqual(details["reason"], "USER_REQUESTED_STOP")
+            self.assertEqual(details["minimum_wait_seconds"], host.MIN_PEER_WAIT_SECONDS)
 
     def test_cancel_refuses_to_signal_recycled_process_group(self):
         host = load_host_runtime()
@@ -2489,6 +2618,9 @@ class SkillMetadataTests(TestCase):
         self.assertIn("host.py\" clear-history", readme)
         self.assertIn("history_retained_runs", readme)
         self.assertIn("setup --clear-history", readme)
+        self.assertIn("minimum wait is 2700 seconds", readme)
+        self.assertIn("requires `--force-before-min-wait --reason USER_REQUESTED_STOP`", readme)
+        self.assertIn("empty `peer-report.json` or stderr does not mean the peer is stalled", readme)
         self.assertIn("scripts/", readme)
         self.assertIn("references/", readme)
         self.assertIn("schemas/", readme)
@@ -2523,11 +2655,16 @@ class SkillMetadataTests(TestCase):
             self.assertIn("Use `clear-history` to remove old terminal run artifacts", skill_text)
             self.assertIn("Do not invoke Agent Collab, `$agent-collab`, `/agent-collab`", skill_text)
             self.assertIn("host/peer CLIs", skill_text)
+            self.assertIn("Do not cancel a live peer before the 2700-second minimum wait", skill_text)
+            self.assertIn("empty `peer-report.json` or stderr does not mean the peer is stalled", skill_text)
+            self.assertIn("Do not replace Agent Collab with a direct `claude --print` fallback before the minimum wait", skill_text)
 
         for path in synth_docs:
             text = path.read_text()
             self.assertIn("status polling is not part of the normal independent-host phase", text, str(path))
             self.assertIn("Use `finish` as the synchronization point", text, str(path))
+            self.assertIn("Do not cancel a live peer before the 2700-second minimum wait", text, str(path))
+            self.assertIn("empty `peer-report.json` or stderr does not mean the peer is stalled", text, str(path))
 
     def test_active_docs_do_not_reference_removed_legacy_entrypoints(self):
         active_paths = [

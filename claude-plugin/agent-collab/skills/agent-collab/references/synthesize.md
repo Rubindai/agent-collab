@@ -12,10 +12,11 @@ Required flow:
 6. Give host-local subagents only the neutral brief and their lens. Do not provide peer findings, host conclusions, suspected answers, or implementation defense. Explicitly tell helper subagents not to invoke Agent Collab, `$agent-collab`, `/agent-collab`, host/peer CLIs, or cross-product peer commands.
 7. Ask all agents to use latest official documentation for external/API/platform/dependency/tooling claims and to research online extensively when current external facts could affect the answer.
 8. Use `finish` as the synchronization point after `host-first-pass.json`; status polling is not part of the normal independent-host phase. `finish` waits for peer artifacts, validates/normalizes the report, and builds synthesis support artifacts.
-9. After host first pass and peer output exist, run an advisory host-local adjudicator in `ultra` when one is available. The adjudicator receives the neutral brief, host first pass, peer report, helper reports, and claim matrix. It must not call the other product or invoke Agent Collab. If no adjudicator artifact exists, `finish` writes an `advisory_pending` marker rather than claiming adjudication happened.
-10. Verify important peer, helper, and adjudicator claims yourself before final synthesis.
-11. Snapshot workspace state after the run and report unexpected mutations, especially when `edit_allowed=false`.
-12. Synthesize the final result in Markdown.
+9. Do not cancel a live peer before the 2700-second minimum wait. An empty `peer-report.json` or stderr does not mean the peer is stalled while the process is alive. Do not replace Agent Collab with a direct `claude --print` fallback before the minimum wait.
+10. After host first pass and peer output exist, run an advisory host-local adjudicator in `ultra` when one is available. The adjudicator receives the neutral brief, host first pass, peer report, helper reports, and claim matrix. It must not call the other product or invoke Agent Collab. If no adjudicator artifact exists, `finish` writes an `advisory_pending` marker rather than claiming adjudication happened.
+11. Verify important peer, helper, and adjudicator claims yourself before final synthesis.
+12. Snapshot workspace state after the run and report unexpected mutations, especially when `edit_allowed=false`.
+13. Synthesize the final result in Markdown.
 
 Do not edit files, run formatters, or run commands likely to create repo-visible artifacts while the peer is running unless the user explicitly requested implementation and the host can still distinguish host edits from peer edits.
 

@@ -73,8 +73,9 @@ Add `--edit-allowed` only when the user explicitly delegated edits.
 python "$skill_dir/scripts/host.py" finish "$run_dir"
 ```
 
-11. In `ultra`, use a host-local advisory adjudicator after the host first pass, peer report, helper reports, and claim matrix exist. The adjudicator is advisory only and must not call Claude, Codex peer commands, or Agent Collab. If no adjudicator artifact is supplied, `finish` writes an `advisory_pending` marker.
-12. Verify important claims yourself and synthesize the final answer using `"$skill_dir/references/synthesize.md"`.
+11. Do not cancel a live peer before the 2700-second minimum wait. An empty `peer-report.json` or stderr does not mean the peer is stalled while the process is alive. Do not replace Agent Collab with a direct `claude --print` fallback before the minimum wait. If the user explicitly asks to stop a specific run before the floor, use `cancel RUN_ID --force-before-min-wait --reason USER_REQUESTED_STOP`.
+12. In `ultra`, use a host-local advisory adjudicator after the host first pass, peer report, helper reports, and claim matrix exist. The adjudicator is advisory only and must not call Claude, Codex peer commands, or Agent Collab. If no adjudicator artifact is supplied, `finish` writes an `advisory_pending` marker.
+13. Verify important claims yourself and synthesize the final answer using `"$skill_dir/references/synthesize.md"`.
 
 Useful runtime helpers:
 
