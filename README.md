@@ -212,7 +212,7 @@ Install or validate the Codex plugin package:
 scripts/install-codex-plugin.sh --dry-run
 ```
 
-The Codex plugin installer copies `codex-plugin/agent-collab` to `$HOME/plugins/agent-collab` and creates or updates `$HOME/.agents/plugins/marketplace.json` with a local marketplace entry when run without `--dry-run`. Installers validate that packaged resources are already synced and strip runtime artifacts/caches from the temporary copy before replacing an installed package.
+The Codex plugin installer copies `codex-plugin/agent-collab` to `$HOME/plugins/agent-collab`, creates or updates `$HOME/.agents/plugins/marketplace.json` with a local marketplace entry, and runs `codex plugin add agent-collab@personal --json` to refresh Codex's installed plugin cache when the Codex CLI is available. Use `--skip-codex-refresh` only when the CLI is unavailable or you want to refresh the cache manually later. Installers validate that packaged resources are already synced and strip runtime artifacts/caches from the temporary copy before replacing an installed package. Do not edit `${CODEX_HOME:-$HOME/.codex}/plugins/cache/...` directly; it is generated Codex state.
 
 Install the Codex skill directly for sessions that still load user skills without plugin installation:
 
@@ -412,7 +412,7 @@ scripts/install-codex-skill.sh --dry-run
 scripts/install-claude-plugin.sh --dry-run
 ```
 
-After installing, start a fresh Codex process before live validation so it loads the refreshed skill instead of a stale in-memory copy.
+After installing, start a fresh Codex process or a new thread before live validation so it loads the refreshed skill instead of a stale in-memory copy.
 
 ## Caveats
 

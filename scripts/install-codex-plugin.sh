@@ -3,14 +3,16 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/install-codex-plugin.sh [--dry-run]
+Usage: scripts/install-codex-plugin.sh [--dry-run] [--skip-codex-refresh]
 
 Installs the packaged Codex Agent Collab plugin into the default personal plugin
-location and creates or updates the default personal marketplace entry.
+location, creates or updates the default personal marketplace entry, and refreshes
+Codex's installed plugin cache when the Codex CLI is available.
 
 Options:
-  --dry-run    Validate and print what would be installed without copying files.
-  -h, --help   Show this help.
+  --dry-run             Validate and print what would be installed without copying files.
+  --skip-codex-refresh  Do not run `codex plugin add agent-collab@personal --json`.
+  -h, --help            Show this help.
 
 Default install locations:
   Plugin:      $HOME/plugins/agent-collab
@@ -26,11 +28,17 @@ plugins_root="$HOME/plugins"
 dest="$plugins_root/$plugin_name"
 marketplace_path="$HOME/.agents/plugins/marketplace.json"
 dry_run=0
+skip_codex_refresh=0
+codex_selector="$plugin_name@personal"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run)
       dry_run=1
+      shift
+      ;;
+    --skip-codex-refresh)
+      skip_codex_refresh=1
       shift
       ;;
     -h|--help)
@@ -75,6 +83,11 @@ fi
 if [[ "$dry_run" -eq 1 ]]; then
   echo "$source_dir -> $dest"
   echo "marketplace: $marketplace_path"
+  if [[ "$skip_codex_refresh" -eq 1 ]]; then
+    echo "codex refresh: skipped"
+  else
+    echo "codex refresh: codex plugin add $codex_selector --json"
+  fi
   exit 0
 fi
 
@@ -155,3 +168,12 @@ mv "$tmp_dir" "$dest"
 mv "$marketplace_tmp" "$marketplace_path"
 
 echo "$dest"
+
+if [[ "$skip_codex_refresh" -eq 1 ]]; then
+  echo "codex refresh skipped; run 'codex plugin add $codex_selector --json' to refresh the installed cache."
+elif command -v codex >/dev/null 2>&1; then
+  echo "refreshing Codex plugin cache: codex plugin add $codex_selector --json"
+  codex plugin add "$codex_selector" --json
+else
+  echo "warning: Codex CLI not found; run 'codex plugin add $codex_selector --json' to refresh the installed cache." >&2
+fi

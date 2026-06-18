@@ -2621,6 +2621,113 @@ class SkillMetadataTests(TestCase):
             marketplace = json.loads((home / ".agents" / "plugins" / "marketplace.json").read_text())
             entries = [plugin for plugin in marketplace["plugins"] if plugin.get("name") == "agent-collab"]
             self.assertEqual(len(entries), 1)
+            self.assertIn("Codex CLI not found", completed.stderr)
+
+    def test_codex_plugin_installer_refreshes_codex_cache_when_cli_available(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            fake_bin = Path(tmp) / "bin"
+            invocation = Path(tmp) / "codex-invocation.txt"
+            home.mkdir()
+            fake_bin.mkdir()
+            python3 = fake_bin / "python3"
+            python3.write_text(f"#!/bin/sh\nexec {sys.executable} \"$@\"\n", encoding="utf-8")
+            python3.chmod(0o755)
+            codex = fake_bin / "codex"
+            codex.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' \"$*\" > \"$CODEX_INVOCATION\"\n"
+                "printf '{\"ok\":true}\\n'\n",
+                encoding="utf-8",
+            )
+            codex.chmod(0o755)
+            env = dict(os.environ)
+            env.pop("PYTHON", None)
+            env["HOME"] = str(home)
+            env["PATH"] = f"{fake_bin}{os.pathsep}/usr/bin:/bin"
+            env["CODEX_INVOCATION"] = str(invocation)
+
+            completed = subprocess.run(
+                [str(REPO_ROOT / "scripts" / "install-codex-plugin.sh")],
+                cwd=REPO_ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertTrue((home / "plugins" / "agent-collab" / ".codex-plugin" / "plugin.json").exists())
+            self.assertEqual(invocation.read_text(encoding="utf-8").strip(), "plugin add agent-collab@personal --json")
+            self.assertIn("refreshing Codex plugin cache", completed.stdout)
+
+    def test_codex_plugin_installer_can_skip_codex_cache_refresh(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            fake_bin = Path(tmp) / "bin"
+            invocation = Path(tmp) / "codex-invocation.txt"
+            home.mkdir()
+            fake_bin.mkdir()
+            python3 = fake_bin / "python3"
+            python3.write_text(f"#!/bin/sh\nexec {sys.executable} \"$@\"\n", encoding="utf-8")
+            python3.chmod(0o755)
+            codex = fake_bin / "codex"
+            codex.write_text(
+                "#!/bin/sh\n"
+                "printf 'unexpected\\n' > \"$CODEX_INVOCATION\"\n"
+                "exit 99\n",
+                encoding="utf-8",
+            )
+            codex.chmod(0o755)
+            env = dict(os.environ)
+            env.pop("PYTHON", None)
+            env["HOME"] = str(home)
+            env["PATH"] = f"{fake_bin}{os.pathsep}/usr/bin:/bin"
+            env["CODEX_INVOCATION"] = str(invocation)
+
+            completed = subprocess.run(
+                [str(REPO_ROOT / "scripts" / "install-codex-plugin.sh"), "--skip-codex-refresh"],
+                cwd=REPO_ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertTrue((home / "plugins" / "agent-collab" / ".codex-plugin" / "plugin.json").exists())
+            self.assertFalse(invocation.exists())
+            self.assertIn("codex refresh skipped", completed.stdout)
+
+    def test_codex_plugin_installer_dry_run_reports_codex_refresh_without_copying(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            fake_bin = Path(tmp) / "bin"
+            home.mkdir()
+            fake_bin.mkdir()
+            python3 = fake_bin / "python3"
+            python3.write_text(f"#!/bin/sh\nexec {sys.executable} \"$@\"\n", encoding="utf-8")
+            python3.chmod(0o755)
+            env = dict(os.environ)
+            env.pop("PYTHON", None)
+            env["HOME"] = str(home)
+            env["PATH"] = f"{fake_bin}{os.pathsep}/usr/bin:/bin"
+
+            completed = subprocess.run(
+                [str(REPO_ROOT / "scripts" / "install-codex-plugin.sh"), "--dry-run"],
+                cwd=REPO_ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("codex refresh: codex plugin add agent-collab@personal --json", completed.stdout)
+            self.assertFalse((home / "plugins" / "agent-collab").exists())
 
     def test_codex_skill_installer_dry_run_does_not_copy(self):
         with tempfile.TemporaryDirectory() as tmp:
