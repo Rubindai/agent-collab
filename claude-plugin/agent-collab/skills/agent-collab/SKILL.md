@@ -65,9 +65,17 @@ Add `--edit-allowed` only when the user explicitly delegated edits.
   "schema_version": "1.0",
   "run_id": "agent-collab-run-id",
   "summary": "Host first-pass summary written before reading peer output.",
-  "claims": []
+  "claims": [
+    {
+      "claim": "The host completed independent analysis before reading peer output.",
+      "status": "confirmed",
+      "evidence": "Host notes were written before opening peer-report.json"
+    }
+  ]
 }
 ```
+
+Each claim must use `claim`, `status`, and `evidence`. `status` must be one of `confirmed`, `plausible_unverified`, `rejected`, `product_decision`, or `needs_human_input`. `evidence` must be one string; join multiple evidence items with `; `. Do not use `id` or `type` as substitutes, and do not make `evidence` an array.
 
 10. Finish the run. `finish` is the normal synchronization point after `host-first-pass.json`; it waits responsively for peer artifacts, normalizes the report, and returns without repeated status polling:
 

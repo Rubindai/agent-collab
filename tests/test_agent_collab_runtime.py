@@ -4,6 +4,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -85,6 +86,18 @@ def valid_peer_report(**overrides):
     }
     data.update(overrides)
     return data
+
+
+def markdown_json_objects(text: str) -> list[dict]:
+    objects = []
+    for match in re.finditer(r"```json\n(.*?)\n```", text, re.DOTALL):
+        try:
+            parsed = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            objects.append(parsed)
+    return objects
 
 
 class RuntimeContractTests(TestCase):
@@ -1558,6 +1571,32 @@ class HostRunnerTests(TestCase):
             with self.assertRaises(SystemExit):
                 host.finish(args)
 
+    def test_host_first_pass_rejects_historical_bad_claim_shape_with_full_contract(self):
+        host = load_host_runtime()
+        report = {
+            "schema_version": "1.0",
+            "run_id": "agent-collab-test",
+            "summary": "bad claim shape",
+            "claims": [
+                {
+                    "id": "claim-1",
+                    "type": "finding",
+                    "claim": "The docs showed an underspecified example.",
+                    "evidence": ["README.md", "SKILL.md"],
+                }
+            ],
+        }
+
+        with self.assertRaises(host.ArtifactValidationError) as raised:
+            host.validate_host_first_pass(report, request())
+
+        message = str(raised.exception)
+        self.assertIn("claim/status/evidence", message)
+        self.assertIn("status", message)
+        self.assertIn("evidence", message)
+        self.assertIn("string", message)
+        self.assertIn("id/type", message)
+
     def test_finish_writes_claim_matrix_and_adjudicator_placeholder(self):
         host = load_host_runtime()
 
@@ -2665,6 +2704,47 @@ class SkillMetadataTests(TestCase):
             self.assertIn("Use `finish` as the synchronization point", text, str(path))
             self.assertIn("Do not cancel a live peer before the 2700-second minimum wait", text, str(path))
             self.assertIn("empty `peer-report.json` or stderr does not mean the peer is stalled", text, str(path))
+
+    def test_docs_show_valid_nonempty_host_first_pass_claim_example(self):
+        claim_statuses = {
+            "confirmed",
+            "plausible_unverified",
+            "rejected",
+            "product_decision",
+            "needs_human_input",
+        }
+        paths = [
+            REPO_ROOT / "README.md",
+            CODEX_SKILL_ROOT / "SKILL.md",
+            CLAUDE_SKILL_ROOT / "SKILL.md",
+            RUNTIME_ROOT / "references" / "synthesize.md",
+            CODEX_SKILL_ROOT / "references" / "synthesize.md",
+            CLAUDE_SKILL_ROOT / "references" / "synthesize.md",
+        ]
+
+        for path in paths:
+            with self.subTest(path=str(path)):
+                candidates = []
+                for data in markdown_json_objects(path.read_text(encoding="utf-8")):
+                    if {
+                        "schema_version",
+                        "run_id",
+                        "summary",
+                        "claims",
+                    }.issubset(data):
+                        candidates.append(data)
+                self.assertTrue(candidates, f"missing host-first-pass JSON example in {path}")
+
+                example = candidates[0]
+                self.assertEqual(example["schema_version"], "1.0")
+                self.assertIsInstance(example["summary"], str)
+                self.assertIsInstance(example["claims"], list)
+                self.assertTrue(example["claims"], f"host-first-pass example claims must be non-empty in {path}")
+                claim = example["claims"][0]
+                self.assertEqual(set(claim), {"claim", "status", "evidence"})
+                self.assertIsInstance(claim["claim"], str)
+                self.assertIn(claim["status"], claim_statuses)
+                self.assertIsInstance(claim["evidence"], str)
 
     def test_active_docs_do_not_reference_removed_legacy_entrypoints(self):
         active_paths = [

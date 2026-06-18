@@ -80,6 +80,11 @@ CLAIM_STATUSES = {
     "product_decision",
     "needs_human_input",
 }
+CLAIM_SHAPE_CONTRACT = (
+    "expected claim/status/evidence shape: object with string 'claim', 'status' one of "
+    f"{sorted(CLAIM_STATUSES)}, and string 'evidence'; join multiple evidence items with '; '; "
+    "do not use id/type as substitutes or array-valued evidence"
+)
 CLAIM_SOURCES = {"host", "peer", "helper", "adjudicator"}
 ADJUDICATOR_STATUSES = {"advisory_pending", "ok", "needs_human_input", "blocked"}
 RECOMMENDED_VERDICTS = {
@@ -870,14 +875,14 @@ def validate_claim_shape(
     allow_extra: bool = True,
 ) -> None:
     if not isinstance(claim, dict):
-        raise ArtifactValidationError(f"{context} claim must be an object")
+        raise ArtifactValidationError(f"{context} claim must be an object; {CLAIM_SHAPE_CONTRACT}")
     for key in ("claim", "status", "evidence"):
         if key not in claim:
-            raise ArtifactValidationError(f"{context} claim missing {key}")
+            raise ArtifactValidationError(f"{context} claim missing {key}; {CLAIM_SHAPE_CONTRACT}")
         if not isinstance(claim[key], str):
-            raise ArtifactValidationError(f"{context} claim {key} must be a string")
+            raise ArtifactValidationError(f"{context} claim {key} must be a string; {CLAIM_SHAPE_CONTRACT}")
     if claim["status"] not in CLAIM_STATUSES:
-        raise ArtifactValidationError(f"{context} claim status is invalid")
+        raise ArtifactValidationError(f"{context} claim status is invalid; {CLAIM_SHAPE_CONTRACT}")
     if require_source:
         if claim.get("source") not in CLAIM_SOURCES:
             raise ArtifactValidationError(f"{context} claim source is invalid")

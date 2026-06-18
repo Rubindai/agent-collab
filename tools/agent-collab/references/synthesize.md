@@ -20,6 +20,25 @@ Required flow:
 
 Do not edit files, run formatters, or run commands likely to create repo-visible artifacts while the peer is running unless the user explicitly requested implementation and the host can still distinguish host edits from peer edits.
 
+Host first-pass claim shape:
+
+```json
+{
+  "schema_version": "1.0",
+  "run_id": "agent-collab-run-id",
+  "summary": "Host first-pass summary written before reading peer output.",
+  "claims": [
+    {
+      "claim": "The host completed independent analysis before reading peer output.",
+      "status": "confirmed",
+      "evidence": "Host notes were written before opening peer-report.json"
+    }
+  ]
+}
+```
+
+Each claim must use `claim`, `status`, and `evidence`. `status` must be one of the claim labels below. `evidence` must be one string; join multiple evidence items with `; `. Do not use `id` or `type` as substitutes, and do not make `evidence` an array.
+
 Claim labels:
 
 - `confirmed`: independently supported by host verification.
