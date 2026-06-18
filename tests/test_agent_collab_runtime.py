@@ -26,6 +26,9 @@ SNAPSHOT_RUNTIME = RUNTIME_ROOT / "scripts" / "snapshot.py"
 SCHEMA = RUNTIME_ROOT / "schemas" / "peer-report.schema.json"
 CANONICAL_MODES = ["debug", "design", "plan", "research", "review"]
 REMOVED_MODES = ["audit", "brainstorm", "implement", "migration", "plan-critique", "test-strategy", "verify"]
+FRESHNESS_RULE = "Freshness rule"
+FRESHNESS_PRIMARY_SOURCES = "latest official documentation or primary sources"
+FRESHNESS_NO_MEMORY = "Do not rely on model memory"
 
 
 def load_module(path: Path, name: str):
@@ -204,6 +207,29 @@ class RuntimeContractTests(TestCase):
         self.assertIn("<mode_contract>", prompt)
         self.assertEqual(prompt.count("<mode_contract>"), 1)
         self.assertIn("Challenge whether the claimed facts are true, current, and applicable.", prompt)
+
+    def test_prompt_includes_freshness_rule_for_every_canonical_mode(self):
+        runtime = load_peer_runtime()
+
+        for mode in CANONICAL_MODES:
+            with self.subTest(mode=mode):
+                prompt = runtime.build_prompt(request(mode=mode), REPO_ROOT, SCHEMA)
+                self.assertIn(FRESHNESS_RULE, prompt)
+                self.assertIn(FRESHNESS_PRIMARY_SOURCES, prompt)
+                self.assertIn(FRESHNESS_NO_MEMORY, prompt)
+                self.assertIn("unstable facts", prompt)
+                self.assertIn("mark the claim as unverified", prompt)
+
+    def test_disabled_web_research_prompt_marks_current_external_claims_unverified(self):
+        runtime = load_peer_runtime()
+        req = request(web_research="disabled", local_subagents_allowed=False, max_local_subagents=0)
+        runtime.validate_request(req)
+
+        prompt = runtime.build_prompt(req, REPO_ROOT, SCHEMA)
+
+        self.assertIn(FRESHNESS_RULE, prompt)
+        self.assertIn("If online research is disabled or sources are unavailable", prompt)
+        self.assertIn("mark the claim as unverified", prompt)
 
     def test_host_parser_auto_mode_and_rejects_removed_modes(self):
         host = load_host_runtime()
@@ -2719,6 +2745,30 @@ class SkillMetadataTests(TestCase):
         self.assertIn("Challenge whether the proposed approach is the right architecture", peer_only)
         self.assertIn("Challenge whether the execution sequence is actually ready", peer_only)
         self.assertIn("Challenge the initial diagnosis", peer_only)
+
+    def test_docs_define_universal_freshness_rule(self):
+        docs = [
+            REPO_ROOT / "README.md",
+            RUNTIME_ROOT / "references" / "peer-only.md",
+            RUNTIME_ROOT / "references" / "synthesize.md",
+            CODEX_SKILL_ROOT / "SKILL.md",
+            CLAUDE_SKILL_ROOT / "SKILL.md",
+            CODEX_SKILL_ROOT / "references" / "peer-only.md",
+            CLAUDE_SKILL_ROOT / "references" / "peer-only.md",
+            CODEX_SKILL_ROOT / "references" / "synthesize.md",
+            CLAUDE_SKILL_ROOT / "references" / "synthesize.md",
+            *sorted((CLAUDE_PLUGIN_ROOT / "agents").glob("agent-collab-*.md")),
+        ]
+
+        for path in docs:
+            with self.subTest(path=str(path)):
+                text = path.read_text(encoding="utf-8")
+                self.assertIn(FRESHNESS_RULE, text, str(path))
+                self.assertIn(FRESHNESS_PRIMARY_SOURCES, text, str(path))
+                self.assertIn(FRESHNESS_NO_MEMORY, text, str(path))
+                self.assertIn("unstable facts", text, str(path))
+                self.assertIn("If online research is disabled or sources are unavailable", text, str(path))
+                self.assertIn("mark the claim as unverified", text, str(path))
 
     def test_readme_reflects_current_architecture(self):
         readme = (REPO_ROOT / "README.md").read_text()

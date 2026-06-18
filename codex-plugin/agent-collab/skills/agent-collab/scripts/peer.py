@@ -111,6 +111,13 @@ MODE_CONTRACT_BY_MODE = {
     "research": "Challenge whether the claimed facts are true, current, and applicable. Prefer latest official documentation and source-backed evidence; separate facts from inference and stale assumptions.",
     "review": "Challenge whether the work should ship. Prioritize correctness, security, regressions, missing tests, compatibility, and concrete file or command evidence.",
 }
+FRESHNESS_RULE = (
+    "Freshness rule: When a material claim depends on current or external information, including APIs, "
+    "product behavior, platform docs, dependency behavior, pricing, security advisories, laws, policies, "
+    "or research, use the latest official documentation or primary sources. Do not rely on model memory "
+    "for unstable facts. If online research is disabled or sources are unavailable, state that limitation "
+    "explicitly and mark the claim as unverified."
+)
 
 
 class PeerReportValidationError(ValueError):
@@ -243,7 +250,7 @@ def build_prompt(request: dict[str, Any], repo_root: Path, schema_path: Path) ->
     )
     web_research = request.get("web_research", "live")
     if web_research == "disabled":
-        web_line = "- Do not use online research. If current external facts are necessary, state that limitation explicitly."
+        web_line = "- Do not use online research. If current external facts are necessary, state that limitation explicitly and mark the claim as unverified."
     else:
         web_line = "- Use latest official documentation for external/API/platform/dependency/tooling claims. Research online when current external facts could affect the answer; prefer official sources and source-backed evidence."
     if request["local_subagents_allowed"] and request["max_local_subagents"] > 0:
@@ -274,6 +281,10 @@ def build_prompt(request: dict[str, Any], repo_root: Path, schema_path: Path) ->
             "<mode_contract>",
             MODE_CONTRACT_BY_MODE[request["mode"]],
             "</mode_contract>",
+            "",
+            "<freshness_contract>",
+            FRESHNESS_RULE,
+            "</freshness_contract>",
             "",
             "<context>",
             "Repository root:",

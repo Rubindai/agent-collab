@@ -41,8 +41,9 @@ test -n "${skill_dir:-}"
 
 4. Before doing host analysis, write a neutral brief. Decide what the peer needs, keep the prompt natural, minimal, and non-leading, and define the desired outcome, success criteria, scope, and hard constraints.
 5. Ask the peer to use latest official documentation for external/API/platform/dependency/tooling claims and to research online extensively when current external facts could affect the answer. Prefer official sources and source-backed evidence.
-6. Do not include host analysis, suspected findings, preferred conclusions, detailed reasoning, implementation defense, or another agent's findings.
-7. Start the peer before host analysis:
+6. Freshness rule: When a material claim depends on current or external information, including APIs, product behavior, platform docs, dependency behavior, pricing, security advisories, laws, policies, or research, use the latest official documentation or primary sources. Do not rely on model memory for unstable facts. If online research is disabled or sources are unavailable, state that limitation explicitly and mark the claim as unverified.
+7. Do not include host analysis, suspected findings, preferred conclusions, detailed reasoning, implementation defense, or another agent's findings.
+8. Start the peer before host analysis:
 
 ```bash
 python "$skill_dir/scripts/host.py" start \
@@ -54,8 +55,8 @@ python "$skill_dir/scripts/host.py" start \
 
 Add `--mode review`, `--mode research`, `--mode design`, `--mode plan`, or `--mode debug` only when explicitly overriding auto-selection. Add `--edit-allowed` only when the user explicitly delegated edits.
 
-8. While the peer runs, do independent challenge-first host analysis. In `ultra`, use available host-local Codex subagents for independent lenses when useful; if named Agent Collab helper agents are not installed, use built-in Codex agents with lens-specific prompts for mapping, review, research, architecture, security, debugging, test strategy, and verification. Give each subagent only the neutral brief and its lens. Tell every helper: "Do not invoke Agent Collab, `$agent-collab`, `/agent-collab`, host/peer CLIs, or cross-product peer commands." Do not call `status --wait` during independent host analysis; repeated status polling is not part of the normal flow.
-9. Do not read `peer-report.json` until independent host work is complete. Write `host-first-pass.json` first:
+9. While the peer runs, do independent challenge-first host analysis. In `ultra`, use available host-local Codex subagents for independent lenses when useful; if named Agent Collab helper agents are not installed, use built-in Codex agents with lens-specific prompts for mapping, review, research, architecture, security, debugging, test strategy, and verification. Give each subagent only the neutral brief and its lens. Tell every helper: "Do not invoke Agent Collab, `$agent-collab`, `/agent-collab`, host/peer CLIs, or cross-product peer commands." Do not call `status --wait` during independent host analysis; repeated status polling is not part of the normal flow.
+10. Do not read `peer-report.json` until independent host work is complete. Write `host-first-pass.json` first:
 
 ```json
 {
@@ -74,15 +75,15 @@ Add `--mode review`, `--mode research`, `--mode design`, `--mode plan`, or `--mo
 
 Each claim must use `claim`, `status`, and `evidence`. `status` must be one of `confirmed`, `plausible_unverified`, `rejected`, `product_decision`, or `needs_human_input`. `evidence` must be one string; join multiple evidence items with `; `. Do not use `id` or `type` as substitutes, and do not make `evidence` an array.
 
-10. Finish the run. `finish` is the normal synchronization point after `host-first-pass.json`; it waits responsively for peer artifacts, normalizes the report, and returns without repeated Codex-visible status polling:
+11. Finish the run. `finish` is the normal synchronization point after `host-first-pass.json`; it waits responsively for peer artifacts, normalizes the report, and returns without repeated Codex-visible status polling:
 
 ```bash
 python "$skill_dir/scripts/host.py" finish "$run_dir"
 ```
 
-11. Do not cancel a live peer before the 2700-second minimum wait. An empty `peer-report.json` or stderr does not mean the peer is stalled while the process is alive. Do not replace Agent Collab with a direct `claude --print` fallback before the minimum wait. If the user explicitly asks to stop a specific run before the floor, use `cancel RUN_ID --force-before-min-wait --reason USER_REQUESTED_STOP`.
-12. In `ultra`, use a host-local advisory adjudicator after the host first pass, peer report, helper reports, and claim matrix exist. The adjudicator is advisory only and must not call Claude, Codex peer commands, or Agent Collab. If no adjudicator artifact is supplied, `finish` writes an `advisory_pending` marker.
-13. Verify important claims yourself and synthesize the final answer using `"$skill_dir/references/synthesize.md"`. Do not treat peer agreement as proof.
+12. Do not cancel a live peer before the 2700-second minimum wait. An empty `peer-report.json` or stderr does not mean the peer is stalled while the process is alive. Do not replace Agent Collab with a direct `claude --print` fallback before the minimum wait. If the user explicitly asks to stop a specific run before the floor, use `cancel RUN_ID --force-before-min-wait --reason USER_REQUESTED_STOP`.
+13. In `ultra`, use a host-local advisory adjudicator after the host first pass, peer report, helper reports, and claim matrix exist. The adjudicator is advisory only and must not call Claude, Codex peer commands, or Agent Collab. If no adjudicator artifact is supplied, `finish` writes an `advisory_pending` marker.
+14. Verify important claims yourself and synthesize the final answer using `"$skill_dir/references/synthesize.md"`. Do not treat peer agreement as proof.
 
 Useful runtime helpers:
 

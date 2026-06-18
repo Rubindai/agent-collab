@@ -4,6 +4,8 @@ Agent Collab is a challenge-first second opinion workflow. The host owns the fin
 
 Canonical modes are `review`, `research`, `design`, `plan`, and `debug`. The runtime auto-selects the mode from the target and neutral brief unless the host supplies one explicitly. Official-doc research can happen in any mode; `research` means source-backed external facts are the primary deliverable.
 
+Freshness rule: When a material claim depends on current or external information, including APIs, product behavior, platform docs, dependency behavior, pricing, security advisories, laws, policies, or research, use the latest official documentation or primary sources. Do not rely on model memory for unstable facts. If online research is disabled or sources are unavailable, state that limitation explicitly and mark the claim as unverified.
+
 Required flow:
 
 1. Default `profile` to `ultra`. Classify `target`, `profile`, and whether edits are explicitly allowed.
