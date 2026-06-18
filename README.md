@@ -309,7 +309,7 @@ Environment variables:
 - `CLAUDE_AGENT_COLLAB_MODEL`: Claude peer model. Defaults to `opus`.
 - `CLAUDE_AGENT_COLLAB_EFFORT`: Claude peer effort. Defaults to `max`.
 - `CLAUDE_AGENT_COLLAB_TOOLS`: Claude peer tool access. `default` uses Claude Code's default/full tool set; custom values are passed through Claude Code `--tools`. When web research is enabled, custom lists automatically include `WebSearch` and `WebFetch`.
-- `CLAUDE_AGENT_COLLAB_MAX_BUDGET_USD`: Optional Claude peer budget cap. Defaults to `25.00` when supported by the local CLI.
+- `CLAUDE_AGENT_COLLAB_MAX_BUDGET_USD`: Deprecated compatibility variable. Agent Collab does not pass Claude Code's `--max-budget-usd` flag.
 - `CLAUDE_AGENT_COLLAB_MAX_TURNS`: Optional Claude peer turn cap. Defaults to `50` when supported by the local CLI.
 - `AGENT_COLLAB_CLAUDE_ASSUME_FLAGS`: Set to `1`, `true`, or `yes` to treat documented Claude flags as supported without probing `claude --help`.
 - `AGENT_COLLAB_HISTORY_RETAINED_RUNS`: Number of terminal run artifact directories cleanup keeps. Defaults to `50`; use `0` to clear all terminal history when cleanup runs.

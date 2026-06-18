@@ -94,7 +94,6 @@ CLAUDE_DOCUMENTED_FLAGS = {
     "--allowed-tools",
     "--disallowedTools",
     "--disallowed-tools",
-    "--max-budget-usd",
     "--max-turns",
 }
 ROLE_BY_MODE = {
@@ -512,8 +511,6 @@ def add_claude_tool_flags(args: list[str], env: dict[str, str], safe_mode: bool,
 
 
 def add_claude_optional_flags(args: list[str], env: dict[str, str]) -> None:
-    if claude_supports_option("--max-budget-usd", env):
-        args.extend(["--max-budget-usd", env.get("CLAUDE_AGENT_COLLAB_MAX_BUDGET_USD", "25.00")])
     if claude_supports_option("--max-turns", env):
         args.extend(["--max-turns", env.get("CLAUDE_AGENT_COLLAB_MAX_TURNS", "50")])
 

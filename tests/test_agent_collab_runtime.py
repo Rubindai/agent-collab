@@ -358,7 +358,7 @@ class RuntimeContractTests(TestCase):
                 host.resolve_run_reference(REPO_ROOT, "external", run_root)
             self.assertEqual(host.resolve_run_reference(REPO_ROOT, str(external), run_root), external.resolve())
 
-    def test_claude_command_defaults_to_full_tools_and_bypass_permissions(self):
+    def test_claude_command_defaults_to_full_tools_bypass_permissions_and_no_budget_cap(self):
         runtime = load_peer_runtime()
 
         command = runtime.build_peer_command(
@@ -379,8 +379,25 @@ class RuntimeContractTests(TestCase):
         self.assertEqual(command.args[command.args.index("--effort") + 1], "max")
         self.assertIn("--json-schema", command.args)
         self.assertIn("--no-session-persistence", command.args)
-        self.assertIn("--max-budget-usd", command.args)
+        self.assertNotIn("--max-budget-usd", command.args)
         self.assertIn("--max-turns", command.args)
+
+    def test_claude_command_ignores_legacy_budget_cap_configuration(self):
+        runtime = load_peer_runtime()
+
+        command = runtime.build_peer_command(
+            request(peer="claude"),
+            prompt="prompt text",
+            repo_root=REPO_ROOT,
+            schema_path=SCHEMA,
+            output_path=Path("/tmp/out.json"),
+            env={
+                "AGENT_COLLAB_CLAUDE_ASSUME_FLAGS": "true",
+                "CLAUDE_AGENT_COLLAB_MAX_BUDGET_USD": "100.00",
+            },
+        )
+
+        self.assertNotIn("--max-budget-usd", command.args)
 
     def test_claude_documented_flags_do_not_depend_on_help_visibility(self):
         runtime = load_peer_runtime()
@@ -403,7 +420,6 @@ class RuntimeContractTests(TestCase):
                 "--json-schema",
                 "--output-format",
                 "--no-session-persistence",
-                "--max-budget-usd",
                 "--max-turns",
             }
 
@@ -1114,6 +1130,22 @@ class HostRunnerTests(TestCase):
         args = parser.parse_args(["setup", "--no-input", "--codex-effort", "minimal"])
 
         self.assertEqual(host.settings_from_args(args)["codex_effort"], "minimal")
+
+    def test_setup_allows_no_claude_budget_cap(self):
+        host = load_host_runtime()
+
+        self.assertEqual(host.SETTING_DEFAULTS["claude_max_budget_usd"], "")
+        self.assertEqual(
+            host.normalize_settings({"claude_max_budget_usd": ""}, "test")["claude_max_budget_usd"],
+            "",
+        )
+        self.assertEqual(
+            host.normalize_settings({"claude_max_budget_usd": "unlimited"}, "test")["claude_max_budget_usd"],
+            "",
+        )
+        settings = dict(host.SETTING_DEFAULTS)
+        settings["claude_max_budget_usd"] = "25.00"
+        self.assertEqual(host.settings_to_env(settings)["CLAUDE_AGENT_COLLAB_MAX_BUDGET_USD"], "")
 
     def test_setup_writes_local_and_global_settings_and_reset_removes_them(self):
         host = load_host_runtime()

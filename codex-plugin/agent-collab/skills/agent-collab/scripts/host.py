@@ -41,7 +41,7 @@ SETTING_DEFAULTS: dict[str, Any] = {
     "claude_model": "opus",
     "claude_effort": "max",
     "claude_tools": "default",
-    "claude_max_budget_usd": "25.00",
+    "claude_max_budget_usd": "",
     "claude_max_turns": "50",
     "history_retained_runs": DEFAULT_HISTORY_RETAINED_RUNS,
 }
@@ -440,7 +440,9 @@ def normalize_settings(raw_settings: dict[str, Any], source: str) -> dict[str, A
             normalized[key] = text
         elif key == "claude_max_budget_usd":
             text = str(value).strip()
-            if not text or float(text) <= 0:
+            if text.lower() in {"none", "off", "unlimited"}:
+                text = ""
+            if text and float(text) <= 0:
                 raise ValueError(f"{source} claude_max_budget_usd must be positive")
             normalized[key] = text
         else:
@@ -526,7 +528,7 @@ def settings_to_env(settings: dict[str, Any]) -> dict[str, str]:
         "CLAUDE_AGENT_COLLAB_MODEL": str(settings["claude_model"]),
         "CLAUDE_AGENT_COLLAB_EFFORT": str(settings["claude_effort"]),
         "CLAUDE_AGENT_COLLAB_TOOLS": str(settings["claude_tools"]),
-        "CLAUDE_AGENT_COLLAB_MAX_BUDGET_USD": str(settings["claude_max_budget_usd"]),
+        "CLAUDE_AGENT_COLLAB_MAX_BUDGET_USD": "",
         "CLAUDE_AGENT_COLLAB_MAX_TURNS": str(settings["claude_max_turns"]),
         "AGENT_COLLAB_HISTORY_RETAINED_RUNS": str(settings["history_retained_runs"]),
     }
@@ -1637,7 +1639,6 @@ def settings_from_args(args: argparse.Namespace) -> dict[str, Any]:
         "claude_model": "claude_model",
         "claude_effort": "claude_effort",
         "claude_tools": "claude_tools",
-        "claude_max_budget_usd": "claude_max_budget_usd",
         "claude_max_turns": "claude_max_turns",
         "history_retained_runs": "history_retained_runs",
     }
@@ -1743,7 +1744,6 @@ def interactive_setup(current: dict[str, Any]) -> dict[str, Any]:
     settings["claude_model"] = choose_text("Claude peer model", str(settings["claude_model"]))
     settings["claude_effort"] = choose_option("Claude effort", str(settings["claude_effort"]), ["max", "xhigh", "high", "medium", "low"])
     settings["claude_tools"] = choose_text("Claude tool access (`default` or --tools list)", str(settings["claude_tools"]))
-    settings["claude_max_budget_usd"] = choose_text("Claude max budget USD", str(settings["claude_max_budget_usd"]))
     settings["claude_max_turns"] = choose_text("Claude max turns", str(settings["claude_max_turns"]))
     return normalize_settings(settings, "interactive setup")
 
@@ -1946,7 +1946,6 @@ def doctor(args: argparse.Namespace) -> int:
         "--tools",
         "--disallowedTools",
         "--disallowed-tools",
-        "--max-budget-usd",
         "--max-turns",
     ]
     claude_help_flags = support_map(claude_help, claude_flag_options)
@@ -2095,7 +2094,7 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument("--claude-model")
     setup_parser.add_argument("--claude-effort", choices=sorted(CLAUDE_EFFORT_CHOICES))
     setup_parser.add_argument("--claude-tools")
-    setup_parser.add_argument("--claude-max-budget-usd")
+    setup_parser.add_argument("--claude-max-budget-usd", help=argparse.SUPPRESS)
     setup_parser.add_argument("--claude-max-turns")
     setup_parser.add_argument("--repo-root", type=Path)
     setup_parser.set_defaults(func=setup)
