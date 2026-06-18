@@ -1,6 +1,6 @@
 # Agent Collab
 
-Agent Collab is a repo-local collaboration workflow for Codex and Claude Code. It starts the opposite product as an independent peer first, lets the host do its own unpolluted analysis in parallel, then uses host-owned judging and synthesis to produce the final answer.
+Agent Collab is a repo-local challenge-first second opinion workflow for Codex and Claude Code. It starts the opposite product as an independent peer first, lets the host do its own unpolluted analysis in parallel, then uses host-owned judging and synthesis to produce the final answer.
 
 The default profile is `ultra`: maximum capability, full repo/tool/network access, peer-first execution, host-local helper agents, and an advisory adjudicator.
 
@@ -8,22 +8,24 @@ The default profile is `ultra`: maximum capability, full repo/tool/network acces
 
 Use Agent Collab for high-stakes work where a second independent AI pass is worth the cost:
 
-- code review, security audit, and risky implementation verification
-- plan critique, repo-grounded architecture brainstorming, technical design ideation, design debate, and architecture tradeoffs
-- debugging, migrations, research, and test strategy
+- strict code review, security-sensitive review, and risky implementation verification
+- repo-grounded architecture decisions, technical design critique, design debate, and architecture tradeoffs
+- debugging, source-backed research, implementation planning, and test planning
 - any task where the user asks for Claude+Codex cross-checking
 
 Avoid using Agent Collab for casual brainstorming, naming, simple idea generation, routine Q&A, and low-risk questions where a second independent pass adds little value.
 
-The host remains the final decision maker. Peer, helper, and adjudicator reports are evidence, not authority.
+The host remains the final decision maker. Peer, helper, and adjudicator reports are evidence, not authority. Agreement is not proof; the host and peer should seek disconfirming evidence before accepting claims.
 
-Mode boundaries:
+The runtime auto-selects one of five canonical modes from the target and neutral brief unless `--mode` is supplied explicitly:
 
-- `brainstorm`: divergent repo-grounded option generation. Generate 3-5 viable technical approaches, compare tradeoffs, constraints, unknowns, risks, and decision criteria, then recommend a next direction without producing a full architecture spec or implementation plan unless asked.
-- `research`: source-backed facts and current external evidence.
-- `design`: converge on one architecture with repo-grounded constraints and rationale.
-- `plan`: implementation sequence after the direction is chosen.
-- `plan-critique`: readiness review of an existing plan.
+- `review`: challenge whether the work should ship. Use for diffs, patches, risky changes, security-sensitive code, missing tests, and release readiness.
+- `research`: challenge whether claimed facts are true, current, and applicable. Use when current external/API/platform/dependency/tooling facts are the primary deliverable.
+- `design`: challenge whether the proposed approach is the right architecture. Use for architecture choices, tradeoffs, alternatives, compatibility, and migration approaches.
+- `plan`: challenge whether the execution sequence is actually ready. Use for implementation plans, rollout plans, test strategy, sequencing, rollback, and readiness.
+- `debug`: challenge the initial diagnosis. Use for bugs, crashes, failing tests, logs, reproduction gaps, and root-cause analysis.
+
+official-doc research can happen in any mode. `research` is only selected when source-backed external facts are the main deliverable, not when docs are just supporting evidence for review, design, plan, or debug.
 
 ## Repo Layout
 
@@ -88,11 +90,11 @@ Claude may also invoke the skill implicitly when the request matches its descrip
 
 ## Workflow
 
-1. The host classifies `mode`, `target`, `profile`, and `edit_allowed`. `profile` defaults to `ultra`.
+1. The runtime auto-selects `mode` from `target` and the neutral brief unless the host supplies a canonical mode explicitly. The host classifies `target`, `profile`, and `edit_allowed`; `profile` defaults to `ultra`.
 2. The host writes a neutral brief before host analysis begins.
 3. The host starts the peer immediately with `scripts/host.py start`.
 4. The peer receives only the neutral brief, target, constraints, edit policy, and output schema.
-5. While the peer runs, the host performs independent analysis.
+5. While the peer runs, the host performs independent challenge-first analysis and records its own first-pass claims before reading the peer.
 6. All agents use latest official documentation for external/API/platform/dependency/tooling claims and research online extensively when current external facts could affect the answer.
 7. In `ultra`, Claude hosts can use the helper agents packaged with the Claude plugin. Codex hosts use available host-local subagents or built-in Codex agents with independent lens prompts for mapping, review, research, architecture, security, debugging, test strategy, and verification.
 8. Do not read peer output until independent host work is complete. The host writes `host-first-pass.json` before reading `peer-report.json`.
@@ -322,10 +324,11 @@ brief_file=$(mktemp)
 printf '%s\n' "Review the current diff for correctness, security, and missing tests." > "$brief_file"
 python "$repo_root/tools/agent-collab/scripts/host.py" start \
   --host codex \
-  --mode review \
   --target "current diff" \
   --brief-file "$brief_file"
 ```
+
+`--mode` is optional. Supply it only to override auto-selection with one of `review`, `research`, `design`, `plan`, or `debug`.
 
 Write `host-first-pass.json` in the returned run directory before reading `peer-report.json`, then finish. `finish` is the normal synchronization point because it waits internally at a short cadence and returns as soon as peer artifacts are ready:
 

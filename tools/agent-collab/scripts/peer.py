@@ -19,17 +19,10 @@ sys.dont_write_bytecode = True
 ORIGINS = {"claude", "codex"}
 MODES = {
     "review",
-    "audit",
-    "brainstorm",
     "research",
     "design",
     "plan",
-    "plan-critique",
     "debug",
-    "migration",
-    "test-strategy",
-    "verify",
-    "implement",
 }
 VERDICTS = {
     "pass",
@@ -105,18 +98,18 @@ CLAUDE_DOCUMENTED_FLAGS = {
     "--max-turns",
 }
 ROLE_BY_MODE = {
-    "review": "You are an independent senior software reviewer.",
-    "audit": "You are an independent security and reliability auditor.",
-    "brainstorm": "You are an independent technical ideation partner focused on repo-grounded architecture and design options.",
-    "research": "You are an independent technical researcher.",
+    "debug": "You are an independent root-cause investigator.",
     "design": "You are an independent software architect.",
     "plan": "You are an independent implementation planner.",
-    "plan-critique": "You are an independent plan reviewer.",
-    "debug": "You are an independent debugging investigator.",
-    "migration": "You are an independent migration architect.",
-    "test-strategy": "You are an independent test strategist.",
-    "verify": "You are an independent verifier.",
-    "implement": "You are an independent implementation reviewer.",
+    "research": "You are an independent source-backed technical researcher.",
+    "review": "You are an independent challenge-first software reviewer.",
+}
+MODE_CONTRACT_BY_MODE = {
+    "debug": "Challenge the initial diagnosis. Prove or disprove likely root causes with repro evidence, logs, code paths, and the smallest decisive checks available.",
+    "design": "Challenge whether the proposed approach is the right architecture. Compare viable alternatives, constraints, reversibility, operational risk, and repo fit before recommending a direction.",
+    "plan": "Challenge whether the execution sequence is actually ready. Look for missing prerequisites, ordering hazards, rollback gaps, test gaps, and decisions that should be made before work starts.",
+    "research": "Challenge whether the claimed facts are true, current, and applicable. Prefer latest official documentation and source-backed evidence; separate facts from inference and stale assumptions.",
+    "review": "Challenge whether the work should ship. Prioritize correctness, security, regressions, missing tests, compatibility, and concrete file or command evidence.",
 }
 
 
@@ -238,6 +231,7 @@ def fenced_block(info_string: str, text: str) -> str:
 
 
 def build_prompt(request: dict[str, Any], repo_root: Path, schema_path: Path) -> str:
+    request = {**REQUEST_DEFAULTS, **request}
     contract = (resource_root() / "references" / "peer-only.md").read_text(encoding="utf-8").strip()
     prompt_blocks = (resource_root() / "references" / "peer-prompt-blocks.md").read_text(encoding="utf-8").strip()
     schema = schema_path.read_text(encoding="utf-8").strip()
@@ -271,6 +265,15 @@ def build_prompt(request: dict[str, Any], repo_root: Path, schema_path: Path) ->
             "<objective>",
             f"Independently evaluate the target for `{request['mode']}` and return evidence-grounded findings.",
             "</objective>",
+            "",
+            "<challenge_contract>",
+            "This is a challenge-first second opinion: assume the current answer may be wrong, seek disconfirming evidence, and do not accept host, peer, or user framing until it survives evidence checks.",
+            "Agreement is a signal to inspect, not proof.",
+            "</challenge_contract>",
+            "",
+            "<mode_contract>",
+            MODE_CONTRACT_BY_MODE[request["mode"]],
+            "</mode_contract>",
             "",
             "<context>",
             "Repository root:",

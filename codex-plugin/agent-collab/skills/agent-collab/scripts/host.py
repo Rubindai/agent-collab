@@ -21,17 +21,10 @@ sys.dont_write_bytecode = True
 ORIGINS = {"claude", "codex"}
 MODES = {
     "review",
-    "audit",
-    "brainstorm",
     "research",
     "design",
     "plan",
-    "plan-critique",
     "debug",
-    "migration",
-    "test-strategy",
-    "verify",
-    "implement",
 }
 SETTINGS_SCHEMA_VERSION = "1.0"
 DEFAULT_HISTORY_RETAINED_RUNS = 50
@@ -223,6 +216,107 @@ def read_text_arg(value: str | None, file_value: Path | None) -> str:
     if file_value is not None:
         return file_value.read_text(encoding="utf-8").strip()
     return (value or "").strip()
+
+
+def _contains_any(text: str, needles: tuple[str, ...]) -> bool:
+    return any(needle in text for needle in needles)
+
+
+def classify_mode(target: str, brief: str) -> str:
+    text = f"{target}\n{brief}".casefold()
+    review_context = _contains_any(
+        text,
+        (
+            "review",
+            "diff",
+            "patch",
+            "pull request",
+            "pr ",
+            "safe to ship",
+            "ship",
+            "missing test",
+            "regression",
+            "security",
+            "auth",
+        ),
+    )
+    debug_context = _contains_any(
+        text,
+        (
+            "bug",
+            "crash",
+            "stack trace",
+            "traceback",
+            "exception",
+            "root cause",
+            "reproduce",
+            "repro",
+            "failing",
+            "failure",
+            " hung",
+            "hanging",
+            "timeout",
+            "broken",
+            "error",
+        ),
+    )
+    plan_context = _contains_any(
+        text,
+        (
+            "plan",
+            "test strategy",
+            "rollout",
+            "checklist",
+            "sequence",
+            "steps",
+            "milestone",
+            "implementation order",
+            "execution order",
+            "rollback",
+        ),
+    )
+    design_context = _contains_any(
+        text,
+        (
+            "architecture",
+            "architect",
+            "design",
+            "tradeoff",
+            "trade-off",
+            "alternative",
+            "approach",
+            "migration approach",
+            "moving storage",
+            "storage provider",
+            "api shape",
+            "schema design",
+        ),
+    )
+    research_context = _contains_any(
+        text,
+        (
+            "research",
+            "official doc",
+            "official api",
+            "source-backed",
+            "source backed",
+            "external evidence",
+            "current docs",
+            "changed recently",
+            "platform behavior",
+            "dependency behavior",
+        ),
+    )
+
+    if debug_context and not plan_context:
+        return "debug"
+    if plan_context:
+        return "plan"
+    if design_context:
+        return "design"
+    if research_context and not review_context:
+        return "research"
+    return "review"
 
 
 def utc_run_id(host: str, mode: str) -> str:
@@ -722,18 +816,18 @@ def start(args: argparse.Namespace) -> int:
     settings = resolved["settings"]
     host = args.host
     peer = "claude" if host == "codex" else "codex"
+    brief = read_text_arg(args.brief, args.brief_file)
+    if not brief:
+        raise SystemExit("brief or brief-file is required")
+    mode = args.mode or classify_mode(args.target, brief)
     try:
-        run_id = require_safe_run_id(args.run_id or utc_run_id(host, args.mode))
+        run_id = require_safe_run_id(args.run_id or utc_run_id(host, mode))
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     run_root = (args.run_root or default_run_root(repo_root)).resolve()
     run_dir = run_root / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
     state = load_state_runtime()
-
-    brief = read_text_arg(args.brief, args.brief_file)
-    if not brief:
-        raise SystemExit("brief or brief-file is required")
 
     profile = args.profile or settings["profile"]
     max_local_subagents = args.max_local_subagents if args.max_local_subagents is not None else settings["max_local_subagents"]
@@ -742,7 +836,7 @@ def start(args: argparse.Namespace) -> int:
         "origin": host,
         "host": host,
         "peer": peer,
-        "mode": args.mode,
+        "mode": mode,
         "target": args.target,
         "brief": brief,
         "edit_allowed": bool(args.edit_allowed),
@@ -766,7 +860,7 @@ def start(args: argparse.Namespace) -> int:
             "repo_root": str(repo_root),
             "host": host,
             "peer": peer,
-            "mode": args.mode,
+            "mode": mode,
             "target": args.target,
             "profile": profile,
             "status": "running",
@@ -1961,7 +2055,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     start_parser = sub.add_parser("start", help="Create a run directory and launch the cross-agent peer.")
     start_parser.add_argument("--host", choices=sorted(ORIGINS), required=True)
-    start_parser.add_argument("--mode", choices=sorted(MODES), required=True)
+    start_parser.add_argument("--mode", choices=sorted(MODES))
     start_parser.add_argument("--target", required=True)
     start_parser.add_argument("--brief")
     start_parser.add_argument("--brief-file", type=Path)

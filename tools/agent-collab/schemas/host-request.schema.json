@@ -10,7 +10,7 @@
     "host": {"enum": ["claude", "codex"]},
     "peer": {"enum": ["claude", "codex"]},
     "mode": {
-      "enum": ["review", "audit", "brainstorm", "research", "design", "plan", "plan-critique", "debug", "migration", "test-strategy", "verify", "implement"]
+      "enum": ["review", "research", "design", "plan", "debug"]
     },
     "target": {"type": "string", "minLength": 1},
     "brief": {"type": "string", "minLength": 1},

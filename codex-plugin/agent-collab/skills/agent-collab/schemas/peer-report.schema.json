@@ -59,17 +59,10 @@
     "mode": {
       "enum": [
         "review",
-        "audit",
-        "brainstorm",
         "research",
         "design",
         "plan",
-        "plan-critique",
-        "debug",
-        "migration",
-        "test-strategy",
-        "verify",
-        "implement"
+        "debug"
       ]
     },
     "target": {

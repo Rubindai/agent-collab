@@ -24,6 +24,8 @@ HOST_RUNTIME = RUNTIME_ROOT / "scripts" / "host.py"
 STATE_RUNTIME = RUNTIME_ROOT / "scripts" / "state.py"
 SNAPSHOT_RUNTIME = RUNTIME_ROOT / "scripts" / "snapshot.py"
 SCHEMA = RUNTIME_ROOT / "schemas" / "peer-report.schema.json"
+CANONICAL_MODES = ["debug", "design", "plan", "research", "review"]
+REMOVED_MODES = ["audit", "brainstorm", "implement", "migration", "plan-critique", "test-strategy", "verify"]
 
 
 def load_module(path: Path, name: str):
@@ -110,8 +112,10 @@ class RuntimeContractTests(TestCase):
 
         self.assertIn("# Agent Collab Peer Request", prompt)
         self.assertIn("<role>", prompt)
-        self.assertIn("You are an independent senior software reviewer.", prompt)
+        self.assertIn("You are an independent challenge-first software reviewer.", prompt)
         self.assertIn("<objective>", prompt)
+        self.assertIn("<challenge_contract>", prompt)
+        self.assertIn("<mode_contract>", prompt)
         self.assertIn("<context>", prompt)
         self.assertIn("<success_criteria>", prompt)
         self.assertIn("<constraints>", prompt)
@@ -173,19 +177,13 @@ class RuntimeContractTests(TestCase):
         runtime = load_peer_runtime()
 
         expected_roles = {
-            "review": "You are an independent senior software reviewer.",
-            "audit": "You are an independent security and reliability auditor.",
-            "brainstorm": "You are an independent technical ideation partner focused on repo-grounded architecture and design options.",
-            "research": "You are an independent technical researcher.",
+            "debug": "You are an independent root-cause investigator.",
             "design": "You are an independent software architect.",
             "plan": "You are an independent implementation planner.",
-            "plan-critique": "You are an independent plan reviewer.",
-            "debug": "You are an independent debugging investigator.",
-            "migration": "You are an independent migration architect.",
-            "test-strategy": "You are an independent test strategist.",
-            "verify": "You are an independent verifier.",
-            "implement": "You are an independent implementation reviewer.",
+            "research": "You are an independent source-backed technical researcher.",
+            "review": "You are an independent challenge-first software reviewer.",
         }
+        self.assertEqual(sorted(expected_roles), CANONICAL_MODES)
 
         for mode, role in expected_roles.items():
             with self.subTest(mode=mode):
@@ -195,25 +193,41 @@ class RuntimeContractTests(TestCase):
                 role_block = prompt.split("<role>\n", 1)[1].split("\n</role>", 1)[0]
                 self.assertIn(role, role_block)
 
-    def test_host_parser_accepts_brainstorm_mode(self):
+    def test_prompt_includes_shared_challenge_contract_and_single_mode_contract(self):
+        runtime = load_peer_runtime()
+
+        prompt = runtime.build_prompt(request(mode="research"), REPO_ROOT, SCHEMA)
+
+        self.assertIn("<challenge_contract>", prompt)
+        self.assertIn("seek disconfirming evidence", prompt)
+        self.assertIn("assume the current answer may be wrong", prompt)
+        self.assertIn("<mode_contract>", prompt)
+        self.assertEqual(prompt.count("<mode_contract>"), 1)
+        self.assertIn("Challenge whether the claimed facts are true, current, and applicable.", prompt)
+
+    def test_host_parser_auto_mode_and_rejects_removed_modes(self):
         host = load_host_runtime()
 
         parser = host.build_parser()
-        args = parser.parse_args(
-            [
-                "start",
-                "--host",
-                "codex",
-                "--mode",
-                "brainstorm",
-                "--target",
-                "approach options",
-                "--brief-file",
-                "/tmp/brief.txt",
-            ]
-        )
+        args = parser.parse_args(["start", "--host", "codex", "--target", "current diff", "--brief-file", "/tmp/brief.txt"])
+        self.assertIsNone(args.mode)
 
-        self.assertEqual(args.mode, "brainstorm")
+        for removed_mode in REMOVED_MODES:
+            with self.subTest(mode=removed_mode):
+                with self.assertRaises(SystemExit):
+                    parser.parse_args(
+                        [
+                            "start",
+                            "--host",
+                            "codex",
+                            "--mode",
+                            removed_mode,
+                            "--target",
+                            "target",
+                            "--brief-file",
+                            "/tmp/brief.txt",
+                        ]
+                    )
 
     def test_agent_timeout_defaults_to_45_minutes_and_floors_at_45_minutes(self):
         runtime = load_peer_runtime()
@@ -286,8 +300,6 @@ class RuntimeContractTests(TestCase):
                     "start",
                     "--host",
                     "codex",
-                    "--mode",
-                    "review",
                     "--target",
                     "current diff",
                     "--brief-file",
@@ -897,15 +909,25 @@ class RuntimeContractTests(TestCase):
         with self.assertRaises(runtime.PeerReportValidationError):
             runtime.validate_peer_report(valid_peer_report(error={"kind": "unexpected", "message": "bad"}))
 
-    def test_schema_mode_enums_include_brainstorm(self):
+    def test_schema_mode_enums_are_canonical_only(self):
         host_request_schema = json.loads((RUNTIME_ROOT / "schemas" / "host-request.schema.json").read_text())
         peer_report_schema = json.loads((RUNTIME_ROOT / "schemas" / "peer-report.schema.json").read_text())
 
-        self.assertIn("brainstorm", host_request_schema["properties"]["mode"]["enum"])
-        self.assertIn("brainstorm", peer_report_schema["properties"]["mode"]["enum"])
+        self.assertEqual(sorted(host_request_schema["properties"]["mode"]["enum"]), CANONICAL_MODES)
+        self.assertEqual(sorted(peer_report_schema["properties"]["mode"]["enum"]), CANONICAL_MODES)
         self.assertFalse(host_request_schema["additionalProperties"])
         self.assertIn("web_research", host_request_schema["properties"])
         self.assertIn("allOf", peer_report_schema)
+
+    def test_removed_modes_are_rejected_by_runtime_validation(self):
+        runtime = load_peer_runtime()
+
+        for removed_mode in REMOVED_MODES:
+            with self.subTest(mode=removed_mode):
+                with self.assertRaises(runtime.RequestValidationError):
+                    runtime.validate_request(request(mode=removed_mode))
+                with self.assertRaises(runtime.PeerReportValidationError):
+                    runtime.validate_peer_report(valid_peer_report(mode=removed_mode))
 
     def test_git_snapshot_outputs_parseable_sections(self):
         host = load_host_runtime()
@@ -1008,6 +1030,34 @@ class RuntimeContractTests(TestCase):
 
 
 class HostRunnerTests(TestCase):
+    def test_auto_classify_mode_uses_challenge_first_canonical_modes(self):
+        host = load_host_runtime()
+
+        cases = [
+            ("current diff", "The endpoint crashes with a stack trace when the retry path runs.", "debug"),
+            ("test plan", "Write a test strategy and rollout verification checklist.", "plan"),
+            ("architecture", "Compare migration approaches and tradeoffs for moving storage providers.", "design"),
+            ("official docs", "Research current official API docs and source-backed platform behavior.", "research"),
+            ("current diff", "Review this change and decide whether it is safe to ship.", "review"),
+            ("current diff", "The diff might be missing tests for this auth edge case.", "review"),
+        ]
+
+        for target, brief, expected in cases:
+            with self.subTest(expected=expected, brief=brief):
+                self.assertEqual(host.classify_mode(target, brief), expected)
+
+    def test_auto_classify_mode_prefers_research_only_when_external_facts_are_primary(self):
+        host = load_host_runtime()
+
+        self.assertEqual(
+            host.classify_mode("current diff", "Review this SDK integration and check official docs if needed."),
+            "review",
+        )
+        self.assertEqual(
+            host.classify_mode("dependency behavior", "Use official docs to research whether this API changed recently."),
+            "research",
+        )
+
     def test_settings_precedence_env_local_global_builtin(self):
         host = load_host_runtime()
 
@@ -1285,8 +1335,6 @@ class HostRunnerTests(TestCase):
                     "start",
                     "--host",
                     "codex",
-                    "--mode",
-                    "review",
                     "--target",
                     "current diff",
                     "--brief-file",
@@ -1310,6 +1358,7 @@ class HostRunnerTests(TestCase):
             self.assertEqual(request_json["profile"], "ultra")
             self.assertEqual(request_json["host"], "codex")
             self.assertEqual(request_json["peer"], "claude")
+            self.assertEqual(request_json["mode"], "review")
             self.assertTrue(request_json["local_subagents_allowed"])
             self.assertEqual(request_json["max_local_subagents"], 8)
             self.assertEqual(request_json["web_research"], "live")
@@ -1321,6 +1370,46 @@ class HostRunnerTests(TestCase):
             self.assertIn(str(run_dir / "peer-normalization.json"), launched_args)
             self.assertEqual(snapshot.call_count, 1)
             self.assertTrue(popen.called)
+
+    def test_start_explicit_canonical_mode_overrides_auto_classification(self):
+        host = load_host_runtime()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            brief = tmp_path / "brief.txt"
+            brief.write_text("This sounds like a crash, but force a research run.", encoding="utf-8")
+            process = mock.Mock()
+            process.pid = 12345
+
+            parser = host.build_parser()
+            args = parser.parse_args(
+                [
+                    "start",
+                    "--host",
+                    "codex",
+                    "--mode",
+                    "research",
+                    "--target",
+                    "current diff",
+                    "--brief-file",
+                    str(brief),
+                    "--run-id",
+                    "agent-collab-explicit-mode",
+                    "--run-root",
+                    str(tmp_path / "runs"),
+                    "--repo-root",
+                    str(REPO_ROOT),
+                ]
+            )
+            with mock.patch.dict(host.os.environ, {}, clear=True):
+                with mock.patch.object(host, "run_snapshot"):
+                    with mock.patch.object(host.subprocess, "Popen", return_value=process):
+                        with redirect_stdout(io.StringIO()):
+                            host.start(args)
+
+            run_dir = tmp_path / "runs" / "agent-collab-explicit-mode"
+            request_json = json.loads((run_dir / "host-request.json").read_text())
+            self.assertEqual(request_json["mode"], "research")
 
     def test_start_uses_settings_when_cli_values_are_not_supplied(self):
         host = load_host_runtime()
@@ -2600,35 +2689,36 @@ class SkillMetadataTests(TestCase):
             self.assertIn("research online extensively", text, str(doc))
             self.assertNotIn("There is no separate judge agent", text)
 
-    def test_brainstorm_mode_is_documented_with_narrow_boundaries(self):
+    def test_docs_describe_auto_challenge_first_canonical_modes(self):
         readme = (REPO_ROOT / "README.md").read_text()
         codex_skill = (CODEX_SKILL_ROOT / "SKILL.md").read_text()
         claude_skill = (CLAUDE_SKILL_ROOT / "SKILL.md").read_text()
 
         for text in (readme, codex_skill, claude_skill):
-            self.assertIn("brainstorm", text)
-            self.assertIn("repo-grounded architecture brainstorming", text)
-            self.assertIn("technical design ideation", text)
-            self.assertIn("architecture tradeoffs", text)
-            self.assertIn("casual brainstorming", text)
-            self.assertIn("simple idea generation", text)
+            self.assertIn("auto-select", text.lower())
+            self.assertIn("challenge-first", text)
+            self.assertIn("second opinion", text.lower())
+            for mode in CANONICAL_MODES:
+                self.assertIn(f"`{mode}`", text)
+            for removed_mode in REMOVED_MODES:
+                self.assertNotIn(f"`{removed_mode}`", text)
 
-        self.assertIn("`brainstorm`: divergent repo-grounded option generation", readme)
-        self.assertIn("`research`: source-backed facts", readme)
-        self.assertIn("`design`: converge on one architecture", readme)
-        self.assertIn("`plan`: implementation sequence", readme)
+        self.assertIn("official-doc research can happen in any mode", readme)
 
-    def test_peer_guidance_distinguishes_brainstorm_research_design_and_plan(self):
+    def test_peer_guidance_distinguishes_canonical_challenge_first_modes(self):
         peer_only = (RUNTIME_ROOT / "references" / "peer-only.md").read_text()
 
-        self.assertIn(
-            "`brainstorm`: generate multiple viable repo-grounded technical options, compare tradeoffs and decision criteria, surface unknowns, and recommend the next direction without turning it into a detailed architecture or implementation plan unless asked.",
-            peer_only,
-        )
-        self.assertIn("`research`: gather source-backed facts and current external evidence", peer_only)
-        self.assertIn("`design`: converge on one repo-grounded architecture", peer_only)
-        self.assertIn("`plan`: produce an implementation sequence", peer_only)
-        self.assertIn("`plan-critique`: check ordering, assumptions, missing steps, rollback/verification gaps, and readiness", peer_only)
+        self.assertIn("<challenge_contract>", peer_only)
+        self.assertIn("seek disconfirming evidence", peer_only)
+        for mode in CANONICAL_MODES:
+            self.assertIn(f"<mode name=\"{mode}\">", peer_only)
+        for removed_mode in REMOVED_MODES:
+            self.assertNotIn(f"`{removed_mode}`", peer_only)
+        self.assertIn("Challenge whether the work should ship", peer_only)
+        self.assertIn("Challenge whether the claimed facts are true", peer_only)
+        self.assertIn("Challenge whether the proposed approach is the right architecture", peer_only)
+        self.assertIn("Challenge whether the execution sequence is actually ready", peer_only)
+        self.assertIn("Challenge the initial diagnosis", peer_only)
 
     def test_readme_reflects_current_architecture(self):
         readme = (REPO_ROOT / "README.md").read_text()
@@ -2704,6 +2794,21 @@ class SkillMetadataTests(TestCase):
             self.assertIn("Use `finish` as the synchronization point", text, str(path))
             self.assertIn("Do not cancel a live peer before the 2700-second minimum wait", text, str(path))
             self.assertIn("empty `peer-report.json` or stderr does not mean the peer is stalled", text, str(path))
+
+    def test_host_synthesis_docs_require_independent_challenge_first_analysis(self):
+        for path in [
+            RUNTIME_ROOT / "references" / "synthesize.md",
+            CODEX_SKILL_ROOT / "references" / "synthesize.md",
+            CLAUDE_SKILL_ROOT / "references" / "synthesize.md",
+        ]:
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("second opinion", text, str(path))
+            self.assertIn("host owns the final answer", text.lower(), str(path))
+            self.assertIn("independent host work is complete", text, str(path))
+            self.assertIn("challenge-first", text, str(path))
+            self.assertIn("Do not treat agreement as proof", text, str(path))
+            for mode in CANONICAL_MODES:
+                self.assertIn(f"`{mode}`", text, str(path))
 
     def test_docs_show_valid_nonempty_host_first_pass_claim_example(self):
         claim_statuses = {

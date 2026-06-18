@@ -1,11 +1,11 @@
 ---
 name: agent-collab
-description: Use for high-stakes repo-grounded collaboration where an independent Claude peer plus Codex host-local agents should verify, critique, research, review, audit, debug, judge, or challenge the current work. Trigger for code review, security audit, plan critique, repo-grounded architecture brainstorming, technical design ideation, design debate, architecture tradeoffs, migration analysis, debugging, test strategy, risky implementation verification, or requests for Claude/Codex cross-checking. Avoid for casual brainstorming, naming, simple idea generation, simple edits, routine explanations, formatting-only changes, and low-risk questions where a second agent adds little value.
+description: Use for high-stakes repo-grounded collaboration where an independent Claude peer plus Codex host-local agents provide a challenge-first second opinion on review, research, design, plan, or debug work. Trigger for strict code review, security-sensitive review, source-backed research, architecture tradeoffs, implementation planning, debugging, risky implementation verification, or Claude/Codex cross-checking. Avoid for casual ideation, naming, simple edits, routine explanations, formatting-only changes, and low-risk questions where a second agent adds little value.
 ---
 
 # Agent Collab
 
-Use this skill when independent cross-product verification materially improves confidence.
+Use this skill when independent cross-product verification materially improves confidence. Agent Collab is a challenge-first second opinion workflow, not peer delegation.
 
 ## Host Role
 
@@ -15,7 +15,7 @@ Default to `profile=ultra`. Do not edit files unless the user explicitly asks to
 
 ## Flow
 
-1. Classify `mode`, `target`, `profile`, and `edit_allowed`. Default `profile` to `ultra`.
+1. Let the runtime auto-select `mode` from `target` and the neutral brief unless a canonical override is necessary. Classify `target`, `profile`, and `edit_allowed`. Default `profile` to `ultra`.
 2. Resolve the workspace root with `repo_root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)` so the skill works in git and non-git directories.
 3. Resolve this skill directory from the first existing candidate. Prefer the installed skill/plugin path when Codex exposes one; otherwise check the personal marketplace source, plugin cache, direct-skill compatibility paths, and finally this repo's source tree:
 
@@ -47,15 +47,14 @@ test -n "${skill_dir:-}"
 ```bash
 python "$skill_dir/scripts/host.py" start \
   --host codex \
-  --mode "$mode" \
   --target "$target" \
   --brief-file "$brief_file" \
   --profile "$profile"
 ```
 
-Add `--edit-allowed` only when the user explicitly delegated edits.
+Add `--mode review`, `--mode research`, `--mode design`, `--mode plan`, or `--mode debug` only when explicitly overriding auto-selection. Add `--edit-allowed` only when the user explicitly delegated edits.
 
-8. While the peer runs, do independent host analysis. In `ultra`, use available host-local Codex subagents for independent lenses when useful; if named Agent Collab helper agents are not installed, use built-in Codex agents with lens-specific prompts for mapping, review, research, architecture, security, debugging, test strategy, and verification. Give each subagent only the neutral brief and its lens. Tell every helper: "Do not invoke Agent Collab, `$agent-collab`, `/agent-collab`, host/peer CLIs, or cross-product peer commands." Do not call `status --wait` during independent host analysis; repeated status polling is not part of the normal flow.
+8. While the peer runs, do independent challenge-first host analysis. In `ultra`, use available host-local Codex subagents for independent lenses when useful; if named Agent Collab helper agents are not installed, use built-in Codex agents with lens-specific prompts for mapping, review, research, architecture, security, debugging, test strategy, and verification. Give each subagent only the neutral brief and its lens. Tell every helper: "Do not invoke Agent Collab, `$agent-collab`, `/agent-collab`, host/peer CLIs, or cross-product peer commands." Do not call `status --wait` during independent host analysis; repeated status polling is not part of the normal flow.
 9. Do not read `peer-report.json` until independent host work is complete. Write `host-first-pass.json` first:
 
 ```json
@@ -83,7 +82,7 @@ python "$skill_dir/scripts/host.py" finish "$run_dir"
 
 11. Do not cancel a live peer before the 2700-second minimum wait. An empty `peer-report.json` or stderr does not mean the peer is stalled while the process is alive. Do not replace Agent Collab with a direct `claude --print` fallback before the minimum wait. If the user explicitly asks to stop a specific run before the floor, use `cancel RUN_ID --force-before-min-wait --reason USER_REQUESTED_STOP`.
 12. In `ultra`, use a host-local advisory adjudicator after the host first pass, peer report, helper reports, and claim matrix exist. The adjudicator is advisory only and must not call Claude, Codex peer commands, or Agent Collab. If no adjudicator artifact is supplied, `finish` writes an `advisory_pending` marker.
-13. Verify important claims yourself and synthesize the final answer using `"$skill_dir/references/synthesize.md"`.
+13. Verify important claims yourself and synthesize the final answer using `"$skill_dir/references/synthesize.md"`. Do not treat peer agreement as proof.
 
 Useful runtime helpers:
 
@@ -105,7 +104,15 @@ In this source repo, run artifacts and local settings live under `tools/agent-co
 
 ## Request Modes
 
-Allowed modes: `review`, `audit`, `brainstorm`, `research`, `design`, `plan`, `plan-critique`, `debug`, `migration`, `test-strategy`, `verify`, `implement`.
+The runtime auto-selects one of five canonical modes unless overridden:
+
+- `review`: strict challenge of diffs, patches, risky changes, release readiness, security-sensitive code, and missing tests.
+- `research`: source-backed current facts when external/API/platform/dependency/tooling truth is the main deliverable.
+- `design`: architecture, alternatives, compatibility, migration approach, and tradeoff challenge.
+- `plan`: implementation sequencing, rollout, test strategy, rollback, and readiness challenge.
+- `debug`: root-cause challenge for bugs, crashes, failing tests, logs, and reproduction gaps.
+
+Official-doc research can happen in any mode; choose `research` only when source-backed external facts are primary.
 
 ## Guardrails
 
