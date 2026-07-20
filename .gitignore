@@ -19,7 +19,10 @@ htmlcov/
 .DS_Store
 .vscode/
 .idea/
-.agents/
+.agents/*
+!.agents/plugins/
+.agents/plugins/*
+!.agents/plugins/marketplace.json
 .codex/
 .claude/
 
@@ -32,6 +35,3 @@ temp/
 tools/agent-collab/runs/*
 !tools/agent-collab/runs/.gitkeep
 tools/agent-collab/settings.local.json
-
-# Legacy/generated package paths that must not be uploaded
-codex-skill/

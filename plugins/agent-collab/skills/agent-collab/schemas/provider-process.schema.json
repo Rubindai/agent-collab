@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.agent-collab/provider-process.schema.json",
+  "title": "Agent Collab Provider Process v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "pid",
+    "pgid",
+    "process_identity",
+    "status",
+    "cleanup_outcome",
+    "completed_at"
+  ],
+  "properties": {
+    "schema_version": {"const": "2.0"},
+    "run_id": {"type": "string", "minLength": 1},
+    "pid": {"type": ["integer", "null"], "minimum": 1},
+    "pgid": {"type": ["integer", "null"], "minimum": 1},
+    "process_identity": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "pid", "pgid", "boot_id", "start_time"],
+          "properties": {
+            "kind": {"enum": ["linux_proc", "posix_ps"]},
+            "pid": {"type": "integer", "minimum": 1},
+            "pgid": {"type": "integer", "minimum": 1},
+            "boot_id": {"type": "string", "minLength": 1},
+            "start_time": {"type": "string", "minLength": 1}
+          }
+        }
+      ]
+    },
+    "status": {"enum": ["pending", "running", "quiescent", "cleanup_failed"]},
+    "cleanup_outcome": {"type": ["string", "null"]},
+    "completed_at": {"type": ["string", "null"]}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "pending"}}, "required": ["status"]},
+      "then": {
+        "properties": {
+          "pid": {"type": "null"},
+          "pgid": {"type": "null"},
+          "process_identity": {"type": "null"},
+          "cleanup_outcome": {"type": "null"},
+          "completed_at": {"type": "null"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"status": {"const": "running"}}, "required": ["status"]},
+      "then": {
+        "properties": {
+          "pid": {"type": "integer", "minimum": 1},
+          "pgid": {"type": "integer", "minimum": 1},
+          "process_identity": {"type": "object"},
+          "cleanup_outcome": {"type": "null"},
+          "completed_at": {"type": "null"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"status": {"const": "quiescent"}}, "required": ["status"]},
+      "then": {
+        "properties": {
+          "pid": {"type": "integer", "minimum": 1},
+          "pgid": {"type": "integer", "minimum": 1},
+          "cleanup_outcome": {"type": "string", "minLength": 1},
+          "completed_at": {"type": "string", "minLength": 1}
+        },
+        "anyOf": [
+          {"properties": {"process_identity": {"type": "object"}}},
+          {
+            "properties": {
+              "process_identity": {"type": "null"},
+              "cleanup_outcome": {"const": "identity_mismatch_group_empty"}
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {"properties": {"status": {"const": "cleanup_failed"}}, "required": ["status"]},
+      "then": {
+        "properties": {
+          "pid": {"type": "integer", "minimum": 1},
+          "pgid": {"type": "integer", "minimum": 1},
+          "cleanup_outcome": {"type": "string", "minLength": 1},
+          "completed_at": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  ]
+}

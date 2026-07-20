@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.agent-collab/availability-attestation.schema.json",
+  "title": "Agent Collab Availability Result v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "status",
+    "peer",
+    "requested_model",
+    "requested_effort",
+    "supported_efforts",
+    "source",
+    "checked_at",
+    "cli_version",
+    "effort_evidence",
+    "evidence_sha256",
+    "details"
+  ],
+  "properties": {
+    "schema_version": {"const": "2.0"},
+    "status": {"enum": ["available", "unavailable", "unknown"]},
+    "peer": {"enum": ["claude", "codex"]},
+    "requested_model": {"type": "string"},
+    "requested_effort": {"type": "string"},
+    "supported_efforts": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "source": {
+      "enum": [
+        "request_contract",
+        "cli_preflight",
+        "codex_debug_models",
+        "claude_cli_probe"
+      ]
+    },
+    "checked_at": {"type": "string", "minLength": 1, "pattern": "\\S"},
+    "cli_version": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "string", "minLength": 1, "pattern": "\\S"}
+      ]
+    },
+    "effort_evidence": {
+      "enum": ["catalog_advertised", "stop_hook_observed", "none"]
+    },
+    "evidence_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "details": {"type": "string", "minLength": 1, "pattern": "\\S"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "available"}}, "required": ["status"]},
+      "then": {
+        "properties": {
+          "requested_model": {"type": "string", "minLength": 1, "pattern": "\\S"},
+          "requested_effort": {"type": "string", "minLength": 1, "pattern": "\\S"},
+          "cli_version": {"type": "string", "minLength": 1, "pattern": "\\S"},
+          "effort_evidence": {
+            "enum": ["catalog_advertised", "stop_hook_observed"]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"status": {"const": "available"}, "peer": {"const": "codex"}},
+        "required": ["status", "peer"]
+      },
+      "then": {
+        "properties": {
+          "source": {"const": "codex_debug_models"},
+          "effort_evidence": {"const": "catalog_advertised"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"status": {"const": "available"}, "peer": {"const": "claude"}},
+        "required": ["status", "peer"]
+      },
+      "then": {
+        "properties": {
+          "source": {"const": "claude_cli_probe"},
+          "effort_evidence": {"const": "stop_hook_observed"}
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "name": "agent-collab",
+  "description": "Independent Claude Code and Codex challenge-first collaboration.",
+  "owner": {
+    "name": "Agent Collab"
+  },
+  "plugins": [
+    {
+      "name": "agent-collab",
+      "source": "./plugins/agent-collab",
+      "description": "Run an independent cross-product peer before host verification and synthesis."
+    }
+  ]
+}

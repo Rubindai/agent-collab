@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.agent-collab/state.schema.json",
+  "title": "Agent Collab State v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "jobs"],
+  "properties": {
+    "schema_version": {"const": "2.0"},
+    "jobs": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/job"}
+    }
+  },
+  "$defs": {
+    "job": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "created_at",
+        "updated_at",
+        "id",
+        "run_dir",
+        "repo_root",
+        "host",
+        "peer",
+        "mode",
+        "target",
+        "profile",
+        "status",
+        "phase"
+      ],
+      "properties": {
+        "created_at": {"type": "string", "minLength": 1},
+        "updated_at": {"type": "string", "minLength": 1},
+        "id": {"type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9._-]+$"},
+        "run_dir": {"type": "string", "minLength": 1},
+        "repo_root": {"type": "string", "minLength": 1},
+        "host": {"enum": ["claude", "codex"]},
+        "peer": {"enum": ["claude", "codex"]},
+        "mode": {"enum": ["review", "research", "design", "plan", "debug"]},
+        "target": {"type": "string", "minLength": 1},
+        "profile": {"enum": ["standard", "max", "ultra"]},
+        "status": {"enum": ["running", "synthesizing", "completed", "failed", "cancelled"]},
+        "phase": {"enum": ["peer_running", "normalizing_peer", "waiting_for_peer", "ready_for_synthesis", "done", "cancelled"]},
+        "pid": {"type": ["integer", "null"], "minimum": 1},
+        "edit_allowed": {"type": "boolean"},
+        "peer_report": {"type": "string", "minLength": 1},
+        "peer_raw": {"type": "string", "minLength": 1},
+        "peer_normalization": {"type": "string", "minLength": 1},
+        "host_first_pass": {"type": "string", "minLength": 1},
+        "peer_stderr": {"type": "string", "minLength": 1},
+        "finish_wait_seconds": {
+          "type": ["number", "null"],
+          "minimum": 2700,
+          "maximum": 86430
+        },
+        "finish_timeout_source": {
+          "enum": ["explicit", "peer_timeout_plus_grace"]
+        },
+        "peer_status": {"enum": ["ok", "peer_failed"]},
+        "peer_verdict": {
+          "enum": ["pass", "pass_with_concerns", "changes_recommended", "ready", "needs_revision", "blocked", "informational"]
+        },
+        "validation_status": {
+          "enum": ["ok", "invalid_json", "noncanonical_output", "schema_validation_failed", "peer_report_mismatch"]
+        },
+        "normalization_source": {"enum": ["structured_output", "direct_json", "none"]},
+        "workspace_mutation": {"type": "boolean"},
+        "summary": {"type": "string"},
+        "completed_at": {"type": "string", "minLength": 1},
+        "cancel": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["forced", "reason", "elapsed_seconds", "minimum_wait_seconds", "before_minimum_wait"],
+          "properties": {
+            "forced": {"type": "boolean"},
+            "reason": {"type": "string", "minLength": 1},
+            "elapsed_seconds": {"type": ["number", "null"]},
+            "minimum_wait_seconds": {"type": "number"},
+            "before_minimum_wait": {"type": "boolean"}
+          }
+        }
+      },
+      "allOf": [
+        {
+          "not": {
+            "properties": {"host": {"const": "claude"}, "peer": {"const": "claude"}},
+            "required": ["host", "peer"]
+          }
+        },
+        {
+          "not": {
+            "properties": {"host": {"const": "codex"}, "peer": {"const": "codex"}},
+            "required": ["host", "peer"]
+          }
+        },
+        {
+          "if": {"properties": {"status": {"const": "running"}}, "required": ["status"]},
+          "then": {"properties": {"phase": {"enum": ["peer_running", "normalizing_peer", "waiting_for_peer"]}}}
+        },
+        {
+          "if": {"properties": {"status": {"const": "synthesizing"}}, "required": ["status"]},
+          "then": {"properties": {"phase": {"const": "ready_for_synthesis"}}}
+        },
+        {
+          "if": {"properties": {"status": {"enum": ["completed", "failed"]}}, "required": ["status"]},
+          "then": {"properties": {"phase": {"const": "done"}}}
+        },
+        {
+          "if": {"properties": {"status": {"const": "cancelled"}}, "required": ["status"]},
+          "then": {"properties": {"phase": {"const": "cancelled"}}}
+        }
+      ]
+    }
+  }
+}

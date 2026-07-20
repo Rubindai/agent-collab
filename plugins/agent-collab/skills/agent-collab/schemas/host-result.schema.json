@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.agent-collab/host-result.schema.json",
+  "title": "Agent Collab Host Result v2",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "run_id",
+        "run_dir",
+        "status",
+        "phase",
+        "peer_pid",
+        "finish_wait_seconds",
+        "finish_timeout_source",
+        "peer_report",
+        "message"
+      ],
+      "properties": {
+        "schema_version": {"const": "2.0"},
+        "run_id": {"type": "string", "minLength": 1},
+        "run_dir": {"type": "string", "minLength": 1},
+        "status": {"const": "peer_running"},
+        "phase": {"const": "waiting_for_peer"},
+        "peer_pid": {"type": "integer", "minimum": 1},
+        "finish_wait_seconds": {"type": "number", "minimum": 2700, "maximum": 86430},
+        "finish_timeout_source": {"type": "string", "minLength": 1},
+        "peer_report": {"type": "string", "minLength": 1},
+        "message": {"type": "string", "minLength": 1}
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "run_id",
+        "run_dir",
+        "phase",
+        "peer_status",
+        "validation_status",
+        "finish_wait_seconds",
+        "finish_timeout_source",
+        "normalization",
+        "claim_matrix",
+        "adjudicator_report",
+        "workspace_mutation",
+        "workspace_mutation_sha256"
+      ],
+      "properties": {
+        "schema_version": {"const": "2.0"},
+        "run_id": {"type": "string", "minLength": 1},
+        "run_dir": {"type": "string", "minLength": 1},
+        "phase": {"enum": ["ready_for_synthesis", "done"]},
+        "peer_status": {"enum": ["ok", "peer_failed"]},
+        "validation_status": {"type": "string", "minLength": 1},
+        "finish_wait_seconds": {"type": "number", "minimum": 2700, "maximum": 86430},
+        "finish_timeout_source": {"type": "string", "minLength": 1},
+        "normalization": {"type": "string", "minLength": 1},
+        "claim_matrix": {"type": "string", "minLength": 1},
+        "adjudicator_report": {"type": "string", "minLength": 1},
+        "workspace_mutation": {"type": ["object", "null"]},
+        "workspace_mutation_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "completed_at": {"type": "string", "minLength": 1}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"phase": {"const": "done"}}, "required": ["phase"]},
+          "then": {"required": ["completed_at"]},
+          "else": {"not": {"required": ["completed_at"]}}
+        }
+      ]
+    }
+  ]
+}

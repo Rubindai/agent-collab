@@ -1,18 +1,24 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://local.agent-collab/adjudicator-report.schema.json",
-  "title": "Agent Collab Advisory Adjudicator Report",
+  "$id": "https://local.agent-collab/host-synthesis.schema.json",
+  "title": "Agent Collab Host Synthesis v2",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "run_id", "status", "summary", "false_positives", "claims_needing_verification", "recommended_verdict"],
+  "required": [
+    "schema_version",
+    "run_id",
+    "summary",
+    "verdict",
+    "claims",
+    "unresolved_risks",
+    "workspace_mutation_sha256",
+    "final_answer_ready"
+  ],
   "properties": {
     "schema_version": {"const": "2.0"},
     "run_id": {"type": "string", "minLength": 1},
-    "status": {"enum": ["advisory_pending", "ok", "needs_human_input", "blocked"]},
-    "summary": {"type": "string"},
-    "false_positives": {"type": "array", "items": {"type": "string"}},
-    "claims_needing_verification": {"type": "array", "items": {"type": "string"}},
-    "recommended_verdict": {
+    "summary": {"type": "string", "minLength": 1},
+    "verdict": {
       "enum": [
         "pass",
         "pass_with_concerns",
@@ -42,8 +48,10 @@
           },
           "evidence": {"type": "string"}
         }
-      },
-      "default": []
-    }
+      }
+    },
+    "unresolved_risks": {"type": "array", "items": {"type": "string"}},
+    "workspace_mutation_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "final_answer_ready": {"const": true}
   }
 }
