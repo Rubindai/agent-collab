@@ -12,9 +12,9 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "profile",
         "local_subagents_allowed",
         "max_local_subagents",
+        "adjudicator_enabled",
         "agent_timeout_seconds",
         "safe_mode",
         "codex_model",
@@ -24,35 +24,41 @@
         "claude_model",
         "claude_effort",
         "claude_tools",
-        "claude_max_turns",
         "history_retained_runs"
       ],
       "properties": {
-        "profile": {"enum": ["standard", "max", "ultra"]},
         "local_subagents_allowed": {"type": "boolean"},
         "max_local_subagents": {"type": "integer", "minimum": 0, "maximum": 64},
-        "agent_timeout_seconds": {
-          "type": "string",
-          "pattern": "^(?:(?:2[7-9][0-9]{2}|[3-9][0-9]{3}|[1-7][0-9]{4}|8[0-5][0-9]{3}|86[0-3][0-9]{2})(?:\\.[0-9]+)?|86400(?:\\.0+)?)$"
-        },
+        "adjudicator_enabled": {"type": "boolean"},
+        "agent_timeout_seconds": {"type": "number", "minimum": 60, "maximum": 86400},
         "safe_mode": {"type": "boolean"},
         "codex_model": {"type": "string", "minLength": 1, "pattern": "\\S"},
         "codex_effort": {"type": "string", "minLength": 1, "pattern": "\\S"},
         "online_research": {"type": "boolean"},
-        "codex_config": {"type": "array", "items": {"type": "string", "pattern": "^[^=]+="}},
+        "codex_config": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^(?!(?:agents|features|approval_policy|model|model_reasoning_effort|sandbox_mode|web_search)(?:\\.|=))[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*="
+          }
+        },
         "claude_model": {
           "type": "string",
           "minLength": 1,
           "pattern": "\\S",
           "not": {
-            "pattern": "^\\s*(?:[Ff][Aa][Bb][Ll][Ee]|[Cc][Ll][Aa][Uu][Dd][Ee]-[Ff][Aa][Bb][Ll][Ee]-)"
+            "pattern": "^\\s*(?:[Ff][Aa][Bb][Ll][Ee]|[Cc][Ll][Aa][Uu][Dd][Ee]-[Ff][Aa][Bb][Ll][Ee]-.*)\\s*$"
           }
         },
         "claude_effort": {"type": "string", "minLength": 1, "pattern": "\\S"},
-        "claude_tools": {"type": "string", "minLength": 1, "pattern": "\\S"},
-        "claude_max_turns": {
+        "claude_tools": {
           "type": "string",
-          "pattern": "^(?:[1-9]|[1-9][0-9]|[1-9][0-9]{2}|1000)$"
+          "minLength": 1,
+          "pattern": "\\S",
+          "anyOf": [
+            {"const": "default"},
+            {"not": {"pattern": "(?:^|[\\s,])[Dd][Ee][Ff][Aa][Uu][Ll][Tt](?:$|[\\s,])"}}
+          ]
         },
         "history_retained_runs": {"type": "integer", "minimum": 0}
       }

@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.agent-collab/peer-normalization.schema.json",
+  "title": "Agent Collab Peer Normalization v2",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "source",
+        "artifact_source",
+        "input_bytes",
+        "warnings",
+        "validation_status"
+      ],
+      "properties": {
+        "schema_version": {"const": "2.0"},
+        "source": {"const": "direct_json"},
+        "artifact_source": {"const": "peer_report"},
+        "input_bytes": {"type": "integer", "minimum": 0},
+        "warnings": {"type": "array", "items": {"type": "string"}},
+        "validation_status": {"const": "ok"}
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "source",
+        "artifact_source",
+        "input_bytes",
+        "warnings",
+        "validation_status",
+        "error"
+      ],
+      "properties": {
+        "schema_version": {"const": "2.0"},
+        "source": {"const": "none"},
+        "artifact_source": {"const": "peer_report"},
+        "input_bytes": {"type": "integer", "minimum": 0},
+        "warnings": {"type": "array", "items": {"type": "string"}},
+        "validation_status": {
+          "enum": [
+            "invalid_json",
+            "noncanonical_output",
+            "schema_validation_failed",
+            "peer_report_mismatch"
+          ]
+        },
+        "error": {"type": "string", "minLength": 1}
+      }
+    }
+  ]
+}

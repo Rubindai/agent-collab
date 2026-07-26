@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -18,9 +19,26 @@ sys.dont_write_bytecode = True
 
 MAX_LOCAL_SUBAGENTS = 64
 MAX_AGENT_TIMEOUT_SECONDS = 86_400
-MAX_CLAUDE_TURNS = 1_000
 SANDBOX_PREFLIGHT_TIMEOUT_SECONDS = 10
 PROCESS_IDENTITY_KEYS = {"kind", "pid", "pgid", "boot_id", "start_time"}
+AGENT_COLLAB_OWNED_CODEX_CONFIG_KEYS = {
+    "agents",
+    "agents.enabled",
+    "agents.job_max_runtime_seconds",
+    "agents.max_concurrent_threads_per_session",
+    "agents.max_depth",
+    "agents.max_threads",
+    "approval_policy",
+    "features",
+    "features.multi_agent",
+    "model",
+    "model_reasoning_effort",
+    "sandbox_mode",
+    "web_search",
+}
+CANONICAL_CODEX_CONFIG_KEY = re.compile(
+    r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*\Z"
+)
 
 
 def _read_linux_start_time(pid: int) -> str:
@@ -268,9 +286,17 @@ def claude_agent_guard_command(counter_path: Path, limit: int) -> str:
     )
 
 
-def claude_agent_guard_settings(counter_path: Path, limit: int) -> dict[str, Any]:
+def claude_agent_guard_settings(
+    counter_path: Path,
+    limit: int,
+    model: str,
+) -> dict[str, Any]:
+    if not isinstance(model, str) or not model.strip():
+        raise ValueError("Claude model must be a non-empty exact identifier")
     return {
+        "availableModels": [model],
         "fallbackModel": [],
+        "switchModelsOnFlag": False,
         "disableAllHooks": False,
         "hooks": {
             "PreToolUse": [
@@ -293,27 +319,79 @@ def codex_fanout_overrides(
     *,
     local_subagents_allowed: bool,
     max_local_subagents: int,
-    timeout_seconds: int | float,
 ) -> list[str]:
     if type(local_subagents_allowed) is not bool:
         raise ValueError("local_subagents_allowed must be boolean")
     if type(max_local_subagents) is not int or not 0 <= max_local_subagents <= MAX_LOCAL_SUBAGENTS:
         raise ValueError(f"max_local_subagents must be between 0 and {MAX_LOCAL_SUBAGENTS}")
-    if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)):
-        raise ValueError("timeout_seconds must be numeric")
-    if not 2_700 <= float(timeout_seconds) <= MAX_AGENT_TIMEOUT_SECONDS:
-        raise ValueError(f"timeout_seconds must be between 2700 and {MAX_AGENT_TIMEOUT_SECONDS}")
     enabled = local_subagents_allowed and max_local_subagents > 0
-    overrides = [f"features.multi_agent={'true' if enabled else 'false'}"]
+    overrides = [f"agents.enabled={'true' if enabled else 'false'}"]
     if enabled:
-        overrides.extend(
-            [
-                f"agents.max_threads={max_local_subagents}",
-                "agents.max_depth=1",
-                f"agents.job_max_runtime_seconds={int(float(timeout_seconds))}",
-            ]
+        overrides.append(
+            f"agents.max_concurrent_threads_per_session={max_local_subagents}"
         )
     return overrides
+
+
+def helper_enforcement(
+    peer: str,
+    *,
+    local_subagents_allowed: bool,
+    max_local_subagents: int,
+) -> dict[str, Any]:
+    if peer not in {"claude", "codex"}:
+        raise ValueError("peer must be claude or codex")
+    if type(local_subagents_allowed) is not bool:
+        raise ValueError("local_subagents_allowed must be boolean")
+    if type(max_local_subagents) is not int or not 0 <= max_local_subagents <= MAX_LOCAL_SUBAGENTS:
+        raise ValueError(f"max_local_subagents must be between 0 and {MAX_LOCAL_SUBAGENTS}")
+    enabled = local_subagents_allowed and max_local_subagents > 0
+    if not enabled:
+        return {
+            "provider": "disabled",
+            "limit": 0,
+            "limit_semantics": "disabled",
+            "depth": "disabled",
+            "runtime": "overall_peer_deadline",
+        }
+    if peer == "claude":
+        return {
+            "provider": "claude_agent_hook",
+            "limit": max_local_subagents,
+            "limit_semantics": "total_agent_calls",
+            "depth": "provider_enforced",
+            "runtime": "overall_peer_deadline",
+        }
+    return {
+        "provider": "codex_v2_concurrency",
+        "limit": max_local_subagents,
+        "limit_semantics": "concurrent_threads",
+        "depth": "advisory",
+        "runtime": "overall_peer_deadline",
+    }
+
+
+def validate_codex_config_overrides(values: list[str]) -> None:
+    if not isinstance(values, list):
+        raise ValueError("codex_config must be a list")
+    for value in values:
+        if not isinstance(value, str):
+            raise ValueError("codex_config entries must be strings")
+        key, separator, _ = value.partition("=")
+        if separator != "=" or not key:
+            raise ValueError("codex_config entries must use key=value syntax")
+        if CANONICAL_CODEX_CONFIG_KEY.fullmatch(key) is None:
+            raise ValueError(
+                "codex_config keys must use canonical bare dotted syntax "
+                "(letters, numbers, '_', and '-' only)"
+            )
+        if any(
+            key == owned or key.startswith(f"{owned}.")
+            for owned in AGENT_COLLAB_OWNED_CODEX_CONFIG_KEYS
+        ):
+            raise ValueError(
+                f"codex_config may not override Agent Collab-owned key or namespace {key!r}"
+            )
 
 
 def _run_claude_agent_guard(counter_path: Path, limit: int) -> int:
@@ -322,8 +400,16 @@ def _run_claude_agent_guard(counter_path: Path, limit: int) -> int:
 
         if limit < 0 or limit > MAX_LOCAL_SUBAGENTS:
             raise ValueError("invalid Agent call limit")
-        counter_path.parent.mkdir(parents=True, exist_ok=True)
-        with counter_path.open("a+", encoding="utf-8") as handle:
+        counter_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if os.name == "posix":
+            os.chmod(counter_path.parent, 0o700)
+        flags = os.O_RDWR | os.O_CREAT
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(counter_path, flags, 0o600)
+        if os.name == "posix":
+            os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "a+", encoding="utf-8") as handle:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
             handle.seek(0)
             raw = handle.read().strip()

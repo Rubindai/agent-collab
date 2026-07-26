@@ -4,7 +4,9 @@ from __future__ import annotations
 from contextlib import contextmanager
 import importlib.util
 import math
+import os
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -20,7 +22,6 @@ MAX_JOBS = 50
 ACTIVE_STATUSES = {"running", "synthesizing"}
 ORIGINS = {"claude", "codex"}
 MODES = {"review", "research", "design", "plan", "debug"}
-PROFILES = {"standard", "max", "ultra"}
 PHASES_BY_STATUS = {
     "running": {"peer_running", "normalizing_peer", "waiting_for_peer"},
     "synthesizing": {"ready_for_synthesis"},
@@ -50,8 +51,10 @@ FINISH_TIMEOUT_SOURCES = {
     "explicit",
     "peer_timeout_plus_grace",
 }
-MIN_FINISH_WAIT_SECONDS = 2_700
+MIN_FINISH_WAIT_SECONDS = 60
 MAX_FINISH_WAIT_SECONDS = 86_430
+STATE_LOCK_TIMEOUT_SECONDS = 10.0
+STATE_LOCK_POLL_SECONDS = 0.02
 JOB_REQUIRED_KEYS = {
     "created_at",
     "updated_at",
@@ -62,7 +65,7 @@ JOB_REQUIRED_KEYS = {
     "peer",
     "mode",
     "target",
-    "profile",
+    "adjudicator_enabled",
     "status",
     "phase",
 }
@@ -84,6 +87,7 @@ JOB_OPTIONAL_KEYS = {
     "summary",
     "completed_at",
     "cancel",
+    "cancel_result",
 }
 JOB_KEYS = JOB_REQUIRED_KEYS | JOB_OPTIONAL_KEYS
 RUN_ID_SAFE_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
@@ -140,13 +144,26 @@ def validate_job(job: Any, label: str = "state job") -> None:
         raise ValueError(f"{label} host and peer must be different current products")
     if job["mode"] not in MODES:
         raise ValueError(f"{label} mode is invalid")
-    if job["profile"] not in PROFILES:
-        raise ValueError(f"{label} profile is invalid")
+    if type(job["adjudicator_enabled"]) is not bool:
+        raise ValueError(f"{label} adjudicator_enabled must be a JSON boolean")
     status = job["status"]
     if status not in PHASES_BY_STATUS or job["phase"] not in PHASES_BY_STATUS[status]:
         raise ValueError(f"{label} status/phase combination is invalid")
+    if status == "cancelled":
+        if "cancel" not in job or "cancel_result" not in job:
+            raise ValueError(f"{label} cancelled jobs require cancel and cancel_result evidence")
+    elif "cancel" in job or "cancel_result" in job:
+        raise ValueError(f"{label} cancellation evidence is allowed only for cancelled jobs")
 
-    for key in ("peer_report", "peer_raw", "peer_normalization", "host_first_pass", "peer_stderr", "completed_at"):
+    for key in (
+        "peer_report",
+        "peer_raw",
+        "peer_normalization",
+        "host_first_pass",
+        "peer_stderr",
+        "completed_at",
+        "cancel_result",
+    ):
         if key in job and (not isinstance(job[key], str) or not job[key]):
             raise ValueError(f"{label} {key} must be a non-empty string")
     if "summary" in job and not isinstance(job["summary"], str):
@@ -209,15 +226,34 @@ def validate_state_payload(parsed: Any) -> dict[str, Any]:
 
 @contextmanager
 def state_lock(run_root: Path):
-    run_root.mkdir(parents=True, exist_ok=True)
-    with lock_file(run_root).open("a+", encoding="utf-8") as lock:
-        if fcntl is not None:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    if fcntl is None:
+        raise RuntimeError("Agent Collab state locking requires a POSIX fcntl runtime")
+    run_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if os.name == "posix":
+        os.chmod(run_root, 0o700)
+    path = lock_file(run_root)
+    flags = os.O_RDWR | os.O_CREAT
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, 0o600)
+    if os.name == "posix":
+        os.fchmod(descriptor, 0o600)
+    with os.fdopen(descriptor, "a+", encoding="utf-8") as lock:
+        deadline = time.monotonic() + STATE_LOCK_TIMEOUT_SECONDS
+        while True:
+            try:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError as exc:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"timed out acquiring Agent Collab state lock: {path}"
+                    ) from exc
+                time.sleep(STATE_LOCK_POLL_SECONDS)
         try:
             yield
         finally:
-            if fcntl is not None:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 def load_state(run_root: Path) -> dict[str, Any]:

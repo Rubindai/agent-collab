@@ -62,6 +62,7 @@ CLAUDE_EFFORT_ENV_OVERRIDES = (
     "MAX_THINKING_TOKENS",
 )
 CLAUDE_KNOWN_MODEL_EFFORTS = (
+    ("claude-opus-5", ("low", "medium", "high", "xhigh", "max", "ultracode")),
     ("claude-opus-4-8", ("low", "medium", "high", "xhigh", "max", "ultracode")),
     ("claude-fable-5", ("low", "medium", "high", "xhigh", "max", "ultracode")),
 )
@@ -407,14 +408,17 @@ def static_failure(peer: str, model: str, effort: str) -> dict[str, Any] | None:
     return None
 
 
-def parse_codex_model_catalog(stdout: str) -> list[dict[str, Any]]:
-    """Parse the complete live JSON emitted by ``codex debug models``."""
+def parse_codex_model_catalog(
+    stdout: str,
+    requested_model: str | None = None,
+) -> list[dict[str, Any]]:
+    """Parse valid rows while keeping the requested model's row fail-closed."""
     try:
         payload = STRICT_JSON.loads(stdout, max_bytes=16 * 1024 * 1024)
     except ValueError as exc:
         raise ValueError(f"Codex debug models emitted invalid JSON: {exc}") from exc
-    if not isinstance(payload, dict) or set(payload) != {"models"}:
-        raise ValueError("Codex debug models output must contain exactly one models array")
+    if not isinstance(payload, dict) or "models" not in payload:
+        raise ValueError("Codex debug models output must contain a models array")
     rows = payload["models"]
     if not isinstance(rows, list):
         raise ValueError("Codex debug models models must be an array")
@@ -423,30 +427,44 @@ def parse_codex_model_catalog(stdout: str) -> list[dict[str, Any]]:
     seen_models: set[str] = set()
     for index, row in enumerate(rows):
         if not isinstance(row, dict):
-            raise ValueError(f"Codex debug models models[{index}] must be an object")
+            if requested_model is None:
+                continue
+            continue
         model = row.get("slug")
         if not isinstance(model, str) or not model:
-            raise ValueError(f"Codex debug models models[{index}] must contain a non-empty slug")
+            continue
         if model in seen_models:
-            raise ValueError(f"Codex debug models contains duplicate model slug {model!r}")
+            if model == requested_model:
+                raise ValueError(f"Codex debug models contains duplicate requested model slug {model!r}")
+            continue
         seen_models.add(model)
         raw_efforts = row.get("supported_reasoning_levels")
         if not isinstance(raw_efforts, list):
-            raise ValueError(f"Codex debug models model {model!r} must advertise supported_reasoning_levels")
+            if model == requested_model:
+                raise ValueError(
+                    f"Codex debug models requested model {model!r} must advertise supported_reasoning_levels"
+                )
+            continue
         efforts: list[str] = []
+        malformed = False
         for effort_index, raw_effort in enumerate(raw_efforts):
             if not isinstance(raw_effort, dict):
-                raise ValueError(
-                    f"Codex debug models model {model!r} effort[{effort_index}] must be an object"
-                )
+                malformed = True
+                break
             value = raw_effort.get("effort")
             if not isinstance(value, str) or not value:
-                raise ValueError(
-                    f"Codex debug models model {model!r} effort[{effort_index}] must identify an effort"
-                )
+                malformed = True
+                break
             if value in efforts:
-                raise ValueError(f"Codex debug models model {model!r} contains duplicate effort {value!r}")
+                malformed = True
+                break
             efforts.append(value)
+        if malformed:
+            if model == requested_model:
+                raise ValueError(
+                    f"Codex debug models requested model {model!r} has malformed or duplicate effort metadata"
+                )
+            continue
         models.append({"model": model, "supported_efforts": efforts})
     return models
 
@@ -510,7 +528,7 @@ def codex_availability(
             evidence=evidence,
         )
     try:
-        models = parse_codex_model_catalog(completed.stdout)
+        models = parse_codex_model_catalog(completed.stdout, requested_model=model)
     except ValueError as exc:
         return result(
             status="unknown",
@@ -613,6 +631,49 @@ def error_is_unavailable(text: str) -> bool:
     return any(marker in normalized for marker in markers)
 
 
+def claude_provider_failure(
+    envelope: Any,
+    evidence: str,
+    returncode: int,
+) -> tuple[str, str]:
+    """Classify a failed live probe without exposing its raw provider envelope."""
+
+    api_status: int | None = None
+    provider_message = ""
+    if isinstance(envelope, dict):
+        candidate_status = envelope.get("api_error_status")
+        if type(candidate_status) is int:
+            api_status = candidate_status
+        candidate_message = envelope.get("result")
+        if isinstance(candidate_message, str):
+            provider_message = " ".join(candidate_message.split())[:500]
+
+    if api_status == 429:
+        details = "Claude is temporarily unavailable because the provider returned API status 429 (quota or rate limit)"
+        if provider_message:
+            details += f": {provider_message}"
+        return "unavailable", details
+    if api_status in {401, 403}:
+        details = f"Claude access is unavailable because the provider returned API status {api_status}"
+        if provider_message:
+            details += f": {provider_message}"
+        return "unavailable", details
+    if api_status == 404 or error_is_unavailable(evidence):
+        details = "Claude explicitly rejected the requested exact model or effort"
+        if api_status is not None:
+            details += f" with API status {api_status}"
+        if provider_message:
+            details += f": {provider_message}"
+        return "unavailable", details
+
+    details = f"Claude live availability probe failed with status {returncode}"
+    if api_status is not None:
+        details += f" and API status {api_status}"
+    if provider_message:
+        details += f": {provider_message}"
+    return "unknown", details
+
+
 def parse_claude_stop(text: str) -> str:
     try:
         payload = STRICT_JSON.loads(text, max_bytes=1_000_000)
@@ -655,7 +716,9 @@ def claude_availability(
             return f"{shlex.quote(sys.executable)} -c {shlex.quote(capture_code)}"
 
         settings = {
+            "availableModels": [model],
             "fallbackModel": [],
+            "switchModelsOnFlag": False,
             "autoMemoryEnabled": False,
             "disableAllHooks": False,
             "hooks": {
@@ -752,19 +815,19 @@ def claude_availability(
         isinstance(envelope, dict) and envelope.get("is_error") is True
     )
     if provider_failed:
-        unavailable = error_is_unavailable(evidence)
+        failure_status, failure_details = claude_provider_failure(
+            envelope,
+            evidence,
+            completed.returncode,
+        )
         return result(
-            status="unavailable" if unavailable else "unknown",
+            status=failure_status,
             peer="claude",
             model=model,
             effort=effort,
             source="claude_cli_probe",
             cli_version=cli_version,
-            details=(
-                "Claude explicitly rejected the requested exact model or effort"
-                if unavailable
-                else f"Claude live availability probe failed with status {completed.returncode}"
-            ),
+            details=failure_details,
             evidence=evidence,
         )
     if capture_error:

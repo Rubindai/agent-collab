@@ -14,7 +14,7 @@
     "brief",
     "edit_allowed",
     "run_id",
-    "profile",
+    "adjudicator_enabled",
     "local_subagents_allowed",
     "max_local_subagents",
     "online_research",
@@ -25,7 +25,8 @@
     "peer_timeout_seconds",
     "codex_config",
     "claude_tools",
-    "claude_max_turns"
+    "claude_max_turns",
+    "helper_enforcement"
   ],
   "properties": {
     "schema_version": {"const": "2.0"},
@@ -33,11 +34,16 @@
     "host": {"enum": ["claude", "codex"]},
     "peer": {"enum": ["claude", "codex"]},
     "mode": {"enum": ["review", "research", "design", "plan", "debug"]},
-    "target": {"type": "string", "minLength": 1},
-    "brief": {"type": "string", "minLength": 1},
+    "target": {"type": "string", "minLength": 1, "pattern": "\\S"},
+    "brief": {"type": "string", "minLength": 1, "pattern": "\\S"},
     "edit_allowed": {"type": "boolean"},
-    "run_id": {"type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9._-]+$"},
-    "profile": {"enum": ["standard", "max", "ultra"]},
+    "run_id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9._-]+$",
+      "not": {"enum": [".", ".."]}
+    },
+    "adjudicator_enabled": {"type": "boolean"},
     "local_subagents_allowed": {"type": "boolean"},
     "max_local_subagents": {"type": "integer", "minimum": 0, "maximum": 64},
     "online_research": {"type": "boolean"},
@@ -103,12 +109,115 @@
         }
       ]
     },
-    "peer_timeout_seconds": {"type": "number", "minimum": 2700, "maximum": 86400},
+    "peer_timeout_seconds": {"type": "number", "minimum": 60, "maximum": 86400},
     "codex_config": {
       "type": "array",
-      "items": {"type": "string", "pattern": "^[^=]+="}
+      "items": {
+        "type": "string",
+        "pattern": "^(?!(?:agents|features|approval_policy|model|model_reasoning_effort|sandbox_mode|web_search)(?:\\.|=))[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*="
+      }
     },
-    "claude_tools": {"type": "string", "minLength": 1},
-    "claude_max_turns": {"type": "integer", "minimum": 1, "maximum": 1000}
-  }
+    "claude_tools": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S",
+      "anyOf": [
+        {"const": "default"},
+        {"not": {"pattern": "(?:^|[\\s,])[Dd][Ee][Ff][Aa][Uu][Ll][Tt](?:$|[\\s,])"}}
+      ]
+    },
+    "claude_max_turns": {
+      "anyOf": [
+        {"type": "integer", "minimum": 1},
+        {"type": "null"}
+      ]
+    },
+    "helper_enforcement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "limit", "limit_semantics", "depth", "runtime"],
+      "properties": {
+        "provider": {"enum": ["disabled", "claude_agent_hook", "codex_v2_concurrency"]},
+        "limit": {"type": "integer", "minimum": 0, "maximum": 64},
+        "limit_semantics": {"enum": ["disabled", "total_agent_calls", "concurrent_threads"]},
+        "depth": {"enum": ["disabled", "advisory", "provider_enforced"]},
+        "runtime": {"const": "overall_peer_deadline"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"provider": {"const": "disabled"}}, "required": ["provider"]},
+          "then": {
+            "properties": {
+              "limit": {"const": 0},
+              "limit_semantics": {"const": "disabled"},
+              "depth": {"const": "disabled"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"provider": {"const": "claude_agent_hook"}}, "required": ["provider"]},
+          "then": {
+            "properties": {
+              "limit": {"minimum": 1},
+              "limit_semantics": {"const": "total_agent_calls"},
+              "depth": {"const": "provider_enforced"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"provider": {"const": "codex_v2_concurrency"}}, "required": ["provider"]},
+          "then": {
+            "properties": {
+              "limit": {"minimum": 1},
+              "limit_semantics": {"const": "concurrent_threads"},
+              "depth": {"const": "advisory"}
+            }
+          }
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"origin": {"const": "codex"}}, "required": ["origin"]},
+      "then": {
+        "properties": {
+          "host": {"const": "codex"},
+          "peer": {"const": "claude"},
+          "availability_attestation": {"properties": {"peer": {"const": "claude"}}}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"origin": {"const": "claude"}}, "required": ["origin"]},
+      "then": {
+        "properties": {
+          "host": {"const": "claude"},
+          "peer": {"const": "codex"},
+          "availability_attestation": {"properties": {"peer": {"const": "codex"}}}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"peer": {"const": "codex"}}, "required": ["peer"]},
+      "then": {
+        "properties": {
+          "claude_max_turns": {"const": null},
+          "helper_enforcement": {
+            "properties": {"provider": {"enum": ["disabled", "codex_v2_concurrency"]}}
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"peer": {"const": "claude"}}, "required": ["peer"]},
+      "then": {
+        "properties": {
+          "helper_enforcement": {
+            "properties": {"provider": {"enum": ["disabled", "claude_agent_hook"]}}
+          }
+        }
+      }
+    }
+  ]
 }

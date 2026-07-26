@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import os
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +18,7 @@ IGNORED_DIR_NAMES = {
     ".git",
     ".hg",
     ".mypy_cache",
+    ".next",
     ".pytest_cache",
     ".ruff_cache",
     ".svn",
@@ -41,6 +44,20 @@ IGNORED_REL_FILES = {
     ("tools", "agent-collab", "settings.local.json"),
 }
 DEFAULT_SNAPSHOT_TIMEOUT_SECONDS = 300.0
+
+
+def _load_strict_json_runtime() -> Any:
+    path = Path(__file__).resolve().with_name("strict_json.py")
+    spec = importlib.util.spec_from_file_location("agent_collab_snapshot_strict_json", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load strict JSON runtime: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+STRICT_JSON = _load_strict_json_runtime()
 
 
 def _snapshot_deadline(deadline: float | None) -> float:
@@ -376,8 +393,11 @@ def _git_snapshot(
         "untracked": untracked,
         "ignored": ignored,
         "git_control": git_control,
-        "status": _git_stdout(repo_root, ["status", "--porcelain=v1", "--untracked-files=all", *pathspecs], deadline),
-        "status_z": _git_stdout(repo_root, ["status", "--porcelain=v1", "-z", "--untracked-files=all", *pathspecs], deadline),
+        # Track working-tree changes here, but hash untracked files through the
+        # separately filtered manifest so generated-directory exclusions do
+        # not hide tracked files with the same path prefix.
+        "status": _git_stdout(repo_root, ["status", "--porcelain=v1", "--untracked-files=no", *pathspecs], deadline),
+        "status_z": _git_stdout(repo_root, ["status", "--porcelain=v1", "-z", "--untracked-files=no", *pathspecs], deadline),
         "diff": _git_stdout(repo_root, ["diff", "--binary", "--no-ext-diff", *pathspecs], deadline),
         "diff_cached": _git_stdout(repo_root, ["diff", "--cached", "--binary", "--no-ext-diff", *pathspecs], deadline),
     }
@@ -554,7 +574,7 @@ def snapshot_text(
             [
                 f"branch={_git_stdout(repo_root, ['branch', '--show-current'], effective_deadline)}",
                 f"head={snapshot['sections']['head']}",
-                f"dirty={'true' if status else 'false'}",
+                f"dirty={'true' if status or snapshot['sections']['untracked'] else 'false'}",
                 f"untracked_entry_count={len(snapshot['sections']['untracked'])}",
                 f"ignored_entry_count={len(snapshot['sections']['ignored'])}",
                 f"git_control_entry_count={len(snapshot['sections']['git_control'])}",
@@ -581,13 +601,12 @@ def write_workspace_snapshot(
     deadline: float | None = None,
     snapshot_data: dict[str, Any] | None = None,
 ) -> None:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(
+    STRICT_JSON.write_text(
+        output_path,
         snapshot_text(
             repo_root,
             ignored_paths,
             deadline=deadline,
             snapshot_data=snapshot_data,
         ),
-        encoding="utf-8",
     )

@@ -39,25 +39,24 @@ ARTIFACT_SCHEMA_VERSION = "2.0"
 SETTINGS_SCHEMA_VERSION = "2.0"
 DEFAULT_HISTORY_RETAINED_RUNS = 50
 SETTING_DEFAULTS: dict[str, Any] = {
-    "profile": "ultra",
     "local_subagents_allowed": True,
     "max_local_subagents": 8,
-    "agent_timeout_seconds": "2700",
+    "adjudicator_enabled": True,
+    "agent_timeout_seconds": 2700,
     "safe_mode": False,
     "codex_model": "gpt-5.6-sol",
     "codex_effort": "max",
     "online_research": True,
     "codex_config": [],
-    "claude_model": "claude-opus-4-8",
+    "claude_model": "claude-opus-5",
     "claude_effort": "max",
     "claude_tools": "default",
-    "claude_max_turns": "50",
     "history_retained_runs": DEFAULT_HISTORY_RETAINED_RUNS,
 }
 SETTING_ENV_KEYS = {
-    "profile": "AGENT_COLLAB_PROFILE",
     "local_subagents_allowed": "AGENT_COLLAB_LOCAL_SUBAGENTS_ALLOWED",
     "max_local_subagents": "AGENT_COLLAB_MAX_LOCAL_SUBAGENTS",
+    "adjudicator_enabled": "AGENT_COLLAB_ADJUDICATOR_ENABLED",
     "agent_timeout_seconds": "AGENT_COLLAB_TIMEOUT_SECONDS",
     "safe_mode": "AGENT_COLLAB_SAFE_MODE",
     "codex_model": "CODEX_AGENT_COLLAB_MODEL",
@@ -67,11 +66,9 @@ SETTING_ENV_KEYS = {
     "claude_model": "CLAUDE_AGENT_COLLAB_MODEL",
     "claude_effort": "CLAUDE_AGENT_COLLAB_EFFORT",
     "claude_tools": "CLAUDE_AGENT_COLLAB_TOOLS",
-    "claude_max_turns": "CLAUDE_AGENT_COLLAB_MAX_TURNS",
     "history_retained_runs": "AGENT_COLLAB_HISTORY_RETAINED_RUNS",
 }
-PROFILE_CHOICES = {"standard", "max", "ultra"}
-MIN_CLI_VERSIONS = {"codex": (0, 144, 5), "claude": (2, 1, 214)}
+MIN_CLI_VERSIONS = {"codex": (0, 145, 0), "claude": (2, 1, 219)}
 DEFAULT_AVAILABILITY_TIMEOUT_SECONDS = 30.0
 MAX_AVAILABILITY_TIMEOUT_SECONDS = 60.0
 CLAIM_STATUSES = {
@@ -98,10 +95,9 @@ RECOMMENDED_VERDICTS = {
     "informational",
 }
 RUN_ID_SAFE_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
-MIN_PEER_WAIT_SECONDS = 2700
+MIN_PEER_WAIT_SECONDS = 60
 FINISH_TIMEOUT_GRACE_SECONDS = 30
 FINISH_WAIT_POLL_SECONDS = 1
-PEER_REPORT_STABLE_SECONDS = 0.5
 RESET_SCOPES = {"local", "global", "all"}
 RUN_ARTIFACT_NAMES = {
     "host-request.json",
@@ -111,11 +107,23 @@ RUN_ARTIFACT_NAMES = {
     "host-result.json",
     "host-synthesis.json",
     "workspace-mutation.json",
+    "cancel-result.json",
+    "cancel-workspace-mutation.json",
 }
 WORKSPACE_GUARD_SCHEMA_VERSION = "2.0"
 WORKSPACE_GUARD_GIT_PATH = "agent-collab/active-v2.json"
 WORKSPACE_GUARD_LOCK_TIMEOUT_SECONDS = 10.0
 WORKSPACE_GUARD_LOCK_POLL_SECONDS = 0.02
+RUN_OPERATION_LOCK_TIMEOUT_SECONDS = 10.0
+RUN_OPERATION_LOCK_POLL_SECONDS = 0.02
+VALIDATION_STATUSES = {
+    "ok",
+    "invalid_json",
+    "noncanonical_output",
+    "schema_validation_failed",
+    "peer_report_mismatch",
+}
+FINISH_TIMEOUT_SOURCES = {"explicit", "peer_timeout_plus_grace"}
 WORKSPACE_GUARD_KEYS = {
     "schema_version",
     "run_id",
@@ -329,7 +337,12 @@ def read_text_arg(value: str | None, file_value: Path | None) -> str:
 
 
 def _contains_any(text: str, needles: tuple[str, ...]) -> bool:
-    return any(needle in text for needle in needles)
+    """Match whole tokens or phrases without triggering inside unrelated words."""
+
+    return any(
+        re.search(rf"(?<![\w]){re.escape(needle.strip())}(?![\w])", text) is not None
+        for needle in needles
+    )
 
 
 def classify_mode(target: str, brief: str) -> str:
@@ -338,10 +351,11 @@ def classify_mode(target: str, brief: str) -> str:
         text,
         (
             "review",
+            "audit",
             "diff",
             "patch",
             "pull request",
-            "pr ",
+            "pr",
             "safe to ship",
             "ship",
             "missing test",
@@ -363,7 +377,7 @@ def classify_mode(target: str, brief: str) -> str:
             "repro",
             "failing",
             "failure",
-            " hung",
+            "hung",
             "hanging",
             "timeout",
             "broken",
@@ -407,6 +421,7 @@ def classify_mode(target: str, brief: str) -> str:
         (
             "research",
             "official doc",
+            "official documentation",
             "official api",
             "source-backed",
             "source backed",
@@ -429,6 +444,14 @@ def classify_mode(target: str, brief: str) -> str:
     return "review"
 
 
+def require_supported_platform() -> None:
+    if os.name != "posix" or not all(hasattr(os, name) for name in ("getpgid", "killpg")):
+        raise SystemExit(
+            "Agent Collab runtime process supervision requires a POSIX platform "
+            "(supported: Linux and macOS); Windows is not supported"
+        )
+
+
 def utc_run_id(host: str, mode: str) -> str:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     suffix = os.urandom(3).hex()
@@ -449,6 +472,30 @@ def write_json(path: Path, data: dict[str, Any]) -> None:
     STRICT_JSON.write(path, data)
 
 
+def write_json_once(path: Path, data: dict[str, Any]) -> bool:
+    """Atomically publish an immutable JSON artifact without replacing evidence."""
+
+    STRICT_JSON.ensure_private_directory(path.parent)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{os.urandom(6).hex()}.tmp")
+    payload = (STRICT_JSON.dumps(data) + "\n").encode("utf-8")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            return False
+        if os.name == "posix":
+            os.chmod(path, 0o600)
+        STRICT_JSON.fsync_directory(path.parent)
+        return True
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def parse_bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -461,17 +508,16 @@ def parse_bool(value: Any) -> bool:
     raise ValueError(f"expected boolean value, got {value!r}")
 
 
-def normalize_timeout(value: Any) -> str:
-    raw = str(value).strip()
+def normalize_timeout(value: Any) -> float | int:
     try:
-        seconds = float(raw)
+        seconds = float(value)
     except (TypeError, ValueError) as exc:
         raise ValueError("timeout must be a finite number of seconds") from exc
     if not MIN_PEER_WAIT_SECONDS <= seconds <= SAFETY.MAX_AGENT_TIMEOUT_SECONDS:
         raise ValueError(
             f"timeout must be between {MIN_PEER_WAIT_SECONDS} and {SAFETY.MAX_AGENT_TIMEOUT_SECONDS} seconds"
         )
-    return str(int(seconds)) if seconds.is_integer() else str(seconds)
+    return int(seconds) if seconds.is_integer() else seconds
 
 
 def normalize_codex_config(value: Any, source: str) -> list[str]:
@@ -501,6 +547,7 @@ def normalize_codex_config(value: Any, source: str) -> list[str]:
         if separator != "=" or not key.strip():
             raise ValueError(f"{source} codex_config entries must use key=value syntax")
         normalized.append(text)
+    SAFETY.validate_codex_config_overrides(normalized)
     return normalized
 
 
@@ -509,13 +556,28 @@ def is_fable_model(value: Any) -> bool:
     return normalized == "fable" or normalized.startswith("claude-fable-")
 
 
+def validate_claude_tools(value: Any, source: str) -> str:
+    text = str(value).strip()
+    if not text:
+        raise ValueError(f"{source} claude_tools must be a non-empty string")
+    tokens = [item.casefold() for item in re.split(r"[\s,]+", text) if item]
+    if "default" in tokens and tokens != ["default"]:
+        raise ValueError(f"{source} claude_tools sentinel 'default' must be used alone")
+    return text
+
+
 def normalize_settings(raw_settings: dict[str, Any], source: str) -> dict[str, Any]:
     unknown = set(raw_settings) - set(SETTING_DEFAULTS)
     if unknown:
         raise ValueError(f"{source} contains unknown setting keys: {sorted(unknown)}")
     normalized: dict[str, Any] = {}
     for key, value in raw_settings.items():
-        if key in {"local_subagents_allowed", "safe_mode", "online_research"}:
+        if key in {
+            "local_subagents_allowed",
+            "adjudicator_enabled",
+            "safe_mode",
+            "online_research",
+        }:
             normalized[key] = parse_bool(value)
         elif key == "max_local_subagents":
             number = int(value)
@@ -529,11 +591,6 @@ def normalize_settings(raw_settings: dict[str, Any], source: str) -> dict[str, A
             if number < 0:
                 raise ValueError(f"{source} history_retained_runs must be non-negative")
             normalized[key] = number
-        elif key == "profile":
-            text = str(value).strip()
-            if text not in PROFILE_CHOICES:
-                raise ValueError(f"{source} profile must be one of {sorted(PROFILE_CHOICES)}")
-            normalized[key] = text
         elif key in {"codex_effort", "claude_effort"}:
             text = str(value).strip()
             if not text:
@@ -541,15 +598,10 @@ def normalize_settings(raw_settings: dict[str, Any], source: str) -> dict[str, A
             normalized[key] = text
         elif key == "codex_config":
             normalized[key] = normalize_codex_config(value, source)
+        elif key == "claude_tools":
+            normalized[key] = validate_claude_tools(value, source)
         elif key == "agent_timeout_seconds":
             normalized[key] = normalize_timeout(value)
-        elif key == "claude_max_turns":
-            text = str(value).strip()
-            if not text or not 1 <= int(text) <= SAFETY.MAX_CLAUDE_TURNS:
-                raise ValueError(
-                    f"{source} claude_max_turns must be between 1 and {SAFETY.MAX_CLAUDE_TURNS}"
-                )
-            normalized[key] = text
         else:
             text = str(value).strip()
             if not text:
@@ -565,9 +617,20 @@ def normalize_settings(raw_settings: dict[str, Any], source: str) -> dict[str, A
 
 def validate_v2_settings_types(raw_settings: dict[str, Any], source: str) -> dict[str, Any]:
     """Validate a persisted v2 settings object without legacy coercion."""
-    bool_keys = {"local_subagents_allowed", "safe_mode", "online_research"}
+    bool_keys = {
+        "local_subagents_allowed",
+        "adjudicator_enabled",
+        "safe_mode",
+        "online_research",
+    }
     int_keys = {"max_local_subagents", "history_retained_runs"}
-    string_keys = {"profile", "agent_timeout_seconds", "codex_model", "codex_effort", "claude_model", "claude_effort", "claude_tools", "claude_max_turns"}
+    string_keys = {
+        "codex_model",
+        "codex_effort",
+        "claude_model",
+        "claude_effort",
+        "claude_tools",
+    }
     for key in bool_keys:
         if type(raw_settings[key]) is not bool:
             raise ValueError(f"{source} {key} must be a JSON boolean")
@@ -581,24 +644,20 @@ def validate_v2_settings_types(raw_settings: dict[str, Any], source: str) -> dic
     for key in string_keys:
         if not isinstance(raw_settings[key], str) or not raw_settings[key].strip():
             raise ValueError(f"{source} {key} must be a non-empty JSON string")
-    if raw_settings["profile"] not in PROFILE_CHOICES:
-        raise ValueError(f"{source} profile must be one of {sorted(PROFILE_CHOICES)}")
     if is_fable_model(raw_settings["claude_model"]):
         raise ValueError(
             f"{source} claude_model cannot persist Fable; use a per-run --peer-model override"
         )
-    if re.fullmatch(r"[1-9][0-9]*(?:\.[0-9]+)?", raw_settings["agent_timeout_seconds"]) is None:
-        raise ValueError(f"{source} agent_timeout_seconds must be a canonical positive numeric string")
+    validate_claude_tools(raw_settings["claude_tools"], source)
+    if type(raw_settings["agent_timeout_seconds"]) not in {int, float}:
+        raise ValueError(f"{source} agent_timeout_seconds must be a JSON number")
     normalize_timeout(raw_settings["agent_timeout_seconds"])
-    if re.fullmatch(r"[1-9][0-9]*", raw_settings["claude_max_turns"]) is None:
-        raise ValueError(f"{source} claude_max_turns must be a canonical positive integer string")
-    if int(raw_settings["claude_max_turns"]) > SAFETY.MAX_CLAUDE_TURNS:
-        raise ValueError(f"{source} claude_max_turns must not exceed {SAFETY.MAX_CLAUDE_TURNS}")
     codex_config = raw_settings["codex_config"]
     if not isinstance(codex_config, list) or not all(
         isinstance(item, str) and re.match(r"^[^=]+=", item) for item in codex_config
     ):
         raise ValueError(f"{source} codex_config must be a JSON array of key=value strings")
+    SAFETY.validate_codex_config_overrides(codex_config)
     return {key: list(value) if isinstance(value, list) else value for key, value in raw_settings.items()}
 
 
@@ -687,14 +746,19 @@ def require_valid_settings(resolved: dict[str, Any]) -> None:
     errors = settings_error_messages(resolved)
     if errors:
         detail = "\n".join(f"- {error}" for error in errors)
-        raise SystemExit(f"invalid Agent Collab settings; refusing to use defaults:\n{detail}")
+        raise SystemExit(
+            "invalid Agent Collab settings; refusing to use defaults:\n"
+            f"{detail}\n"
+            "Archive the invalid settings file for evidence, remove or rename it, then rerun "
+            "`host.py setup`; Agent Collab will not migrate or coerce it."
+        )
 
 
 def settings_to_env(settings: dict[str, Any]) -> dict[str, str]:
     return {
-        "AGENT_COLLAB_PROFILE": str(settings["profile"]),
         "AGENT_COLLAB_LOCAL_SUBAGENTS_ALLOWED": "1" if settings["local_subagents_allowed"] else "0",
         "AGENT_COLLAB_MAX_LOCAL_SUBAGENTS": str(settings["max_local_subagents"]),
+        "AGENT_COLLAB_ADJUDICATOR_ENABLED": "1" if settings["adjudicator_enabled"] else "0",
         "AGENT_COLLAB_TIMEOUT_SECONDS": str(settings["agent_timeout_seconds"]),
         "AGENT_COLLAB_SAFE_MODE": "1" if settings["safe_mode"] else "0",
         "CODEX_AGENT_COLLAB_MODEL": str(settings["codex_model"]),
@@ -704,7 +768,6 @@ def settings_to_env(settings: dict[str, Any]) -> dict[str, str]:
         "CLAUDE_AGENT_COLLAB_MODEL": str(settings["claude_model"]),
         "CLAUDE_AGENT_COLLAB_EFFORT": str(settings["claude_effort"]),
         "CLAUDE_AGENT_COLLAB_TOOLS": str(settings["claude_tools"]),
-        "CLAUDE_AGENT_COLLAB_MAX_TURNS": str(settings["claude_max_turns"]),
         "AGENT_COLLAB_HISTORY_RETAINED_RUNS": str(settings["history_retained_runs"]),
     }
 
@@ -764,24 +827,28 @@ def run_snapshot(
     return data
 
 
-def record_host_workspace_mutation(
+def record_workspace_mutation(
     repo_root: Path,
     run_dir: Path,
     request: dict[str, Any],
+    *,
+    after_snapshot_name: str,
+    mutation_name: str,
+    source: str,
 ) -> dict[str, Any] | None:
     before_path = snapshot_json_path(run_dir / "before.snapshot")
     if not before_path.exists() or before_path.stat().st_size == 0:
         raise ArtifactValidationError("canonical before.snapshot.json is missing or empty")
     before = load_json(before_path)
-    after = run_snapshot(repo_root, run_dir / "after.snapshot", ignored_paths=[run_dir])
+    after = run_snapshot(repo_root, run_dir / after_snapshot_name, ignored_paths=[run_dir])
     snapshot = load_snapshot_runtime()
     diff = snapshot.diff_snapshots(before, after)
-    mutation_path = run_dir / "workspace-mutation.json"
+    mutation_path = run_dir / mutation_name
     if diff["changed"]:
         diagnostic = {
             **diff,
             "schema_version": ARTIFACT_SCHEMA_VERSION,
-            "source": "host_snapshot",
+            "source": source,
             "edit_allowed": bool(request["edit_allowed"]),
             "message": (
                 "Workspace changed during the Agent Collab run; attribution is unknown."
@@ -791,9 +858,48 @@ def record_host_workspace_mutation(
                 "Transient changes that were reverted before a snapshot are not observable.",
             ],
         }
-        write_json(mutation_path, diagnostic)
+        if source == "cancel_snapshot":
+            if not write_json_once(mutation_path, diagnostic):
+                existing = load_json(mutation_path)
+                if existing != diagnostic:
+                    raise ArtifactValidationError(
+                        "immutable cancellation mutation evidence already exists with different content"
+                    )
+                return existing
+        else:
+            write_json(mutation_path, diagnostic)
         return diagnostic
     return read_json_if_exists(mutation_path)
+
+
+def record_host_workspace_mutation(
+    repo_root: Path,
+    run_dir: Path,
+    request: dict[str, Any],
+) -> dict[str, Any] | None:
+    return record_workspace_mutation(
+        repo_root,
+        run_dir,
+        request,
+        after_snapshot_name="after.snapshot",
+        mutation_name="workspace-mutation.json",
+        source="host_snapshot",
+    )
+
+
+def record_cancel_workspace_mutation(
+    repo_root: Path,
+    run_dir: Path,
+    request: dict[str, Any],
+) -> dict[str, Any] | None:
+    return record_workspace_mutation(
+        repo_root,
+        run_dir,
+        request,
+        after_snapshot_name="cancel-after.snapshot",
+        mutation_name="cancel-workspace-mutation.json",
+        source="cancel_snapshot",
+    )
 
 
 def workspace_mutation_sha256(value: dict[str, Any] | None) -> str:
@@ -801,6 +907,121 @@ def workspace_mutation_sha256(value: dict[str, Any] | None) -> str:
 
     canonical = STRICT_JSON.dumps(value, indent=None, sort_keys=True).encode("utf-8")
     return hashlib.sha256(canonical).hexdigest()
+
+
+def file_sha256_or_none(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+CANCEL_PRESERVED_ARTIFACTS = {
+    "peer_report": "peer-report.json",
+    "peer_raw": "peer.raw.json",
+    "peer_normalization": "peer-normalization.json",
+    "host_result": "host-result.json",
+    "host_synthesis": "host-synthesis.json",
+    "claim_matrix": "claim-matrix.json",
+}
+
+
+def preserved_artifact_hashes(run_dir: Path) -> dict[str, str | None]:
+    return {
+        key: file_sha256_or_none(run_dir / filename)
+        for key, filename in CANCEL_PRESERVED_ARTIFACTS.items()
+    }
+
+
+def validate_cleanup_evidence(value: Any, label: str) -> None:
+    required = {"outcome", "quiescent"}
+    allowed = required | {"pgid", "details"}
+    if not isinstance(value, dict) or not required <= set(value) or set(value) - allowed:
+        raise ArtifactValidationError(
+            f"{label} must contain outcome and quiescent with only optional pgid/details"
+        )
+    if not isinstance(value["outcome"], str) or not value["outcome"]:
+        raise ArtifactValidationError(f"{label} outcome must be a non-empty string")
+    if type(value["quiescent"]) is not bool:
+        raise ArtifactValidationError(f"{label} quiescent must be a JSON boolean")
+    if "pgid" in value and (type(value["pgid"]) is not int or value["pgid"] <= 0):
+        raise ArtifactValidationError(f"{label} pgid must be a positive integer")
+    if "details" in value and (not isinstance(value["details"], str) or not value["details"]):
+        raise ArtifactValidationError(f"{label} details must be a non-empty string")
+
+
+def validate_cancel_result(report: dict[str, Any], request: dict[str, Any], run_dir: Path) -> None:
+    required = {
+        "schema_version",
+        "run_id",
+        "status",
+        "outcome",
+        "forced",
+        "reason",
+        "elapsed_seconds",
+        "minimum_wait_seconds",
+        "before_minimum_wait",
+        "peer_was_alive",
+        "process_cleanup",
+        "preserved_artifacts",
+        "workspace_mutation",
+        "workspace_mutation_sha256",
+        "completed_at",
+    }
+    if not isinstance(report, dict) or set(report) != required:
+        raise ArtifactValidationError(f"cancel-result must contain exactly {sorted(required)}")
+    if report["schema_version"] != ARTIFACT_SCHEMA_VERSION or report["run_id"] != request["run_id"]:
+        raise ArtifactValidationError("cancel-result schema_version/run_id does not match the request")
+    if report["status"] != "cancelled" or report["outcome"] != "cancelled_quiescent":
+        raise ArtifactValidationError("cancel-result status/outcome is invalid")
+    for key in ("forced", "before_minimum_wait", "peer_was_alive"):
+        if type(report[key]) is not bool:
+            raise ArtifactValidationError(f"cancel-result {key} must be a JSON boolean")
+    if not isinstance(report["reason"], str) or not report["reason"]:
+        raise ArtifactValidationError("cancel-result reason must be a non-empty string")
+    elapsed = report["elapsed_seconds"]
+    if elapsed is not None and (
+        type(elapsed) not in {int, float} or not math.isfinite(float(elapsed)) or float(elapsed) < 0
+    ):
+        raise ArtifactValidationError("cancel-result elapsed_seconds must be a non-negative finite number or null")
+    minimum_wait = report["minimum_wait_seconds"]
+    if type(minimum_wait) not in {int, float} or float(minimum_wait) != MIN_PEER_WAIT_SECONDS:
+        raise ArtifactValidationError("cancel-result minimum_wait_seconds is invalid")
+    cleanup = report["process_cleanup"]
+    if not isinstance(cleanup, dict) or set(cleanup) != {"quiescent", "provider", "wrapper"}:
+        raise ArtifactValidationError("cancel-result process_cleanup keys are invalid")
+    if cleanup["quiescent"] is not True:
+        raise ArtifactValidationError("cancel-result must prove process-tree quiescence")
+    validate_cleanup_evidence(cleanup["provider"], "cancel-result provider cleanup")
+    validate_cleanup_evidence(cleanup["wrapper"], "cancel-result wrapper cleanup")
+    if cleanup["provider"]["quiescent"] is not True or cleanup["wrapper"]["quiescent"] is not True:
+        raise ArtifactValidationError("cancel-result provider and wrapper cleanup must be quiescent")
+    preserved = report["preserved_artifacts"]
+    if not isinstance(preserved, dict) or set(preserved) != set(CANCEL_PRESERVED_ARTIFACTS):
+        raise ArtifactValidationError("cancel-result preserved_artifacts keys are invalid")
+    for value in preserved.values():
+        if value is not None and re.fullmatch(r"[0-9a-f]{64}", str(value)) is None:
+            raise ArtifactValidationError("cancel-result artifact hashes must be lowercase SHA-256 or null")
+    mutation = report["workspace_mutation"]
+    mutation_path = run_dir / "cancel-workspace-mutation.json"
+    if mutation is not None:
+        expected_path = mutation_path.resolve()
+        if not isinstance(mutation, str) or Path(mutation).resolve() != expected_path:
+            raise ArtifactValidationError("cancel-result workspace_mutation path is invalid")
+        mutation_value = load_json(mutation_path)
+    else:
+        if mutation_path.exists():
+            raise ArtifactValidationError(
+                "cancel-result workspace_mutation is null but its diagnostic exists"
+            )
+        mutation_value = None
+    if report["workspace_mutation_sha256"] != workspace_mutation_sha256(mutation_value):
+        raise ArtifactValidationError("cancel-result workspace_mutation_sha256 is invalid")
+    if parse_utc_timestamp(report["completed_at"]) is None:
+        raise ArtifactValidationError("cancel-result completed_at must be an ISO-8601 timestamp")
 
 
 def process_alive(pid: int) -> bool:
@@ -911,15 +1132,49 @@ def workspace_guard_lock_path(repo_root: Path) -> Path:
 
 
 @contextmanager
+def run_operation_lock(run_dir: Path):
+    """Serialize short finalization mutations without blocking the long peer wait."""
+
+    require_supported_platform()
+    STRICT_JSON.ensure_private_directory(run_dir)
+    lock_path = run_dir / ".workflow.lock"
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(lock_path, flags, 0o600)
+    os.fchmod(descriptor, 0o600)
+    acquired = False
+    deadline = time.monotonic() + RUN_OPERATION_LOCK_TIMEOUT_SECONDS
+    try:
+        while True:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except BlockingIOError as exc:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        f"timed out acquiring Agent Collab run operation lock: {lock_path}"
+                    ) from exc
+                time.sleep(RUN_OPERATION_LOCK_POLL_SECONDS)
+        yield
+    finally:
+        if acquired:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+@contextmanager
 def workspace_guard_transaction(repo_root: Path):
     """Serialize every guard read-modify-write transition across processes."""
 
     lock_path = workspace_guard_lock_path(repo_root)
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    STRICT_JSON.ensure_private_directory(lock_path.parent)
     flags = os.O_RDWR | os.O_CREAT
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     descriptor = os.open(lock_path, flags, 0o600)
+    if os.name == "posix":
+        os.fchmod(descriptor, 0o600)
     acquired = False
     deadline = time.monotonic() + WORKSPACE_GUARD_LOCK_TIMEOUT_SECONDS
     try:
@@ -1024,7 +1279,7 @@ def require_workspace_guard_available(repo_root: Path) -> None:
 
 def acquire_workspace_guard(repo_root: Path, run_id: str, host: str, run_dir: Path) -> Path:
     path = workspace_guard_path(repo_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    STRICT_JSON.ensure_private_directory(path.parent)
     payload = {
         "schema_version": WORKSPACE_GUARD_SCHEMA_VERSION,
         "run_id": run_id,
@@ -1038,17 +1293,8 @@ def acquire_workspace_guard(repo_root: Path, run_id: str, host: str, run_dir: Pa
     }
     with workspace_guard_transaction(repo_root):
         _require_workspace_guard_available_unlocked(repo_root)
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        try:
-            descriptor = os.open(path, flags, 0o600)
-        except FileExistsError as exc:
-            raise SystemExit(f"could not acquire Agent Collab workspace guard: {path}") from exc
-        try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as guard:
-                guard.write(STRICT_JSON.dumps(payload) + "\n")
-        except BaseException:
-            path.unlink(missing_ok=True)
-            raise
+        if not write_json_once(path, payload):
+            raise SystemExit(f"could not acquire Agent Collab workspace guard: {path}")
     return path
 
 
@@ -1111,7 +1357,7 @@ def validate_peer_process(data: dict[str, Any], request: dict[str, Any], run_dir
         "repo_root",
         "host",
         "peer",
-        "profile",
+        "adjudicator_enabled",
         "started_at",
         "started_at_epoch",
         "peer_timeout_seconds",
@@ -1130,9 +1376,11 @@ def validate_peer_process(data: dict[str, Any], request: dict[str, Any], run_dir
         )
     if data["schema_version"] != ARTIFACT_SCHEMA_VERSION:
         raise ArtifactValidationError("peer-process schema_version must be 2.0; legacy artifacts are not supported")
-    for key in ("run_id", "host", "peer", "profile"):
+    for key in ("run_id", "host", "peer", "adjudicator_enabled"):
         if data[key] != request[key]:
             raise ArtifactValidationError(f"peer-process {key} does not match host request")
+    if type(data["adjudicator_enabled"]) is not bool:
+        raise ArtifactValidationError("peer-process adjudicator_enabled must be a JSON boolean")
     if Path(str(data["run_dir"])).resolve() != run_dir.resolve():
         raise ArtifactValidationError("peer-process run_dir does not match the resolved run directory")
     for key in ("pid", "pgid"):
@@ -1326,7 +1574,7 @@ def job_patch_from_run(run_dir: Path, status: str, phase: str, **extra: Any) -> 
         "peer": request.get("peer") or process_info.get("peer"),
         "mode": request.get("mode"),
         "target": request.get("target"),
-        "profile": request.get("profile") or process_info.get("profile"),
+        "adjudicator_enabled": request.get("adjudicator_enabled"),
         "status": status,
         "phase": phase,
         **extra,
@@ -1373,6 +1621,8 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
         peer_report_incomplete = True
     normalization = read_json_if_exists(run_dir / "peer-normalization.json")
     workspace_mutation = read_json_if_exists(run_dir / "workspace-mutation.json")
+    cancel_result = read_json_if_exists(run_dir / "cancel-result.json")
+    cancel_workspace_mutation = read_json_if_exists(run_dir / "cancel-workspace-mutation.json")
     elapsed_seconds = peer_elapsed_seconds(process_info, run_dir)
     early_cancel_blocked = (
         peer_alive
@@ -1405,6 +1655,8 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
         "normalization_source": normalization.get("source") if normalization else None,
         "validation_status": normalization.get("validation_status") if normalization else None,
         "workspace_mutation": workspace_mutation,
+        "cancel_result": cancel_result,
+        "cancel_workspace_mutation": cancel_workspace_mutation,
         "artifacts": {
             "host_request": file_info(run_dir / "host-request.json"),
             "before_snapshot": file_info(run_dir / "before.snapshot"),
@@ -1417,6 +1669,8 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
             "adjudicator_report": file_info(run_dir / "adjudicator-report.json"),
             "after_snapshot": file_info(run_dir / "after.snapshot"),
             "workspace_mutation": file_info(run_dir / "workspace-mutation.json"),
+            "cancel_result": file_info(run_dir / "cancel-result.json"),
+            "cancel_workspace_mutation": file_info(run_dir / "cancel-workspace-mutation.json"),
             "peer_stderr": file_info(run_dir / "peer.stderr.log"),
         },
     }
@@ -1470,27 +1724,17 @@ def wait_for_peer_report(
     pid = int(process_info["pid"])
     start = time.time()
     deadline = start + timeout_seconds
-    last_signature: tuple[int, int] | None = None
-    stable_since: float | None = None
     while True:
         if peer_report_path.exists() and peer_report_path.stat().st_size > 0:
-            stat = peer_report_path.stat()
-            signature = (stat.st_size, stat.st_mtime_ns)
             alive = process_identity_matches(process_info) and process_alive(pid)
             if not alive:
                 return "report_ready"
             now = time.time()
-            if signature != last_signature:
-                last_signature = signature
-                stable_since = now
             if now >= deadline:
                 return "timeout"
             # Report bytes are not terminal while the wrapper is alive. The
-            # wrapper owns provider-group cleanup and may still replace them.
-            # Stability is observed only to avoid mistaking active writes for
-            # completion; process exit remains the readiness boundary.
-            if stable_since is not None and now - stable_since >= PEER_REPORT_STABLE_SECONDS:
-                pass
+            # wrapper owns provider-group cleanup and may still replace them;
+            # process exit is the readiness boundary.
         else:
             alive = process_identity_matches(process_info) and process_alive(pid)
             now = time.time()
@@ -1550,6 +1794,7 @@ def check_availability(args: argparse.Namespace) -> int:
 
 
 def start(args: argparse.Namespace) -> int:
+    require_supported_platform()
     peer_runtime = load_peer_runtime()
     availability_runtime = load_availability_runtime()
     if peer_runtime.nested_invocation_requested(dict(os.environ)):
@@ -1560,7 +1805,12 @@ def start(args: argparse.Namespace) -> int:
     try:
         state.load_state(run_root)
     except (OSError, ValueError) as exc:
-        raise SystemExit(f"invalid v2 Agent Collab state; refusing to launch a peer: {exc}") from exc
+        state_path = run_root / "state.json"
+        raise SystemExit(
+            "invalid v2 Agent Collab state; refusing to launch a peer: "
+            f"{exc}\nArchive {state_path} for evidence and remove or rename it, or select a fresh "
+            "--run-root. Agent Collab will not migrate or coerce legacy state."
+        ) from exc
     require_workspace_guard_available(repo_root)
     resolved = resolve_settings(repo_root)
     require_valid_settings(resolved)
@@ -1575,9 +1825,17 @@ def start(args: argparse.Namespace) -> int:
         run_id = require_safe_run_id(args.run_id or utc_run_id(host, mode))
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
-    profile = args.profile or settings["profile"]
     max_local_subagents = args.max_local_subagents if args.max_local_subagents is not None else settings["max_local_subagents"]
-    local_subagents_allowed = False if args.no_local_subagents else bool(settings["local_subagents_allowed"])
+    local_subagents_allowed = (
+        bool(settings["local_subagents_allowed"])
+        if args.local_subagents is None
+        else bool(args.local_subagents)
+    )
+    adjudicator_enabled = (
+        bool(settings["adjudicator_enabled"])
+        if args.adjudicator is None
+        else bool(args.adjudicator)
+    )
     online_research = settings["online_research"] if args.online_research is None else args.online_research
     peer_model = args.peer_model if args.peer_model is not None else settings[f"{peer}_model"]
     peer_effort = args.peer_effort if args.peer_effort is not None else settings[f"{peer}_effort"]
@@ -1586,10 +1844,19 @@ def start(args: argparse.Namespace) -> int:
             "Fable is explicit-only; request it for this run with "
             "--peer-model claude-fable-5"
         )
-    safe_mode = bool(settings["safe_mode"])
+    safe_mode = bool(settings["safe_mode"]) if args.safe_mode is None else bool(args.safe_mode)
     if type(max_local_subagents) is not int or not 0 <= max_local_subagents <= SAFETY.MAX_LOCAL_SUBAGENTS:
         raise SystemExit(f"max_local_subagents must be between 0 and {SAFETY.MAX_LOCAL_SUBAGENTS}")
-    agent_timeout = configured_timeout_seconds(settings["agent_timeout_seconds"])
+    agent_timeout = configured_timeout_seconds(
+        settings["agent_timeout_seconds"]
+        if args.timeout_seconds is None
+        else args.timeout_seconds
+    )
+    claude_max_turns = args.claude_max_turns
+    if claude_max_turns is not None and claude_max_turns < 1:
+        raise SystemExit("--claude-max-turns must be a positive integer")
+    if claude_max_turns is not None and peer != "claude":
+        raise SystemExit("--claude-max-turns may be used only when the resolved peer is Claude")
     # Codex read-only sandboxing uses bubblewrap on Linux. Claude's plan
     # permission mode is provider-native and does not use this backend.
     if safe_mode and peer == "codex":
@@ -1618,7 +1885,10 @@ def start(args: argparse.Namespace) -> int:
     )
     if availability_attestation["status"] != "available":
         raise SystemExit(
-            "requested peer model/effort pair is not attested as available; refusing to create a run:\n"
+            "Agent Collab stopped before run creation or peer launch because the requested "
+            f"{peer} pair {peer_model}/{peer_effort} is not attested as available "
+            f"(status={availability_attestation['status']}). No peer, helper, host-first-pass, "
+            "or adjudicator was started:\n"
             + json.dumps(availability_attestation, ensure_ascii=False, indent=2, sort_keys=True)
         )
     availability_runtime.validate_result(availability_attestation, require_available=True)
@@ -1632,7 +1902,7 @@ def start(args: argparse.Namespace) -> int:
         "brief": brief,
         "edit_allowed": bool(args.edit_allowed),
         "run_id": run_id,
-        "profile": profile,
+        "adjudicator_enabled": adjudicator_enabled,
         "local_subagents_allowed": local_subagents_allowed,
         "max_local_subagents": max_local_subagents,
         "online_research": online_research,
@@ -1643,9 +1913,14 @@ def start(args: argparse.Namespace) -> int:
         "peer_timeout_seconds": json_number(agent_timeout),
         "codex_config": list(settings["codex_config"]),
         "claude_tools": settings["claude_tools"],
-        "claude_max_turns": int(settings["claude_max_turns"]),
+        "claude_max_turns": claude_max_turns,
+        "helper_enforcement": SAFETY.helper_enforcement(
+            peer,
+            local_subagents_allowed=local_subagents_allowed,
+            max_local_subagents=max_local_subagents,
+        ),
     }
-    peer_runtime.validate_request(request)
+    peer_runtime.validate_request(request, require_fresh_attestation=True)
 
     run_dir = run_root / run_id
     guard_path = acquire_workspace_guard(repo_root, run_id, host, run_dir)
@@ -1658,14 +1933,15 @@ def start(args: argparse.Namespace) -> int:
     startup_gate_read = None
     startup_gate_write = None
     try:
-        run_dir.mkdir(parents=True, exist_ok=False)
+        run_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
+        os.chmod(run_dir, 0o700)
         run_dir_created = True
 
         request_path = run_dir / "host-request.json"
         write_json(request_path, request)
         run_snapshot(repo_root, run_dir / "before.snapshot", ignored_paths=[run_dir])
-        peer_stdout = (run_dir / "peer-report.json").open("w", encoding="utf-8")
-        peer_stderr = (run_dir / "peer.stderr.log").open("w", encoding="utf-8")
+        peer_stdout = STRICT_JSON.open_private_text(run_dir / "peer-report.json")
+        peer_stderr = STRICT_JSON.open_private_text(run_dir / "peer.stderr.log")
         env = dict(os.environ)
         env["AGENT_COLLAB_RUN_DIR"] = str(run_dir)
         started_at_epoch = time.time()
@@ -1710,7 +1986,7 @@ def start(args: argparse.Namespace) -> int:
             "repo_root": str(repo_root),
             "host": host,
             "peer": peer,
-            "profile": profile,
+            "adjudicator_enabled": adjudicator_enabled,
             "started_at": utc_timestamp(started_at_epoch),
             "started_at_epoch": started_at_epoch,
             "peer_timeout_seconds": json_number(agent_timeout),
@@ -1746,7 +2022,7 @@ def start(args: argparse.Namespace) -> int:
                 "status": "running",
                 "phase": "peer_running",
                 "pid": process.pid,
-                "profile": profile,
+                "adjudicator_enabled": adjudicator_enabled,
                 "edit_allowed": bool(args.edit_allowed),
                 "peer_report": str(run_dir / "peer-report.json"),
                 "peer_raw": str(run_dir / "peer.raw.json"),
@@ -2020,15 +2296,28 @@ def validate_host_result(report: dict[str, Any], request: dict[str, Any], run_di
         expected_paths = {
             "normalization": run_dir / "peer-normalization.json",
             "claim_matrix": run_dir / "claim-matrix.json",
-            "adjudicator_report": run_dir / "adjudicator-report.json",
         }
         for key, expected in expected_paths.items():
             if not isinstance(report[key], str) or not report[key]:
                 raise ArtifactValidationError(f"host-result {key} must be a non-empty string")
             if Path(report[key]).resolve() != expected.resolve():
                 raise ArtifactValidationError(f"host-result {key} path does not match the run artifact")
-        if not isinstance(report["validation_status"], str) or not report["validation_status"].strip():
-            raise ArtifactValidationError("host-result validation_status must be a non-empty string")
+        if request["adjudicator_enabled"]:
+            adjudicator_path = report["adjudicator_report"]
+            if not isinstance(adjudicator_path, str) or not adjudicator_path:
+                raise ArtifactValidationError(
+                    "host-result adjudicator_report must be a non-empty string when adjudication is enabled"
+                )
+            if Path(adjudicator_path).resolve() != (run_dir / "adjudicator-report.json").resolve():
+                raise ArtifactValidationError(
+                    "host-result adjudicator_report path does not match the run artifact"
+                )
+        elif report["adjudicator_report"] is not None:
+            raise ArtifactValidationError(
+                "host-result adjudicator_report must be null when adjudication is disabled"
+            )
+        if report["validation_status"] not in VALIDATION_STATUSES:
+            raise ArtifactValidationError("host-result validation_status is invalid")
         if report["workspace_mutation"] is not None and not isinstance(report["workspace_mutation"], dict):
             raise ArtifactValidationError("host-result workspace_mutation must be an object or null")
         expected_mutation_digest = workspace_mutation_sha256(report["workspace_mutation"])
@@ -2040,8 +2329,8 @@ def validate_host_result(report: dict[str, Any], request: dict[str, Any], run_di
         raise ArtifactValidationError(
             "host-result phase must be waiting_for_peer, ready_for_synthesis, or done"
         )
-    if not isinstance(report["finish_timeout_source"], str) or not report["finish_timeout_source"].strip():
-        raise ArtifactValidationError("host-result finish_timeout_source must be a non-empty string")
+    if report["finish_timeout_source"] not in FINISH_TIMEOUT_SOURCES:
+        raise ArtifactValidationError("host-result finish_timeout_source is invalid")
     wait_seconds = report["finish_wait_seconds"]
     if (
         not isinstance(wait_seconds, (int, float))
@@ -2187,12 +2476,53 @@ def default_adjudicator_report(request: dict[str, Any], peer_report: dict[str, A
         "schema_version": ARTIFACT_SCHEMA_VERSION,
         "run_id": request["run_id"],
         "status": "advisory_pending",
-        "summary": "Ultra profile expects a host-local advisory adjudicator after independent reports. This placeholder means no adjudicator artifact was supplied before finish.",
+        "summary": "Host-local advisory adjudication is enabled for this run. This placeholder means no adjudicator artifact was supplied before finish.",
         "false_positives": [],
         "claims_needing_verification": [],
         "recommended_verdict": str(peer_report.get("verdict", "blocked")),
         "claims": [],
     }
+
+
+def validate_peer_normalization(metadata: dict[str, Any]) -> None:
+    if not isinstance(metadata, dict):
+        raise ArtifactValidationError("peer-normalization must be an object")
+    status = metadata.get("validation_status")
+    common = {
+        "schema_version",
+        "source",
+        "artifact_source",
+        "input_bytes",
+        "warnings",
+        "validation_status",
+    }
+    required = common if status == "ok" else common | {"error"}
+    if set(metadata) != required:
+        raise ArtifactValidationError(
+            "peer-normalization keys must match schema 2.0 exactly; "
+            f"missing={sorted(required - set(metadata))}, unknown={sorted(set(metadata) - required)}"
+        )
+    if metadata["schema_version"] != ARTIFACT_SCHEMA_VERSION:
+        raise ArtifactValidationError("peer-normalization schema_version must be 2.0")
+    if status not in VALIDATION_STATUSES:
+        raise ArtifactValidationError("peer-normalization validation_status is invalid")
+    if metadata["artifact_source"] != "peer_report":
+        raise ArtifactValidationError("peer-normalization artifact_source must be peer_report")
+    expected_source = "direct_json" if status == "ok" else "none"
+    if metadata["source"] != expected_source:
+        raise ArtifactValidationError(
+            f"peer-normalization source must be {expected_source!r} for {status!r}"
+        )
+    if type(metadata["input_bytes"]) is not int or metadata["input_bytes"] < 0:
+        raise ArtifactValidationError("peer-normalization input_bytes must be non-negative integer")
+    if not isinstance(metadata["warnings"], list) or not all(
+        isinstance(item, str) for item in metadata["warnings"]
+    ):
+        raise ArtifactValidationError("peer-normalization warnings must be an array of strings")
+    if status != "ok" and (
+        not isinstance(metadata["error"], str) or not metadata["error"].strip()
+    ):
+        raise ArtifactValidationError("failed peer-normalization error must be non-empty")
 
 
 def normalize_peer_report_from_artifacts(
@@ -2250,6 +2580,26 @@ def normalize_peer_report_from_artifacts(
     return peer_report, failure_kind
 
 
+def valid_terminal_peer_report(
+    peer_runtime: Any,
+    run_dir: Path,
+    request: dict[str, Any],
+) -> bool:
+    path = run_dir / "peer-report.json"
+    if not path.exists() or path.stat().st_size == 0:
+        return False
+    try:
+        normalized = peer_runtime.normalize_json_payload(
+            STRICT_JSON.read_text(path, max_bytes=16 * 1024 * 1024).strip(),
+            "direct_json",
+        )
+        peer_runtime.validate_peer_report(normalized.report)
+        validate_peer_report_matches_request(normalized.report, request)
+    except Exception:
+        return False
+    return True
+
+
 def finish(args: argparse.Namespace) -> int:
     repo_root_for_state = (args.repo_root or default_repo_root()).resolve()
     run_root = (args.run_root or default_run_root(repo_root_for_state)).resolve()
@@ -2264,8 +2614,6 @@ def finish(args: argparse.Namespace) -> int:
         validate_host_first_pass(host_report, request)
     except ArtifactValidationError as exc:
         raise SystemExit(f"invalid independent host analysis {host_first_pass}: {exc}") from exc
-    state.upsert_job(run_root, job_patch_from_run(run_dir, "running", "normalizing_peer"))
-
     process_info = load_json(run_dir / "peer-process.json")
     try:
         validate_peer_process(process_info, request, run_dir)
@@ -2289,6 +2637,72 @@ def finish(args: argparse.Namespace) -> int:
     )
     finish_wait_seconds = configured_wait_seconds
     wait_status = wait_for_peer_report(peer_report_path, process_info, actual_wait_seconds)
+    with run_operation_lock(run_dir):
+        return _finish_after_wait_locked(
+            state=state,
+            run_root=run_root,
+            run_dir=run_dir,
+            request=request,
+            host_report=host_report,
+            process_info=process_info,
+            repo_root=repo_root,
+            peer_report_path=peer_report_path,
+            finish_wait_seconds=finish_wait_seconds,
+            finish_timeout_source=finish_timeout_source,
+            hard_deadline=hard_deadline,
+            wait_status=wait_status,
+        )
+
+
+def _finish_after_wait_locked(
+    *,
+    state: Any,
+    run_root: Path,
+    run_dir: Path,
+    request: dict[str, Any],
+    host_report: dict[str, Any],
+    process_info: dict[str, Any],
+    repo_root: Path,
+    peer_report_path: Path,
+    finish_wait_seconds: float,
+    finish_timeout_source: str,
+    hard_deadline: float,
+    wait_status: str,
+) -> int:
+    current_request = require_run_request(run_dir)
+    if current_request != request:
+        raise SystemExit("host-request changed while finish was waiting; refusing finalization")
+    current_process = load_json(run_dir / "peer-process.json")
+    if current_process != process_info:
+        raise SystemExit("peer-process changed while finish was waiting; refusing finalization")
+    current_host_report = load_json(run_dir / "host-first-pass.json")
+    if current_host_report != host_report:
+        raise SystemExit("host-first-pass changed while finish was waiting; rerun finish")
+    if (run_dir / "cancel-result.json").exists():
+        raise SystemExit("run was cancelled while finish was waiting; terminal evidence was preserved")
+    current_job = state.find_job(run_root, request["run_id"])
+    if current_job is not None and current_job.get("status") in {"completed", "failed", "cancelled"}:
+        raise SystemExit(
+            f"run is already terminal with status {current_job['status']}; finish will not reactivate it"
+        )
+    existing_host_result = read_json_if_exists(run_dir / "host-result.json")
+    if existing_host_result is not None and existing_host_result.get("phase") == "done":
+        raise SystemExit("run is already complete; finish will not rewrite terminal evidence")
+
+    require_workspace_guard_owner(repo_root, request["run_id"])
+    _, active_guard = read_workspace_guard(repo_root)
+    wrapper_quiescence_proven = bool(
+        active_guard is not None
+        and active_guard["phase"] == "ready_for_synthesis"
+        and active_guard["peer_identity"] == process_info["process_identity"]
+    )
+    if (
+        active_guard is not None
+        and active_guard["phase"] == "ready_for_synthesis"
+        and not wrapper_quiescence_proven
+    ):
+        raise SystemExit("ready-for-synthesis workspace guard contains an invalid wrapper-quiescence proof")
+    pid = int(process_info["pid"])
 
     if wait_status == "timeout" and time.time() < hard_deadline:
         output = {
@@ -2391,15 +2805,21 @@ def finish(args: argparse.Namespace) -> int:
     peer_report, validation_status = normalize_peer_report_from_artifacts(peer_runtime, run_dir, request)
 
     adjudicator_path = run_dir / "adjudicator-report.json"
-    if adjudicator_path.exists():
-        adjudicator = load_json(adjudicator_path)
-    else:
-        adjudicator = default_adjudicator_report(request, peer_report)
-        write_json(adjudicator_path, adjudicator)
-    try:
-        validate_adjudicator_report(adjudicator, request)
-    except ArtifactValidationError as exc:
-        raise SystemExit(f"invalid adjudicator report {adjudicator_path}: {exc}") from exc
+    adjudicator: dict[str, Any] | None = None
+    if request["adjudicator_enabled"]:
+        if adjudicator_path.exists():
+            adjudicator = load_json(adjudicator_path)
+        else:
+            adjudicator = default_adjudicator_report(request, peer_report)
+            write_json(adjudicator_path, adjudicator)
+        try:
+            validate_adjudicator_report(adjudicator, request)
+        except ArtifactValidationError as exc:
+            raise SystemExit(f"invalid adjudicator report {adjudicator_path}: {exc}") from exc
+    elif adjudicator_path.exists():
+        raise SystemExit(
+            "adjudicator-report.json is forbidden because adjudication is disabled in the immutable host request"
+        )
 
     try:
         helper_claims = load_helper_claims(run_dir, request)
@@ -2422,7 +2842,7 @@ def finish(args: argparse.Namespace) -> int:
         "finish_timeout_source": finish_timeout_source,
         "normalization": str(run_dir / "peer-normalization.json"),
         "claim_matrix": str(run_dir / "claim-matrix.json"),
-        "adjudicator_report": str(run_dir / "adjudicator-report.json"),
+        "adjudicator_report": str(adjudicator_path) if adjudicator is not None else None,
         "workspace_mutation": workspace_mutation,
         "workspace_mutation_sha256": workspace_mutation_sha256(workspace_mutation),
     }
@@ -2467,18 +2887,22 @@ def validate_completion_artifacts(
         raise ArtifactValidationError(f"missing required host synthesis attestation: {host_synthesis_path}")
     host_synthesis = load_json(host_synthesis_path)
     claim_matrix = load_json(run_dir / "claim-matrix.json")
-    adjudicator = load_json(run_dir / "adjudicator-report.json")
     normalization = load_json(run_dir / "peer-normalization.json")
     peer_runtime.validate_peer_report(peer_report)
     validate_peer_report_matches_request(peer_report, request)
     validate_host_first_pass(host_report, request)
     validate_host_synthesis(host_synthesis, request)
     validate_claim_matrix(claim_matrix, request)
-    validate_adjudicator_report(adjudicator, request)
-    if normalization.get("schema_version") != ARTIFACT_SCHEMA_VERSION:
-        raise ArtifactValidationError("peer-normalization schema_version must be 2.0")
-    if normalization.get("artifact_source") != "peer_report":
-        raise ArtifactValidationError("peer-normalization artifact_source must be peer_report")
+    adjudicator_path = run_dir / "adjudicator-report.json"
+    adjudicator: dict[str, Any] | None = None
+    if request["adjudicator_enabled"]:
+        adjudicator = load_json(adjudicator_path)
+        validate_adjudicator_report(adjudicator, request)
+    elif adjudicator_path.exists():
+        raise ArtifactValidationError(
+            "adjudicator-report.json is forbidden because adjudication is disabled"
+        )
+    validate_peer_normalization(normalization)
     if normalization.get("validation_status") != host_result["validation_status"]:
         raise ArtifactValidationError("peer-normalization validation_status does not match host-result")
     if host_result["peer_status"] != peer_report["status"]:
@@ -2490,10 +2914,30 @@ def validate_completion_artifacts(
         raise ArtifactValidationError(
             "host-synthesis does not bind the current workspace mutation evidence; inspect the diagnostic and resynthesize"
         )
+    helper_claims = load_helper_claims(run_dir, request)
+    expected_claim_matrix = build_claim_matrix(
+        request,
+        host_report,
+        peer_report,
+        helper_claims,
+        adjudicator,
+    )
+    if claim_matrix != expected_claim_matrix:
+        raise ArtifactValidationError(
+            "claim-matrix does not derive from the current host, peer, helper, and adjudicator reports; rerun finish"
+        )
     return peer_report
 
 
 def complete(args: argparse.Namespace) -> int:
+    repo_root = (args.repo_root or default_repo_root()).resolve()
+    run_root = (args.run_root or default_run_root(repo_root)).resolve()
+    run_dir = resolve_run_reference(repo_root, args.run, run_root)
+    with run_operation_lock(run_dir):
+        return _complete_locked(args)
+
+
+def _complete_locked(args: argparse.Namespace) -> int:
     repo_root_for_state = (args.repo_root or default_repo_root()).resolve()
     run_root = (args.run_root or default_run_root(repo_root_for_state)).resolve()
     run_dir = resolve_run_reference(repo_root_for_state, args.run, run_root)
@@ -2703,6 +3147,8 @@ def result(args: argparse.Namespace) -> int:
         "adjudicator_report": read_json_if_exists(run_dir / "adjudicator-report.json"),
         "host_result": read_json_if_exists(run_dir / "host-result.json"),
         "workspace_mutation": read_json_if_exists(run_dir / "workspace-mutation.json"),
+        "cancel_result": read_json_if_exists(run_dir / "cancel-result.json"),
+        "cancel_workspace_mutation": read_json_if_exists(run_dir / "cancel-workspace-mutation.json"),
         "peer_stderr_tail": stderr_tail(run_dir / "peer.stderr.log"),
     }
     print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
@@ -3005,6 +3451,14 @@ def cancel(args: argparse.Namespace) -> int:
     repo_root = (args.repo_root or default_repo_root()).resolve()
     run_root = (args.run_root or default_run_root(repo_root)).resolve()
     run_dir = resolve_run_reference(repo_root, args.run, run_root)
+    with run_operation_lock(run_dir):
+        return _cancel_locked(args)
+
+
+def _cancel_locked(args: argparse.Namespace) -> int:
+    repo_root = (args.repo_root or default_repo_root()).resolve()
+    run_root = (args.run_root or default_run_root(repo_root)).resolve()
+    run_dir = resolve_run_reference(repo_root, args.run, run_root)
     process_info = load_json(run_dir / "peer-process.json")
     request = require_run_request(run_dir)
     try:
@@ -3012,7 +3466,81 @@ def cancel(args: argparse.Namespace) -> int:
     except ArtifactValidationError as exc:
         raise SystemExit(f"invalid peer-process artifact in {run_dir}: {exc}") from exc
     peer_repo_root = Path(process_info["repo_root"]).resolve()
+    cancel_result_path = run_dir / "cancel-result.json"
+    state = load_state_runtime()
+
+    if cancel_result_path.exists():
+        existing = load_json(cancel_result_path)
+        try:
+            validate_cancel_result(existing, request, run_dir)
+        except ArtifactValidationError as exc:
+            raise SystemExit(f"invalid immutable cancel result {cancel_result_path}: {exc}") from exc
+        if preserved_artifact_hashes(run_dir) != existing["preserved_artifacts"]:
+            raise SystemExit(
+                "preserved run evidence changed after cancellation; refusing an idempotent guard transition"
+            )
+        guard_path, active_guard = read_workspace_guard(peer_repo_root)
+        released: str | None = None
+        if active_guard is not None:
+            if active_guard["run_id"] != request["run_id"]:
+                raise SystemExit(
+                    f"Agent Collab workspace guard belongs to run {active_guard['run_id']}, not {request['run_id']}"
+                )
+            wrapper_quiescence_proven = bool(
+                active_guard["phase"] == "ready_for_synthesis"
+                and active_guard["peer_identity"] == process_info["process_identity"]
+            )
+            try:
+                require_process_tree_quiescent(
+                    process_info,
+                    run_dir,
+                    request,
+                    wrapper_quiescence_proven=wrapper_quiescence_proven,
+                )
+            except ArtifactValidationError as exc:
+                raise SystemExit(
+                    f"immutable cancellation exists but process-tree quiescence is unproven: {exc}"
+                ) from exc
+            released = str(release_workspace_guard(peer_repo_root, request["run_id"]))
+        state.upsert_job(
+            run_root,
+            {
+                **job_patch_from_run(run_dir, "cancelled", "cancelled"),
+                "pid": None,
+                "completed_at": existing["completed_at"],
+                "cancel": {
+                    key: existing[key]
+                    for key in (
+                        "forced",
+                        "reason",
+                        "elapsed_seconds",
+                        "minimum_wait_seconds",
+                        "before_minimum_wait",
+                    )
+                },
+                "cancel_result": str(cancel_result_path),
+            },
+        )
+        output = {
+            "schema_version": ARTIFACT_SCHEMA_VERSION,
+            "run_id": request["run_id"],
+            "run_dir": str(run_dir),
+            "outcome": "already_cancelled",
+            "cancel_result": str(cancel_result_path),
+            "workspace_guard": str(guard_path),
+            "workspace_guard_released": released,
+        }
+        print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+
     require_workspace_guard_owner(peer_repo_root, request["run_id"])
+    _, active_guard = read_workspace_guard(peer_repo_root)
+    if active_guard is None or active_guard["run_id"] != request["run_id"]:
+        raise SystemExit("active Agent Collab workspace guard disappeared during cancellation")
+    wrapper_quiescence_proven = bool(
+        active_guard["phase"] == "ready_for_synthesis"
+        and active_guard["peer_identity"] == process_info["process_identity"]
+    )
     pid = int(process_info["pid"])
     force_before_min_wait = bool(getattr(args, "force_before_min_wait", False))
     reason = str(getattr(args, "reason", "") or "").strip()
@@ -3027,6 +3555,33 @@ def cancel(args: argparse.Namespace) -> int:
         and elapsed_seconds is not None
         and elapsed_seconds < MIN_PEER_WAIT_SECONDS
     )
+
+    try:
+        require_process_tree_quiescent(
+            process_info,
+            run_dir,
+            request,
+            wrapper_quiescence_proven=wrapper_quiescence_proven,
+        )
+    except ArtifactValidationError:
+        pass
+    else:
+        peer_runtime = load_peer_runtime()
+        if valid_terminal_peer_report(peer_runtime, run_dir, request):
+            output = {
+                "schema_version": ARTIFACT_SCHEMA_VERSION,
+                "run_id": request["run_id"],
+                "run_dir": str(run_dir),
+                "pid": pid,
+                "outcome": "already_terminal",
+                "message": (
+                    "A valid terminal peer report already exists. The workspace guard was retained; "
+                    "run finish and complete so the evidence is not converted into a cancellation."
+                ),
+            }
+            print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
+            return 1
+
     if before_minimum_wait and not force_before_min_wait:
         output = {
             "run_id": request["run_id"],
@@ -3048,60 +3603,76 @@ def cancel(args: argparse.Namespace) -> int:
             "refusing to release the workspace guard because the tracked process tree is not quiescent:\n"
             + json.dumps(cleanup, ensure_ascii=False, indent=2, sort_keys=True)
         )
-    outcome = "cancelled_quiescent"
+    cancel_reason = reason or ("minimum_wait_elapsed" if peer_alive else "peer_not_running")
     cancel_details = {
         "forced": force_before_min_wait,
-        "reason": reason or ("minimum_wait_elapsed" if not before_minimum_wait else "unspecified"),
+        "reason": cancel_reason,
         "elapsed_seconds": json_number(elapsed_seconds),
         "minimum_wait_seconds": MIN_PEER_WAIT_SECONDS,
         "before_minimum_wait": before_minimum_wait,
     }
-    peer_report_path = run_dir / "peer-report.json"
-    if peer_report_path.exists() and peer_report_path.stat().st_size > 0:
-        preserved = run_dir / "peer.cancelled.raw"
-        try:
-            with peer_report_path.open("rb") as source, preserved.open("xb") as destination:
-                destination.write(source.read(16 * 1024 * 1024 + 1))
-        except FileExistsError:
-            # A prior cancellation attempt owns the original evidence. Never
-            # replace it with a generated cancellation report on retry.
-            pass
-    peer_runtime = load_peer_runtime()
-    write_json(
-        peer_report_path,
-        peer_runtime.failure(
-            "cancelled",
-            "Peer run was cancelled by host.",
-            request,
-            {**cancel_details, "process_cleanup": cleanup},
-        ),
-    )
+    preserved = preserved_artifact_hashes(run_dir)
     try:
-        record_host_workspace_mutation(peer_repo_root, run_dir, request)
+        workspace_mutation = record_cancel_workspace_mutation(peer_repo_root, run_dir, request)
     except (OSError, ValueError, ArtifactValidationError) as exc:
         raise SystemExit(
             f"refusing to release the workspace guard because mutation verification failed: {exc}"
         ) from exc
-    state = load_state_runtime()
+    completed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    cancel_result = {
+        "schema_version": ARTIFACT_SCHEMA_VERSION,
+        "run_id": request["run_id"],
+        "status": "cancelled",
+        "outcome": "cancelled_quiescent",
+        **cancel_details,
+        "peer_was_alive": peer_alive,
+        "process_cleanup": cleanup,
+        "preserved_artifacts": preserved,
+        "workspace_mutation": (
+            str(run_dir / "cancel-workspace-mutation.json")
+            if workspace_mutation is not None
+            else None
+        ),
+        "workspace_mutation_sha256": workspace_mutation_sha256(workspace_mutation),
+        "completed_at": completed_at,
+    }
+    try:
+        validate_cancel_result(cancel_result, request, run_dir)
+    except ArtifactValidationError as exc:
+        raise SystemExit(f"refusing to persist an invalid cancel result: {exc}") from exc
+    if not write_json_once(cancel_result_path, cancel_result):
+        existing = load_json(cancel_result_path)
+        try:
+            validate_cancel_result(existing, request, run_dir)
+        except ArtifactValidationError as exc:
+            raise SystemExit(f"concurrent cancellation wrote an invalid result: {exc}") from exc
+        if existing != cancel_result:
+            raise SystemExit(
+                "a concurrent cancellation committed different immutable evidence; manual inspection is required"
+            )
     state.upsert_job(
         run_root,
         {
             **job_patch_from_run(run_dir, "cancelled", "cancelled"),
             "pid": None,
-            "completed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "completed_at": completed_at,
             "cancel": cancel_details,
+            "cancel_result": str(cancel_result_path),
         },
     )
     guard_path = release_workspace_guard(peer_repo_root, request["run_id"])
     output = {
+        "schema_version": ARTIFACT_SCHEMA_VERSION,
         "run_id": request["run_id"],
         "run_dir": str(run_dir),
         "pid": pid,
-        "outcome": outcome,
+        "outcome": "cancelled_quiescent",
         "forced": force_before_min_wait,
-        "reason": reason or cancel_details["reason"],
+        "reason": cancel_reason,
         "elapsed_seconds": json_number(elapsed_seconds),
         "minimum_wait_seconds": MIN_PEER_WAIT_SECONDS,
+        "cancel_result": str(cancel_result_path),
+        "workspace_mutation": cancel_result["workspace_mutation"],
         "workspace_guard_released": str(guard_path),
     }
     print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
@@ -3111,9 +3682,9 @@ def cancel(args: argparse.Namespace) -> int:
 def settings_from_args(args: argparse.Namespace) -> dict[str, Any]:
     updates: dict[str, Any] = {}
     mapping = {
-        "profile": "profile",
         "local_subagents_allowed": "local_subagents_allowed",
         "max_local_subagents": "max_local_subagents",
+        "adjudicator_enabled": "adjudicator_enabled",
         "safe_mode": "safe_mode",
         "codex_model": "codex_model",
         "codex_effort": "codex_effort",
@@ -3122,7 +3693,6 @@ def settings_from_args(args: argparse.Namespace) -> dict[str, Any]:
         "claude_model": "claude_model",
         "claude_effort": "claude_effort",
         "claude_tools": "claude_tools",
-        "claude_max_turns": "claude_max_turns",
         "history_retained_runs": "history_retained_runs",
     }
     for attr, key in mapping.items():
@@ -3178,10 +3748,10 @@ def choose_bool(label: str, current: bool) -> bool:
         print("Choose yes or no.")
 
 
-def choose_timeout(current: str) -> str:
+def choose_timeout(current: float | int) -> float | int:
     labels = {
-        "2700": "45 minutes",
-        "3600": "60 minutes",
+        2700: "45 minutes",
+        3600: "60 minutes",
     }
     while True:
         current_label = labels.get(current, f"{current} seconds")
@@ -3193,9 +3763,9 @@ def choose_timeout(current: str) -> str:
         if not answer:
             return current
         if answer == "1":
-            return "2700"
+            return 2700
         if answer == "2":
-            return "3600"
+            return 3600
         if answer == "3":
             return normalize_timeout(input("Seconds\n> ").strip())
         try:
@@ -3206,14 +3776,17 @@ def choose_timeout(current: str) -> str:
 
 def interactive_setup(current: dict[str, Any]) -> dict[str, Any]:
     settings = dict(current)
-    settings["profile"] = choose_option("Profile", settings["profile"], ["ultra", "max", "standard"])
     full_permission = not bool(settings["safe_mode"])
     full_permission = choose_bool("Use full peer permissions by default", full_permission)
     settings["safe_mode"] = not full_permission
-    settings["agent_timeout_seconds"] = choose_timeout(str(settings["agent_timeout_seconds"]))
+    settings["agent_timeout_seconds"] = choose_timeout(settings["agent_timeout_seconds"])
     settings["history_retained_runs"] = int(choose_text("Terminal run history retained", str(settings["history_retained_runs"])))
     settings["local_subagents_allowed"] = choose_bool("Allow local subagents", bool(settings["local_subagents_allowed"]))
     settings["max_local_subagents"] = int(choose_text("Maximum local subagents", str(settings["max_local_subagents"])))
+    settings["adjudicator_enabled"] = choose_bool(
+        "Run a host-local advisory adjudicator",
+        bool(settings["adjudicator_enabled"]),
+    )
     settings["codex_model"] = choose_text("Codex peer model", str(settings["codex_model"]))
     settings["codex_effort"] = choose_text(
         "Codex reasoning effort (validated against the live model catalog at launch)",
@@ -3227,7 +3800,6 @@ def interactive_setup(current: dict[str, Any]) -> dict[str, Any]:
         str(settings["claude_effort"]),
     )
     settings["claude_tools"] = choose_text("Claude tool access (`default` or --tools list)", str(settings["claude_tools"]))
-    settings["claude_max_turns"] = choose_text("Claude max turns", str(settings["claude_max_turns"]))
     return normalize_settings(settings, "interactive setup")
 
 
@@ -3380,6 +3952,10 @@ def doctor(args: argparse.Namespace) -> int:
             "ok": False,
             "value": str(run_root / "state.json"),
             "error": str(exc),
+            "recovery": (
+                "Archive this file for evidence and remove or rename it, or choose a fresh "
+                "--run-root; legacy state is not migrated or coerced."
+            ),
         }
     else:
         state_check = {
@@ -3387,6 +3963,22 @@ def doctor(args: argparse.Namespace) -> int:
             "value": str(run_root / "state.json"),
             "jobs": len(state_data["jobs"]),
         }
+
+    schema_errors: list[str] = []
+    schema_paths = sorted((resource_root() / "schemas").glob("*.json"))
+    try:
+        import jsonschema
+    except ImportError:
+        jsonschema = None
+    for schema_path in schema_paths:
+        try:
+            schema_data = STRICT_JSON.load(schema_path, max_bytes=4 * 1024 * 1024)
+            if not isinstance(schema_data, dict):
+                raise ValueError("schema root must be an object")
+            if jsonschema is not None:
+                jsonschema.Draft202012Validator.check_schema(schema_data)
+        except Exception as exc:
+            schema_errors.append(f"{schema_path.name}: {exc}")
 
     def cli_version_check(name: str, path: str | None) -> dict[str, Any]:
         minimum = MIN_CLI_VERSIONS[name]
@@ -3406,6 +3998,10 @@ def doctor(args: argparse.Namespace) -> int:
         "repo_root": {"ok": repo_root.exists(), "value": str(repo_root)},
         "run_root": {"ok": run_root.exists() or path_is_creatable(run_root), "value": str(run_root)},
         "python": {"ok": sys.version_info >= (3, 10), "value": sys.version.split()[0]},
+        "platform": {
+            "ok": os.name == "posix" and all(hasattr(os, name) for name in ("getpgid", "killpg")),
+            "value": {"os_name": os.name, "platform": sys.platform, "supported": ["Linux", "macOS"]},
+        },
         "git": {"ok": shutil.which("git") is not None, "value": shutil.which("git")},
         "claude_cli": cli_version_check("claude", claude_path),
         "codex_cli": cli_version_check("codex", codex_path),
@@ -3414,8 +4010,13 @@ def doctor(args: argparse.Namespace) -> int:
             "value": {"local": resolved["layers"]["local"]["path"], "global": resolved["layers"]["global"]["path"]},
             "errors": settings_errors,
         },
-        "peer_schema": {"ok": peer_runtime.default_schema_path().exists(), "value": str(peer_runtime.default_schema_path())},
-        "timeout_floor_seconds": {"ok": peer_runtime.MIN_AGENT_TIMEOUT_SECONDS >= 2700, "value": peer_runtime.MIN_AGENT_TIMEOUT_SECONDS},
+        "schemas": {
+            "ok": bool(schema_paths) and not schema_errors,
+            "value": [str(path) for path in schema_paths],
+            "errors": schema_errors,
+            "meta_validator": "Draft202012Validator" if jsonschema is not None else "strict JSON only",
+        },
+        "timeout_floor_seconds": {"ok": peer_runtime.MIN_AGENT_TIMEOUT_SECONDS == 60, "value": peer_runtime.MIN_AGENT_TIMEOUT_SECONDS},
         "state_file": state_check,
         "effective_configuration": {
             "ok": not settings_errors,
@@ -3426,7 +4027,7 @@ def doctor(args: argparse.Namespace) -> int:
                 "uses_built_in_model_effort_defaults": (
                     settings["codex_model"] == "gpt-5.6-sol"
                     and settings["codex_effort"] == "max"
-                    and settings["claude_model"] == "claude-opus-4-8"
+                    and settings["claude_model"] == "claude-opus-5"
                     and settings["claude_effort"] == "max"
                 ),
             },
@@ -3445,7 +4046,14 @@ def doctor(args: argparse.Namespace) -> int:
             "ok": True,
             "value": {
                 "codex": ["--ask-for-approval never", "exec --strict-config", "--output-schema", "--output-last-message"],
-                "claude": ["--permission-mode", "--tools", "--disallowedTools", "--json-schema", "--output-format json"],
+                "claude": [
+                    "--permission-mode",
+                    "--tools",
+                    "--disallowedTools",
+                    "--json-schema",
+                    "--output-format json",
+                    "optional per-run --max-turns",
+                ],
             },
         },
     }
@@ -3471,7 +4079,12 @@ def build_parser() -> argparse.ArgumentParser:
     start_parser.add_argument("--brief")
     start_parser.add_argument("--brief-file", type=Path)
     start_parser.add_argument("--edit-allowed", action="store_true")
-    start_parser.add_argument("--profile", choices=["standard", "max", "ultra"])
+    start_parser.add_argument(
+        "--adjudicator",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Override the host-local advisory adjudicator for this run.",
+    )
     start_parser.add_argument("--peer-model", help="Override the resolved peer model for this run.")
     start_parser.add_argument(
         "--peer-effort",
@@ -3484,7 +4097,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override online research for this run.",
     )
     start_parser.add_argument("--max-local-subagents", type=int)
-    start_parser.add_argument("--no-local-subagents", action="store_true")
+    start_parser.add_argument(
+        "--local-subagents",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Override native local helper availability for this run.",
+    )
+    start_parser.add_argument(
+        "--safe-mode",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Override the resolved permission posture for this run.",
+    )
+    start_parser.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=None,
+        help="Override the hard finite peer deadline for this run (60-86400 seconds).",
+    )
+    start_parser.add_argument(
+        "--claude-max-turns",
+        type=int,
+        help="Explicitly opt into a positive Claude CLI turn cap for this run.",
+    )
     start_parser.add_argument("--run-id")
     start_parser.add_argument("--run-root", type=Path)
     start_parser.add_argument("--repo-root", type=Path)
@@ -3512,9 +4147,9 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument("--dry-run", action="store_true", help="Show changes without writing or removing settings files.")
     setup_parser.add_argument("--print-env", action="store_true", help="Include equivalent environment variables in output.")
     setup_parser.add_argument("--reset", choices=sorted(RESET_SCOPES), help="Remove local, global, or all Agent Collab settings.")
-    setup_parser.add_argument("--profile", choices=sorted(PROFILE_CHOICES))
     setup_parser.add_argument("--local-subagents-allowed", action=argparse.BooleanOptionalAction)
     setup_parser.add_argument("--max-local-subagents", type=int)
+    setup_parser.add_argument("--adjudicator-enabled", action=argparse.BooleanOptionalAction)
     setup_parser.add_argument("--timeout-seconds", type=float)
     setup_parser.add_argument("--history-retained-runs", type=int)
     setup_parser.add_argument("--clear-history", action="store_true", help="Clear old run history after setup.")
@@ -3532,7 +4167,6 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument("--claude-model")
     setup_parser.add_argument("--claude-effort")
     setup_parser.add_argument("--claude-tools")
-    setup_parser.add_argument("--claude-max-turns")
     setup_parser.add_argument("--repo-root", type=Path)
     setup_parser.set_defaults(func=setup)
 

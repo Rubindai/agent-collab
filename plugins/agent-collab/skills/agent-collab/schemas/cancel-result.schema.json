@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.agent-collab/cancel-result.schema.json",
+  "title": "Agent Collab Cancellation Result v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "status",
+    "outcome",
+    "forced",
+    "reason",
+    "elapsed_seconds",
+    "minimum_wait_seconds",
+    "before_minimum_wait",
+    "peer_was_alive",
+    "process_cleanup",
+    "preserved_artifacts",
+    "workspace_mutation",
+    "workspace_mutation_sha256",
+    "completed_at"
+  ],
+  "properties": {
+    "schema_version": {"const": "2.0"},
+    "run_id": {"type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9._-]+$"},
+    "status": {"const": "cancelled"},
+    "outcome": {"const": "cancelled_quiescent"},
+    "forced": {"type": "boolean"},
+    "reason": {"type": "string", "minLength": 1},
+    "elapsed_seconds": {"type": ["number", "null"], "minimum": 0},
+    "minimum_wait_seconds": {"const": 60},
+    "before_minimum_wait": {"type": "boolean"},
+    "peer_was_alive": {"type": "boolean"},
+    "process_cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["quiescent", "provider", "wrapper"],
+      "properties": {
+        "quiescent": {"const": true},
+        "provider": {"$ref": "#/$defs/cleanup"},
+        "wrapper": {"$ref": "#/$defs/cleanup"}
+      }
+    },
+    "preserved_artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "peer_report",
+        "peer_raw",
+        "peer_normalization",
+        "host_result",
+        "host_synthesis",
+        "claim_matrix"
+      ],
+      "properties": {
+        "peer_report": {"$ref": "#/$defs/hashOrNull"},
+        "peer_raw": {"$ref": "#/$defs/hashOrNull"},
+        "peer_normalization": {"$ref": "#/$defs/hashOrNull"},
+        "host_result": {"$ref": "#/$defs/hashOrNull"},
+        "host_synthesis": {"$ref": "#/$defs/hashOrNull"},
+        "claim_matrix": {"$ref": "#/$defs/hashOrNull"}
+      }
+    },
+    "workspace_mutation": {
+      "anyOf": [
+        {"type": "string", "minLength": 1},
+        {"type": "null"}
+      ]
+    },
+    "workspace_mutation_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "completed_at": {"type": "string", "minLength": 1}
+  },
+  "$defs": {
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["outcome", "quiescent"],
+      "properties": {
+        "outcome": {"type": "string", "minLength": 1},
+        "quiescent": {"const": true},
+        "pgid": {"type": "integer", "minimum": 1},
+        "details": {"type": "string", "minLength": 1}
+      }
+    },
+    "hashOrNull": {
+      "anyOf": [
+        {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        {"type": "null"}
+      ]
+    }
+  }
+}

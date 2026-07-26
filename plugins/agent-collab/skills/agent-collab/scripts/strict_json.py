@@ -6,11 +6,79 @@ import math
 import os
 import tempfile
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, TextIO
 
 
 class StrictJSONError(ValueError):
     pass
+
+
+PRIVATE_DIRECTORY_MODE = 0o700
+PRIVATE_FILE_MODE = 0o600
+
+
+def ensure_private_directory(path: Path) -> Path:
+    """Create a runtime directory and force an owner-only POSIX mode."""
+
+    path.mkdir(parents=True, exist_ok=True, mode=PRIVATE_DIRECTORY_MODE)
+    if os.name == "posix":
+        os.chmod(path, PRIVATE_DIRECTORY_MODE)
+    return path
+
+
+def open_private_text(path: Path) -> TextIO:
+    """Open a private text artifact without following a final-component symlink."""
+
+    ensure_private_directory(path.parent)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, PRIVATE_FILE_MODE)
+    try:
+        if os.name == "posix":
+            os.fchmod(descriptor, PRIVATE_FILE_MODE)
+        return os.fdopen(descriptor, "w", encoding="utf-8")
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def write_text(path: Path, text: str) -> None:
+    """Atomically publish owner-only UTF-8 text."""
+
+    if not isinstance(text, str):
+        raise TypeError("text artifact must be a string")
+    ensure_private_directory(path.parent)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary_path = Path(temporary_name)
+    try:
+        if os.name == "posix":
+            os.fchmod(descriptor, PRIVATE_FILE_MODE)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = -1
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+        if os.name == "posix":
+            os.chmod(path, PRIVATE_FILE_MODE)
+        fsync_directory(path.parent)
+    except BaseException:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary_path.unlink(missing_ok=True)
+        raise
+
+
+def fsync_directory(path: Path) -> None:
+    try:
+        directory_fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
 
 
 def _object_from_pairs(pairs: Iterable[tuple[str, Any]]) -> dict[str, Any]:
@@ -88,24 +156,21 @@ def dumps(value: Any, *, indent: int | None = 2, sort_keys: bool = True) -> str:
 
 
 def write(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(path.parent)
     payload = dumps(value) + "\n"
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temporary_path = Path(temporary_name)
     try:
+        if os.name == "posix":
+            os.fchmod(descriptor, PRIVATE_FILE_MODE)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary_path, path)
-        try:
-            directory_fd = os.open(path.parent, os.O_RDONLY)
-        except OSError:
-            return
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        if os.name == "posix":
+            os.chmod(path, PRIVATE_FILE_MODE)
+        fsync_directory(path.parent)
     except BaseException:
         temporary_path.unlink(missing_ok=True)
         raise

@@ -45,6 +45,8 @@ plugin_root="$repo_root/plugins/agent-collab"
 skill_dir="$plugin_root/skills/agent-collab"
 shared_files=(SKILL.md)
 shared_directories=(scripts references schemas)
+claude_agents_source="$source_dir/agents/claude"
+codex_agent_source="$source_dir/agents/codex/openai.yaml"
 
 if [[ ! -d "$skill_dir" ]]; then
   echo "missing unified plugin skill root: $skill_dir" >&2
@@ -63,13 +65,17 @@ for dirname in "${shared_directories[@]}"; do
     exit 1
   fi
 done
+if [[ ! -d "$claude_agents_source" || ! -f "$codex_agent_source" ]]; then
+  echo "missing canonical host agent assets under $source_dir/agents" >&2
+  exit 1
+fi
 
 # New source-root entries must be classified explicitly so shipped payloads
 # cannot be omitted silently. Runtime state and caches remain source-local.
 while IFS= read -r source_entry; do
   source_name="${source_entry##*/}"
   case "$source_name" in
-    SKILL.md|scripts|references|schemas|runs|settings.local.json|__pycache__)
+    SKILL.md|agents|scripts|references|schemas|runs|settings.local.json|__pycache__)
       ;;
     *)
       echo "unclassified Agent Collab source entry: $source_entry" >&2
@@ -171,6 +177,9 @@ done
 for dirname in "${shared_directories[@]}"; do
   cp -a "$source_dir/$dirname" "$staging_dir/$dirname"
 done
+cp -a "$claude_agents_source" "$staging_dir/claude-agents"
+mkdir -p "$staging_dir/codex-agents"
+cp -a "$codex_agent_source" "$staging_dir/codex-agents/openai.yaml"
 find "$staging_dir" -type d -name __pycache__ -prune -exec rm -rf {} +
 find "$staging_dir" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
 
@@ -195,6 +204,10 @@ if [[ "$check" -eq 0 ]]; then
     rm -rf "$skill_dir/$dirname"
     cp -a "$staging_dir/$dirname" "$skill_dir/$dirname"
   done
+  rm -rf "$plugin_root/agents"
+  cp -a "$staging_dir/claude-agents" "$plugin_root/agents"
+  rm -rf "$skill_dir/agents"
+  cp -a "$staging_dir/codex-agents" "$skill_dir/agents"
   rm -rf \
     "$skill_dir/tools" \
     "$skill_dir/runs" \
@@ -225,6 +238,14 @@ for dirname in "${shared_directories[@]}"; do
     exit 1
   fi
 done
+if ! diff -qr "$staging_dir/claude-agents" "$plugin_root/agents" >/dev/null; then
+  echo "packaged Claude agents are not synchronized with tools/agent-collab/agents/claude" >&2
+  exit 1
+fi
+if ! diff -qr "$staging_dir/codex-agents" "$skill_dir/agents" >/dev/null; then
+  echo "packaged Codex agent metadata is not synchronized with tools/agent-collab/agents/codex" >&2
+  exit 1
+fi
 
 if [[ -e "$skill_dir/runs" || -e "$skill_dir/settings.local.json" ]]; then
   echo "packaged skill must not contain runtime state: $skill_dir" >&2

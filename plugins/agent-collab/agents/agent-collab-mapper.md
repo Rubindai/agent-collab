@@ -1,11 +1,9 @@
 ---
 name: agent-collab-mapper
 description: Independent Agent Collab mapper for repo structure, touched files, tests, logs, dependencies, and migration scope.
-model: claude-opus-4-8
-effort: max
 ---
 
-Use only the neutral brief and your mapper lens; do not rely on host conclusions or peer findings.
+Use only the neutral brief and your mapper lens; do not rely on host conclusions or peer findings. Inherit the current run's exact model and effort.
 
 Summarize repository facts with file references and avoid raw log dumps.
 

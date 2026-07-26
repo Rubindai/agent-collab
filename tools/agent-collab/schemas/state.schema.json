@@ -26,7 +26,7 @@
         "peer",
         "mode",
         "target",
-        "profile",
+        "adjudicator_enabled",
         "status",
         "phase"
       ],
@@ -40,7 +40,7 @@
         "peer": {"enum": ["claude", "codex"]},
         "mode": {"enum": ["review", "research", "design", "plan", "debug"]},
         "target": {"type": "string", "minLength": 1},
-        "profile": {"enum": ["standard", "max", "ultra"]},
+        "adjudicator_enabled": {"type": "boolean"},
         "status": {"enum": ["running", "synthesizing", "completed", "failed", "cancelled"]},
         "phase": {"enum": ["peer_running", "normalizing_peer", "waiting_for_peer", "ready_for_synthesis", "done", "cancelled"]},
         "pid": {"type": ["integer", "null"], "minimum": 1},
@@ -52,7 +52,7 @@
         "peer_stderr": {"type": "string", "minLength": 1},
         "finish_wait_seconds": {
           "type": ["number", "null"],
-          "minimum": 2700,
+          "minimum": 60,
           "maximum": 86430
         },
         "finish_timeout_source": {
@@ -69,6 +69,7 @@
         "workspace_mutation": {"type": "boolean"},
         "summary": {"type": "string"},
         "completed_at": {"type": "string", "minLength": 1},
+        "cancel_result": {"type": "string", "minLength": 1},
         "cancel": {
           "type": "object",
           "additionalProperties": false,
@@ -109,7 +110,18 @@
         },
         {
           "if": {"properties": {"status": {"const": "cancelled"}}, "required": ["status"]},
-          "then": {"properties": {"phase": {"const": "cancelled"}}}
+          "then": {
+            "required": ["cancel", "cancel_result"],
+            "properties": {"phase": {"const": "cancelled"}}
+          },
+          "else": {
+            "not": {
+              "anyOf": [
+                {"required": ["cancel"]},
+                {"required": ["cancel_result"]}
+              ]
+            }
+          }
         }
       ]
     }

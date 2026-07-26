@@ -25,8 +25,8 @@
         "status": {"const": "peer_running"},
         "phase": {"const": "waiting_for_peer"},
         "peer_pid": {"type": "integer", "minimum": 1},
-        "finish_wait_seconds": {"type": "number", "minimum": 2700, "maximum": 86430},
-        "finish_timeout_source": {"type": "string", "minLength": 1},
+        "finish_wait_seconds": {"type": "number", "minimum": 60, "maximum": 86430},
+        "finish_timeout_source": {"enum": ["explicit", "peer_timeout_plus_grace"]},
         "peer_report": {"type": "string", "minLength": 1},
         "message": {"type": "string", "minLength": 1}
       }
@@ -55,12 +55,25 @@
         "run_dir": {"type": "string", "minLength": 1},
         "phase": {"enum": ["ready_for_synthesis", "done"]},
         "peer_status": {"enum": ["ok", "peer_failed"]},
-        "validation_status": {"type": "string", "minLength": 1},
-        "finish_wait_seconds": {"type": "number", "minimum": 2700, "maximum": 86430},
-        "finish_timeout_source": {"type": "string", "minLength": 1},
+        "validation_status": {
+          "enum": [
+            "ok",
+            "invalid_json",
+            "noncanonical_output",
+            "schema_validation_failed",
+            "peer_report_mismatch"
+          ]
+        },
+        "finish_wait_seconds": {"type": "number", "minimum": 60, "maximum": 86430},
+        "finish_timeout_source": {"enum": ["explicit", "peer_timeout_plus_grace"]},
         "normalization": {"type": "string", "minLength": 1},
         "claim_matrix": {"type": "string", "minLength": 1},
-        "adjudicator_report": {"type": "string", "minLength": 1},
+        "adjudicator_report": {
+          "anyOf": [
+            {"type": "string", "minLength": 1},
+            {"type": "null"}
+          ]
+        },
         "workspace_mutation": {"type": ["object", "null"]},
         "workspace_mutation_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "completed_at": {"type": "string", "minLength": 1}

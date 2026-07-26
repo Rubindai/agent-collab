@@ -1,5 +1,30 @@
 # Changelog
 
+## 2.0.0 — 2026-07-26
+
+- Upgrade the default Claude peer from `claude-opus-4-8` to fixed model ID `claude-opus-5` at `max`, require Claude Code 2.1.219+, and keep Fable 5 explicit-only.
+- Stop the entire Agent Collab attempt before run creation when exact model/effort availability is unavailable or unknown, with a user-facing structured attestation and no peer, helper, host-first pass, adjudicator, or fallback launch.
+- Classify Claude quota, rate-limit, authentication, and access failures as explicit unavailability with a bounded provider explanation; retain `unknown` for indeterminate failures.
+- Pin Claude's exact requested model in launch settings, keep overload fallback chains empty, disable automatic refusal model switching, and retain post-run `modelUsage` mismatch detection.
+- Disable nested Claude helper spawning with the documented depth setting, while retaining the finite total `Agent`-call hook and exact inherited helper model.
+- Tune the shared prompt for Opus 5 and GPT-5.6: concise deduplicated reports, explicit scope and stopping conditions, no generic repeated self-verification, and helpers only for sizeable independent workstreams.
+- Remove the hidden default Claude `--max-turns 50` cap. Claude peers now have no turn cap by default and remain bounded by the absolute 2700-second peer deadline; `--claude-max-turns N` is an explicit per-run opt-in and a reached cap is reported as `turn_limit_reached`.
+- Remove the vestigial `profile` setting and replace its only runtime effect with the independent `adjudicator_enabled` setting and per-run `--adjudicator` override.
+- Persist `agent_timeout_seconds` as a strict JSON number, allow finite 60–86400 second deadlines, and retain 2700 seconds as the quality-oriented default.
+- Replace legacy Codex fanout keys with current `agents.enabled` and `agents.max_concurrent_threads_per_session`. Record provider-specific helper semantics instead of claiming that Codex total calls, nesting depth, or per-helper runtime are runtime-enforced.
+- Reject user `codex_config` entries that override Agent Collab-owned model, effort, sandbox, approval, web-research, or helper-control keys.
+- Make cancellation append-only and terminal-aware: preserve peer, normalization, result, synthesis, and claim-matrix evidence; write strict `cancel-result.json` plus separate cancellation mutation evidence; and direct already-terminal runs through `finish` instead of converting them into cancellations.
+- Exclude untracked and ignored `.next` build output from mutation snapshots while continuing to detect tracked `.next` changes through Git status, index, and diff evidence.
+- Audit every persisted and provider launch setting against current OpenAI and Anthropic documentation and installed CLI help, documenting each product decision and use-case tradeoff.
+- Raise the minimum tested Codex CLI to 0.145.0 and Claude Code to 2.1.219+.
+- Make availability attestations short-lived and exact at peer launch, tolerate forward-compatible unrelated Codex catalog metadata while failing closed on a malformed requested row, and preserve the exact selected model and effort for native helpers.
+- Split the portable provider output schema from the canonical peer-report and normalization contracts, then enforce run, origin, host, peer, status, and error relations after provider extraction.
+- Harden lifecycle concurrency with a bounded per-run finalization lock, terminal-state rechecks, derived claim-matrix rebinding, and deterministic finish/complete/cancel race coverage.
+- Write run directories and sensitive artifacts with owner-only POSIX permissions, fail closed on symlink destinations and helper-counter tampering, and reject unsupported non-POSIX peer launch before creating artifacts.
+- Move Codex metadata and Claude helper definitions into canonical `tools/agent-collab/agents/` sources and synchronize them byte-for-byte into the dual-host package.
+- Add explicit one-run safe-mode, timeout, and helper overrides; strengthen mode classification, canonical Codex config validation, Claude tool-sentinel validation, recovery guidance, and full schema validation in `doctor`.
+- Document which provider controls are deliberately not enabled, the procedural limits of independence and adjudication, and the exact boundaries of retention, mutation evidence, provider structured outputs, and installed-package refresh behavior.
+
 ## 1.0.0 — 2026-07-20
 
 - Replace the legacy runtime contract with strict settings and run schema 2.0.

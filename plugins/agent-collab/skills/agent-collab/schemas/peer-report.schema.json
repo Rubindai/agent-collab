@@ -1,4 +1,6 @@
 {
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.agent-collab/peer-report.schema.json",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -25,7 +27,8 @@
     "run_id": {
       "type": "string",
       "minLength": 1,
-      "pattern": "^[A-Za-z0-9._-]+$"
+      "pattern": "^[A-Za-z0-9._-]+$",
+      "not": {"enum": [".", ".."]}
     },
     "origin": {
       "enum": ["claude", "codex"]
@@ -46,7 +49,8 @@
       ]
     },
     "target": {
-      "type": "string"
+      "type": "string",
+      "minLength": 1
     },
     "status": {
       "enum": ["ok", "peer_failed"]
@@ -157,5 +161,36 @@
         }
       ]
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"origin": {"const": "claude"}}, "required": ["origin"]},
+      "then": {"properties": {"host": {"const": "claude"}, "peer": {"const": "codex"}}}
+    },
+    {
+      "if": {"properties": {"origin": {"const": "codex"}}, "required": ["origin"]},
+      "then": {"properties": {"host": {"const": "codex"}, "peer": {"const": "claude"}}}
+    },
+    {
+      "if": {"properties": {"status": {"const": "ok"}}, "required": ["status"]},
+      "then": {"properties": {"error": {"const": null}}}
+    },
+    {
+      "if": {"properties": {"status": {"const": "peer_failed"}}, "required": ["status"]},
+      "then": {
+        "properties": {
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "message", "details"],
+            "properties": {
+              "kind": {"type": "string"},
+              "message": {"type": "string"},
+              "details": {"type": ["string", "null"]}
+            }
+          }
+        }
+      }
+    }
+  ]
 }
