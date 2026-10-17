@@ -90,7 +90,7 @@ def availability_attestation(peer, model, effort):
         "supported_efforts": [effort],
         "source": "claude_cli_probe" if peer == "claude" else "codex_debug_models",
         "checked_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "cli_version": "2.1.219" if peer == "claude" else "0.145.0",
+        "cli_version": "2.1.257" if peer == "claude" else "0.163.0",
         "effort_evidence": "stop_hook_observed" if peer == "claude" else "catalog_advertised",
         "evidence_sha256": "0" * 64,
         "details": "test availability attestation",
@@ -227,7 +227,7 @@ def valid_peer_process(run_dir, repo_root, guard_path, **overrides):
         "started_at": "2026-07-18T00:00:00Z",
         "started_at_epoch": 1784332800.0,
         "peer_timeout_seconds": 2700,
-        "peer_cli_version": "2.1.219",
+        "peer_cli_version": "2.1.257",
         "workspace_guard": str(guard_path),
         "settings": {"local": "local.json", "global": "global.json"},
         "peer_report": str(run_dir / "peer-report.json"),
@@ -419,7 +419,7 @@ class AvailabilityV2Tests(TestCase):
 
         env = {key: "forced" for key in availability.CLAUDE_EFFORT_ENV_OVERRIDES}
         result = availability.check(
-            "claude", "claude-fable-5", "max", "2.1.219", REPO_ROOT, 7,
+            "claude", "claude-fable-5", "max", "2.1.257", REPO_ROOT, 7,
             runner=self.claude_runner("claude-fable-5", "max", captured=captured), env=env,
         )
         self.assertEqual(result["status"], "available")
@@ -445,10 +445,12 @@ class AvailabilityV2Tests(TestCase):
         self.assertEqual(set(probe_settings["hooks"]), {"Stop"})
         self.assertEqual(captured["kwargs"]["timeout"], 7)
         for key in availability.CLAUDE_EFFORT_ENV_OVERRIDES:
-            self.assertNotIn(key, captured["kwargs"]["env"])
+            if key != "CLAUDE_CODE_EFFORT_LEVEL":
+                self.assertNotIn(key, captured["kwargs"]["env"])
+        self.assertEqual(captured["kwargs"]["env"]["CLAUDE_CODE_EFFORT_LEVEL"], "max")
 
         result = availability.check(
-            "claude", "claude-fable-5", "max", "2.1.219", REPO_ROOT, 7,
+            "claude", "claude-fable-5", "max", "2.1.257", REPO_ROOT, 7,
             runner=self.claude_runner(
                 "claude-fable-5", "max", usage_model="claude-opus-5"
             ), env={},
@@ -457,14 +459,14 @@ class AvailabilityV2Tests(TestCase):
         self.assertIn("claude-opus-5", result["details"])
 
         result = availability.check(
-            "claude", "claude-fable-5", "max", "2.1.219", REPO_ROOT, 7,
+            "claude", "claude-fable-5", "max", "2.1.257", REPO_ROOT, 7,
             runner=self.claude_runner("claude-fable-5", "high"), env={},
         )
         self.assertEqual(result["status"], "unavailable")
         self.assertIn("observed_effort=high", result["details"])
 
         result = availability.check(
-            "claude", "claude-opus-5", "max", "2.1.219", REPO_ROOT, 7,
+            "claude", "claude-opus-5", "max", "2.1.257", REPO_ROOT, 7,
             runner=self.claude_runner(
                 "claude-opus-5", "max", usage_model="claude-haiku-4-5-20251001"
             ), env={},
@@ -475,7 +477,7 @@ class AvailabilityV2Tests(TestCase):
         availability = load_availability()
         captured = {}
         result = availability.check(
-            "claude", "claude-opus-5", "ultracode", "2.1.219", REPO_ROOT, 7,
+            "claude", "claude-opus-5", "ultracode", "2.1.257", REPO_ROOT, 7,
             runner=self.claude_runner(
                 "claude-opus-5", "xhigh", captured=captured
             ), env={},
@@ -485,9 +487,10 @@ class AvailabilityV2Tests(TestCase):
         self.assertIn("effective provider effort xhigh", result["details"])
         self.assertEqual(result["supported_efforts"], ["ultracode"])
         self.assertEqual(captured["command"][captured["command"].index("--effort") + 1], "ultracode")
+        self.assertEqual(captured["kwargs"]["env"]["CLAUDE_CODE_EFFORT_LEVEL"], "xhigh")
 
         result = availability.check(
-            "claude", "claude-fable-5", "xhigh", "2.1.219", REPO_ROOT, 7,
+            "claude", "claude-fable-5", "xhigh", "2.1.257", REPO_ROOT, 7,
             runner=self.claude_runner("claude-fable-5", "xhigh"), env={},
         )
         self.assertEqual(result["status"], "available")
@@ -505,13 +508,13 @@ class AvailabilityV2Tests(TestCase):
             raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
 
         result = availability.check(
-            "claude", "claude-opus-5", "max", "2.1.219", REPO_ROOT, 3,
+            "claude", "claude-opus-5", "max", "2.1.257", REPO_ROOT, 3,
             runner=timed_out, env={},
         )
         self.assertEqual(result["status"], "unknown")
         missing = lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="", stderr="")
         result = availability.check(
-            "claude", "claude-opus-5", "max", "2.1.219", REPO_ROOT, 3,
+            "claude", "claude-opus-5", "max", "2.1.257", REPO_ROOT, 3,
             runner=missing, env={},
         )
         self.assertEqual(result["status"], "unknown")
@@ -520,7 +523,7 @@ class AvailabilityV2Tests(TestCase):
             returncode=1, stdout="", stderr="effort is not supported for this model"
         )
         result = availability.check(
-            "claude", "claude-fable-5", "max", "2.1.219", REPO_ROOT, 3,
+            "claude", "claude-fable-5", "max", "2.1.257", REPO_ROOT, 3,
             runner=rejected, env={},
         )
         self.assertEqual(result["status"], "unavailable")
@@ -545,7 +548,7 @@ class AvailabilityV2Tests(TestCase):
             )
 
         quota = availability.check(
-            "claude", "claude-opus-5", "max", "2.1.219", REPO_ROOT, 3,
+            "claude", "claude-opus-5", "max", "2.1.257", REPO_ROOT, 3,
             runner=provider_error(429, "You've hit your weekly limit; resets soon"), env={},
         )
         self.assertEqual(quota["status"], "unavailable")
@@ -553,14 +556,14 @@ class AvailabilityV2Tests(TestCase):
         self.assertIn("weekly limit", quota["details"])
 
         denied = availability.check(
-            "claude", "claude-opus-5", "max", "2.1.219", REPO_ROOT, 3,
+            "claude", "claude-opus-5", "max", "2.1.257", REPO_ROOT, 3,
             runner=provider_error(403, "Model access denied"), env={},
         )
         self.assertEqual(denied["status"], "unavailable")
         self.assertIn("API status 403", denied["details"])
 
         provider_fault = availability.check(
-            "claude", "claude-opus-5", "max", "2.1.219", REPO_ROOT, 3,
+            "claude", "claude-opus-5", "max", "2.1.257", REPO_ROOT, 3,
             runner=provider_error(500, "Temporary provider fault"), env={},
         )
         self.assertEqual(provider_fault["status"], "unknown")
@@ -701,7 +704,12 @@ class PeerV2Tests(TestCase):
             REPO_ROOT,
             PEER_SCHEMA,
         )
-        self.assertIn("helpers must inherit this peer's exact model and effort", codex_helpers)
+        self.assertIn("Helpers must use this peer's exact model and effective effort", codex_helpers)
+        self.assertIn("at most 8 total helper spawn calls", codex_helpers)
+        self.assertIn("fresh contexts without parent conversation history", codex_helpers)
+        self.assertIn("Do not select custom agents", codex_helpers)
+        writable = peer.build_prompt(request(edit_allowed=True), REPO_ROOT, PEER_SCHEMA)
+        self.assertIn("disjoint writable paths and one integration owner", writable)
 
     def test_claude_command_exact_defaults_and_full_capability(self):
         peer = load_peer()
@@ -740,7 +748,7 @@ class PeerV2Tests(TestCase):
         ).args
         self.assertEqual(safe[safe.index("--permission-mode") + 1], "plan")
         self.assertEqual(safe[safe.index("--tools") + 1], "Read,Grep")
-        self.assertEqual(safe[safe.index("--disallowedTools") + 1], "WebSearch,WebFetch")
+        self.assertEqual(safe[safe.index("--disallowedTools") + 1], "WebSearch,WebFetch,Agent(fork)")
 
     def test_codex_command_has_current_global_flag_shape(self):
         peer = load_peer()
@@ -754,6 +762,21 @@ class PeerV2Tests(TestCase):
         self.assertIn("--json", args)
         self.assertEqual(args[-1], "-")
         self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", args)
+
+    def test_codex_helper_defaults_follow_exact_per_run_selection(self):
+        peer = load_peer()
+        for model, effort in (("gpt-6-astra", "xhigh"), ("gpt-5.6-sol", "max")):
+            with self.subTest(model=model, effort=effort):
+                req = request(peer="codex", host="claude", origin="claude",
+                              peer_model=model, peer_effort=effort, codex_config=["foo=true"])
+                args = peer.build_peer_command(req, "p", REPO_ROOT, PEER_SCHEMA, Path("/tmp/out"), {}).args
+                for key, value in (("agents.default_subagent_model", model),
+                                   ("agents.default_subagent_reasoning_effort", effort)):
+                    setting = f"{key}={json.dumps(value)}"
+                    self.assertGreater(args.index(setting), args.index("foo=true"))
+                    self.assertEqual(args.count(setting), 1)
+                    with self.assertRaises(peer.RequestValidationError):
+                        peer.validate_request({**req, "codex_config": [f'{key}="wrong"']})
 
     def test_codex_safe_offline_and_invariant_order(self):
         peer = load_peer()
@@ -795,6 +818,7 @@ class PeerV2Tests(TestCase):
         self.assertIs(settings["disableAllHooks"], False)
         self.assertEqual(settings["hooks"]["PreToolUse"][0]["matcher"], "Agent")
         self.assertEqual(args[-2:], ["--tools", "default"])
+        self.assertIn("Agent(fork)", args[args.index("--disallowedTools") + 1].split(","))
         self.assertNotIn("--fallback-model", args)
         peer.validate_request(request(peer_effort="ultracode"))
         ultracode_args = peer.build_peer_command(
@@ -825,37 +849,57 @@ class PeerV2Tests(TestCase):
         with self.assertRaises(peer.RequestValidationError):
             peer.validate_request(unavailable)
 
-    def test_claude_effort_environment_is_removed_before_launch(self):
+    def test_claude_helper_environment_overrides_ambient_selection_and_forks(self):
         peer = load_peer()
-        captured = {}
-        envelope = {
-            "type": "result",
-            "structured_output": valid_report(),
-            "modelUsage": {"claude-opus-5-5": {}},
-        }
+        cases = (
+            ("claude-opus-5-5", "xhigh", "xhigh", False),
+            ("claude-fable-5", "max", "max", False),
+            ("claude-opus-5-5", "ultracode", "xhigh", True),
+        )
+        for model, effort, effective_effort, safe_mode in cases:
+            with self.subTest(model=model, effort=effort, safe_mode=safe_mode):
+                captured = {}
+                envelope = {
+                    "type": "result",
+                    "structured_output": valid_report(),
+                    "modelUsage": {model: {}},
+                }
 
-        def fake_run(*args, **kwargs):
-            captured["env"] = kwargs["env"]
-            captured["input"] = kwargs["input"]
-            return SimpleNamespace(returncode=0, stdout=json.dumps(envelope), stderr="")
+                def fake_run(args, **kwargs):
+                    captured.update(args=args, env=kwargs["env"], input=kwargs["input"])
+                    return SimpleNamespace(returncode=0, stdout=json.dumps(envelope), stderr="")
 
-        overrides = {key: "forced" for key in peer.CLAUDE_EFFORT_ENV_OVERRIDES}
-        with (
-            tempfile.TemporaryDirectory() as tmp,
-            mock.patch.object(peer, "git_mutation_snapshot", return_value={"same": True}),
-            mock.patch.object(peer.shutil, "which", return_value="/usr/bin/claude"),
-            mock.patch.object(peer.SAFETY, "sandbox_preflight") as sandbox_preflight,
-            mock.patch.object(peer, "run_peer_command", side_effect=fake_run),
-        ):
-            result = peer.run_request(request(), Path(tmp), env=overrides)
-        self.assertEqual(result["status"], "ok")
-        sandbox_preflight.assert_not_called()
-        for key in peer.CLAUDE_EFFORT_ENV_OVERRIDES:
-            self.assertNotIn(key, captured["env"])
-        self.assertEqual(captured["env"]["CLAUDE_CODE_SUBAGENT_MODEL"], "claude-opus-5-5")
-        self.assertEqual(captured["env"]["CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH"], "1")
-        self.assertIn("<task>", captured["input"])
-        self.assertIn("</task>", captured["input"])
+                overrides = {key: "forced" for key in peer.CLAUDE_EFFORT_ENV_OVERRIDES}
+                overrides.update({
+                    "CLAUDE_CODE_SUBAGENT_MODEL": "claude-haiku-wrong",
+                    "CLAUDE_CODE_SUBAGENT_MODEL_FORCE": "0",
+                    "CLAUDE_CODE_FORK_SUBAGENT": "1",
+                })
+                with (
+                    tempfile.TemporaryDirectory() as tmp,
+                    mock.patch.object(peer, "git_mutation_snapshot", return_value={"same": True}),
+                    mock.patch.object(peer.shutil, "which", return_value="/usr/bin/claude"),
+                    mock.patch.object(peer.SAFETY, "sandbox_preflight") as sandbox_preflight,
+                    mock.patch.object(peer, "run_peer_command", side_effect=fake_run),
+                ):
+                    result = peer.run_request(
+                        request(peer_model=model, peer_effort=effort, safe_mode=safe_mode),
+                        Path(tmp), env=overrides,
+                    )
+                self.assertEqual(result["status"], "ok")
+                sandbox_preflight.assert_not_called()
+                for key in peer.CLAUDE_EFFORT_ENV_OVERRIDES:
+                    if key != "CLAUDE_CODE_EFFORT_LEVEL":
+                        self.assertNotIn(key, captured["env"])
+                self.assertEqual(captured["env"]["CLAUDE_CODE_EFFORT_LEVEL"], effective_effort)
+                self.assertEqual(captured["env"]["CLAUDE_CODE_SUBAGENT_MODEL"], model)
+                self.assertEqual(captured["env"]["CLAUDE_CODE_SUBAGENT_MODEL_FORCE"], "1")
+                self.assertEqual(captured["env"]["CLAUDE_CODE_FORK_SUBAGENT"], "0")
+                self.assertEqual(captured["env"]["CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH"], "1")
+                self.assertEqual(captured["args"][captured["args"].index("--effort") + 1], effort)
+                self.assertEqual(captured["args"][captured["args"].index("--model") + 1], model)
+                self.assertIn("<task>", captured["input"])
+                self.assertIn("</task>", captured["input"])
 
     def test_peer_launch_rejects_a_stale_availability_attestation(self):
         peer = load_peer()
@@ -1580,15 +1624,16 @@ class HostV2Tests(TestCase):
         host = load_host()
         self.assertEqual(host.parse_cli_version("codex-cli 0.144.5"), (0, 144, 5))
         self.assertEqual(host.parse_cli_version("2.1.212 (Claude Code)"), (2, 1, 212))
-        self.assertEqual(host.MIN_CLI_VERSIONS["claude"], (2, 1, 219))
-        old = SimpleNamespace(returncode=0, stdout="codex-cli 0.144.4", stderr="")
+        self.assertEqual(host.MIN_CLI_VERSIONS["codex"], (0, 163, 0))
+        self.assertEqual(host.MIN_CLI_VERSIONS["claude"], (2, 1, 257))
+        old = SimpleNamespace(returncode=0, stdout="codex-cli 0.162.99", stderr="")
         with (
             mock.patch.object(host.shutil, "which", return_value="/usr/bin/codex"),
             mock.patch.object(host.subprocess, "run", return_value=old),
             self.assertRaises(SystemExit),
         ):
             host.require_peer_cli_version("codex")
-        old_claude = SimpleNamespace(returncode=0, stdout="2.1.218 (Claude Code)", stderr="")
+        old_claude = SimpleNamespace(returncode=0, stdout="2.1.256 (Claude Code)", stderr="")
         with (
             mock.patch.object(host.shutil, "which", return_value="/usr/bin/claude"),
             mock.patch.object(host.subprocess, "run", return_value=old_claude),
@@ -1607,7 +1652,7 @@ class HostV2Tests(TestCase):
         stream = io.StringIO()
         with (
             mock.patch.object(host, "load_availability_runtime", return_value=availability),
-            mock.patch.object(host, "require_peer_cli_version", return_value="2.1.219"),
+            mock.patch.object(host, "require_peer_cli_version", return_value="2.1.257"),
             mock.patch.object(availability, "check", return_value=output) as check,
             redirect_stdout(stream),
         ):
@@ -1616,7 +1661,7 @@ class HostV2Tests(TestCase):
         self.assertEqual(parsed, output)
         self.assertEqual(set(parsed), availability.RESULT_KEYS)
         check.assert_called_once_with(
-            "claude", "claude-fable-5", "max", "2.1.219", REPO_ROOT, 5.0
+            "claude", "claude-fable-5", "max", "2.1.257", REPO_ROOT, 5.0
         )
 
     def test_start_unknown_availability_stops_before_guard_run_or_peer(self):
@@ -1642,7 +1687,7 @@ class HostV2Tests(TestCase):
                 model="claude-opus-5-5",
                 effort="xhigh",
                 source="claude_cli_probe",
-                cli_version="2.1.219",
+                cli_version="2.1.257",
                 details="probe metadata unavailable",
                 evidence="test unknown",
             )
@@ -1650,7 +1695,7 @@ class HostV2Tests(TestCase):
             with (
                 mock.patch.object(host, "workspace_guard_path", return_value=guard),
                 mock.patch.object(host, "resolve_settings", return_value=resolved),
-                mock.patch.object(host, "require_peer_cli_version", return_value="2.1.219"),
+                mock.patch.object(host, "require_peer_cli_version", return_value="2.1.257"),
                 mock.patch.object(host, "load_availability_runtime", return_value=availability_runtime),
                 mock.patch.object(host, "acquire_workspace_guard") as acquire,
                 mock.patch.object(host.subprocess, "Popen") as popen,
@@ -1701,7 +1746,7 @@ class HostV2Tests(TestCase):
             availability_runtime = SimpleNamespace(check=check)
             with (
                 mock.patch.object(host, "resolve_settings", return_value=resolved),
-                mock.patch.object(host, "require_peer_cli_version", return_value="2.1.219"),
+                mock.patch.object(host, "require_peer_cli_version", return_value="2.1.257"),
                 mock.patch.object(host, "load_availability_runtime", return_value=availability_runtime),
                 mock.patch.object(host, "acquire_workspace_guard") as acquire,
                 self.assertRaises(SystemExit),
@@ -1779,7 +1824,7 @@ class HostV2Tests(TestCase):
             )
             with (
                 mock.patch.object(host, "resolve_settings", return_value=resolved),
-                mock.patch.object(host, "require_peer_cli_version", return_value="2.1.219"),
+                mock.patch.object(host, "require_peer_cli_version", return_value="2.1.257"),
                 mock.patch.object(host, "load_availability_runtime", return_value=availability_runtime),
                 mock.patch.object(host, "run_snapshot"),
                 mock.patch.object(host, "workspace_guard_path", return_value=root / "active-v2.json"),
@@ -1812,7 +1857,7 @@ class HostV2Tests(TestCase):
         self.assertEqual(saved["helper_enforcement"]["limit_semantics"], "total_agent_calls")
         self.assertIs(saved["adjudicator_enabled"], True)
         self.assertEqual(process["schema_version"], "2.0")
-        self.assertEqual(process["peer_cli_version"], "2.1.219")
+        self.assertEqual(process["peer_cli_version"], "2.1.257")
         self.assertEqual(private_modes["run_dir"], 0o700)
         for name, mode in private_modes.items():
             if name != "run_dir":
@@ -2012,7 +2057,7 @@ class HostV2Tests(TestCase):
             with (
                 mock.patch.object(host, "workspace_guard_path", return_value=guard),
                 mock.patch.object(host, "resolve_settings", return_value=resolved),
-                mock.patch.object(host, "require_peer_cli_version", return_value="2.1.219"),
+                mock.patch.object(host, "require_peer_cli_version", return_value="2.1.257"),
                 mock.patch.object(host, "load_availability_runtime", return_value=availability_runtime),
                 mock.patch.object(host, "run_snapshot"),
                 mock.patch.object(host.subprocess, "Popen", side_effect=OSError("launch failed")),
@@ -2058,7 +2103,7 @@ class HostV2Tests(TestCase):
             with (
                 mock.patch.object(host, "workspace_guard_path", return_value=guard),
                 mock.patch.object(host, "resolve_settings", return_value=resolved),
-                mock.patch.object(host, "require_peer_cli_version", return_value="2.1.219"),
+                mock.patch.object(host, "require_peer_cli_version", return_value="2.1.257"),
                 mock.patch.object(host, "load_availability_runtime", return_value=availability_runtime),
                 mock.patch.object(host, "run_snapshot"),
                 mock.patch.object(host.subprocess, "Popen", return_value=SpawnedProcess()),
@@ -3015,7 +3060,8 @@ class PackageTests(TestCase):
             self.assertNotIn("effort:", frontmatter, path.name)
             self.assertNotIn("tools:", frontmatter, path.name)
             self.assertNotIn("disallowedTools:", frontmatter, path.name)
-            self.assertIn("Inherit the current run's exact model and effort", text, path.name)
+            self.assertIn("Preserve the spawning agent's exact model and effective effort", text, path.name)
+            self.assertIn("without parent conversation history", text, path.name)
             self.assertIn("Do not invoke Agent Collab", text, path.name)
             self.assertIn("hard recursion boundary", text, path.name)
 
@@ -3027,7 +3073,7 @@ class PackageTests(TestCase):
         readme = (REPO_ROOT / "README.md").read_text()
         for token in (
             "gpt-6-astra", "claude-opus-5-5", "claude-fable-5", "--peer-model",
-            "--peer-effort", "Codex CLI 0.145.0", "Claude Code 2.1.219",
+            "--peer-effort", "Codex CLI 0.163.0", "Claude Code 2.1.257",
             "schema 2.0", "danger-full-access", "bypassPermissions",
         ):
             self.assertIn(token, readme)
@@ -3257,14 +3303,23 @@ class PackageTests(TestCase):
             )
             self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
 
-    def test_official_codex_validators_and_isolated_install(self):
+    def test_official_codex_plugin_validator(self):
         codex_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
         plugin_validator = codex_home / "skills/.system/plugin-creator/scripts/validate_plugin.py"
-        skill_validator = codex_home / "skills/.system/skill-creator/scripts/quick_validate.py"
-        if not plugin_validator.is_file() or not skill_validator.is_file():
-            self.skipTest("official Codex validators are unavailable")
-        for command in (
+        if not plugin_validator.is_file():
+            self.skipTest("official Codex plugin validator is unavailable; provision plugin-creator before release")
+        completed = subprocess.run(
             [sys.executable, str(plugin_validator), "plugins/agent-collab"],
+            cwd=REPO_ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+
+    def test_official_codex_skill_validators(self):
+        codex_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+        skill_validator = codex_home / "skills/.system/skill-creator/scripts/quick_validate.py"
+        if not skill_validator.is_file():
+            self.skipTest("official Codex skill validator is unavailable")
+        for command in (
             [sys.executable, str(skill_validator), "tools/agent-collab"],
             [sys.executable, str(skill_validator), "plugins/agent-collab/skills/agent-collab"],
         ):
@@ -3277,6 +3332,7 @@ class PackageTests(TestCase):
             )
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
 
+    def test_official_codex_isolated_install(self):
         if shutil.which("codex") is None:
             self.skipTest("Codex CLI unavailable")
         with tempfile.TemporaryDirectory() as tmp:

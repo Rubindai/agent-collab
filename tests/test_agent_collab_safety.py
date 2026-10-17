@@ -140,18 +140,24 @@ class SafetyTests(unittest.TestCase):
         overrides = safety.codex_fanout_overrides(
             local_subagents_allowed=True,
             max_local_subagents=8,
+            model="gpt-6-astra",
+            effort="xhigh",
         )
         self.assertEqual(
             overrides,
             [
                 "agents.enabled=true",
                 "agents.max_concurrent_threads_per_session=8",
+                'agents.default_subagent_model="gpt-6-astra"',
+                'agents.default_subagent_reasoning_effort="xhigh"',
             ],
         )
         self.assertEqual(
             safety.codex_fanout_overrides(
                 local_subagents_allowed=False,
                 max_local_subagents=8,
+                model="gpt-6-astra",
+                effort="xhigh",
             ),
             ["agents.enabled=false"],
         )

@@ -706,7 +706,9 @@ def load_request(path: Path) -> dict[str, Any]:
 def build_prompt(request: dict[str, Any], repo_root: Path, schema_path: Path) -> str:
     del schema_path
     edit_rule = (
-        "Edits are allowed only when the task brief explicitly delegates them."
+        "Edits are allowed only when the task brief explicitly delegates them. Before parallel edits, "
+        "assign disjoint writable paths and one integration owner; serialize overlapping edits and "
+        "preserve other agents' changes."
         if request["edit_allowed"]
         else "Do not modify files or create working-tree changes."
     )
@@ -719,20 +721,28 @@ def build_prompt(request: dict[str, Any], repo_root: Path, schema_path: Path) ->
     if helper_enforcement["limit_semantics"] == "total_agent_calls":
         subagent_rule = (
             f"Native local subagents are allowed with a runtime limit of {helper_enforcement['limit']} "
-            "Agent calls; helpers must inherit this peer's exact model and effort. Use the fewest helpers "
-            "needed, only for sizeable independent workstreams; do not nest helpers or delegate quick "
-            "lookups, and merge only evidence-backed results."
+            "Agent calls. Resuming through SendMessage does not consume an Agent call; "
+            "all helper work remains subject to the peer deadline."
         )
     elif helper_enforcement["limit_semantics"] == "concurrent_threads":
         subagent_rule = (
             f"Native local subagents are allowed with a provider-enforced concurrency cap of {helper_enforcement['limit']} "
-            "threads; helpers must inherit this peer's exact model and effort. Use the fewest helpers "
-            "needed, only for sizeable independent workstreams; do not nest helpers or delegate quick "
-            "lookups, and merge only evidence-backed results. "
-            "Total helper calls and nesting depth are instruction-level bounds."
+            f"threads. Make at most {helper_enforcement['limit']} total helper spawn calls, even after "
+            "completed threads close. This total-call bound and the ban on nesting are instructions, "
+            "not provider-enforced limits."
         )
     else:
         subagent_rule = "Do not use local subagents."
+    if helper_enforcement["limit_semantics"] != "disabled":
+        subagent_rule += (
+            " Helpers must use this peer's exact model and effective effort. Do not select custom agents that "
+            "override either value; if the exact selection cannot be established, do the work yourself. "
+            "Use the fewest helpers needed for sizeable independent workstreams; do not nest helpers "
+            "or delegate quick lookups. Give each a self-contained neutral task, required inputs, "
+            "edit authorization, remaining deadline, and expected evidence. Start independent reviews "
+            "in fresh contexts without parent conversation history; never use conversation forks for them. "
+            "Reuse helpers for follow-ups and merge only evidence-backed summaries."
+        )
     values = {
         "role": ROLE_BY_MODE[request["mode"]],
         "mode_contract": MODE_CONTRACT_BY_MODE[request["mode"]],
@@ -834,6 +844,8 @@ def build_peer_command(
             disallowed_tools.extend(WEB_TOOLS)
         if agent_limit == 0:
             disallowed_tools.append("Agent")
+        else:
+            disallowed_tools.append("Agent(fork)")
         if disallowed_tools:
             args.extend(["--disallowedTools", ",".join(disallowed_tools)])
         # --tools is variadic in current Claude Code. Keep it last so no later
@@ -879,6 +891,8 @@ def build_peer_command(
     for config in SAFETY.codex_fanout_overrides(
         local_subagents_allowed=request["local_subagents_allowed"],
         max_local_subagents=request["max_local_subagents"],
+        model=request["peer_model"],
+        effort=request["peer_effort"],
     ):
         args.extend(["-c", config])
     args.append("-")
@@ -1501,13 +1515,19 @@ def invoke_peer(
         if request["peer"] == "claude":
             for key in CLAUDE_EFFORT_ENV_OVERRIDES:
                 peer_env.pop(key, None)
+            # Environment effort overrides subagent frontmatter and invocation
+            # values. Ultracode stays a CLI mode with provider effort xhigh.
+            peer_env["CLAUDE_CODE_EFFORT_LEVEL"] = load_availability_runtime().effective_claude_effort(
+                request["peer_effort"]
+            )
             # Agent teams have their own expanding topology. Agent Collab uses
             # the ordinary Agent tool with a shared finite call counter.
             peer_env.pop("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", None)
-            # Claude subagents inherit the run's exact primary model. Override
-            # ambient provider configuration so explicit per-run model choices
-            # (including Fable) cannot be silently replaced for helper calls.
+            # Since 2.1.251 the model variable alone is only a default. The
+            # force control (2.1.257+) also overrides subagent model choices.
             peer_env["CLAUDE_CODE_SUBAGENT_MODEL"] = request["peer_model"]
+            peer_env["CLAUDE_CODE_SUBAGENT_MODEL_FORCE"] = "1"
+            peer_env["CLAUDE_CODE_FORK_SUBAGENT"] = "0"
             # Claude Code 2.1.219 permits nested subagents by default. One
             # layer allows peer helpers while preventing recursive fanout.
             peer_env["CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH"] = "1"

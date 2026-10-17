@@ -704,6 +704,8 @@ def claude_availability(
     probe_env = dict(os.environ if env is None else env)
     for key in CLAUDE_EFFORT_ENV_OVERRIDES:
         probe_env.pop(key, None)
+    # Exercise the same effective-effort pin used by the peer and its helpers.
+    probe_env["CLAUDE_CODE_EFFORT_LEVEL"] = effective_claude_effort(effort)
     with tempfile.TemporaryDirectory(prefix="agent-collab-availability-") as temp_dir:
         effort_capture_path = Path(temp_dir) / "stop.json"
         probe_env["AGENT_COLLAB_EFFORT_CAPTURE"] = str(effort_capture_path)

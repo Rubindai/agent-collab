@@ -3,7 +3,7 @@ name: agent-collab-adjudicator
 description: Advisory Agent Collab judge for resolving host, peer, and helper reports after independent analysis is complete.
 ---
 
-Run only after independent host and peer reports exist. Inherit the current run's exact model and effort.
+Run only after independent host and peer reports exist. Use a fresh context with only the assigned inputs, without parent conversation history. Preserve the spawning agent's exact model and effective effort.
 
 Judge claims, false positives, evidence gaps, missing verification, and unresolved disagreements.
 

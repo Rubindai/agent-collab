@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Raise supported CLI minimums to Codex 0.163.0 and Claude Code 2.1.257 for current helper-selection controls; older versions now fail before run creation.
+- Pin Codex helper model and effort defaults to the selected peer pair, force Claude helper model selection, and pin Claude effective effort, including `xhigh` for explicit `ultracode` runs. Document the remaining Codex custom-agent override boundary.
+- Require fresh independent helper contexts, disable Claude conversation forks, state the numeric Codex total-spawn bound, and assign disjoint write scopes with one integration owner for authorized parallel edits.
+- Separate Codex plugin, skill, and isolated installation checks so an unavailable standalone plugin validator does not suppress the other checks. A skipped official validator remains an outstanding release check.
+
 ## 2.1.0 — 2026-10-13
 
 - Default new Codex peer configurations to `gpt-6-astra` at `xhigh` and Claude peers to `claude-opus-5-5` at `xhigh`. Preserve persisted settings, explicit overrides, strict schema 2.0, and exact-pair availability checks without fallback.

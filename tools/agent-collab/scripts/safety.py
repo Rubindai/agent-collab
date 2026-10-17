@@ -319,17 +319,23 @@ def codex_fanout_overrides(
     *,
     local_subagents_allowed: bool,
     max_local_subagents: int,
+    model: str,
+    effort: str,
 ) -> list[str]:
     if type(local_subagents_allowed) is not bool:
         raise ValueError("local_subagents_allowed must be boolean")
     if type(max_local_subagents) is not int or not 0 <= max_local_subagents <= MAX_LOCAL_SUBAGENTS:
         raise ValueError(f"max_local_subagents must be between 0 and {MAX_LOCAL_SUBAGENTS}")
+    if not isinstance(model, str) or not model.strip() or not isinstance(effort, str) or not effort.strip():
+        raise ValueError("Codex helper model and effort must be non-empty strings")
     enabled = local_subagents_allowed and max_local_subagents > 0
     overrides = [f"agents.enabled={'true' if enabled else 'false'}"]
     if enabled:
-        overrides.append(
-            f"agents.max_concurrent_threads_per_session={max_local_subagents}"
-        )
+        overrides.extend([
+            f"agents.max_concurrent_threads_per_session={max_local_subagents}",
+            f"agents.default_subagent_model={json.dumps(model)}",
+            f"agents.default_subagent_reasoning_effort={json.dumps(effort)}",
+        ])
     return overrides
 
 
