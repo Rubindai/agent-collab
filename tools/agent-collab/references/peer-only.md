@@ -7,7 +7,7 @@ The peer receives one compact, escaped XML prompt with six sections. Use them to
 - `evidence`: available verification signals and the standard for material claims
 - `boundaries`: scope, edit authorization, research availability, provider-specific helper limits, recursion instructions, and the peer deadline
 - `task`: the user's target, relevant context, and constraints
-- `stop`: the completion check and instruction to avoid unrelated expansion
+- `stop`: completion, pending work, assumptions, blockers, and limits on further investigation
 
 Start with the desired result. Include only context that can change the answer and only process constraints needed for independence, verification, or safety. Do not reveal host conclusions, suspected findings, or implementation defense. Do not duplicate `host-request.json` or the response schema in the prompt; provider output controls and runtime validation handle the structured report.
 
@@ -20,7 +20,9 @@ Instruct the peer to:
 5. Use online research only when the resolved request enables it. Otherwise, label freshness-dependent claims unverified.
 6. Respect the edit and local-helper instructions. Use the fewest helpers needed and only for sizeable workstreams that can proceed independently. Every helper must inherit the peer run's exact model and effort selection. Claude total Agent calls and one-layer spawn depth are runtime-bounded; Codex concurrent helper threads are provider-bounded while total calls and nesting depth are instructed limits. Full launch capability and inherited tools do not themselves authorize changes or relax those bounds.
 7. Never invoke Agent Collab, the host product, another cross-product peer, or ask a helper to do so.
-8. Stop when the requested scope is covered and each material claim has concrete evidence or an explicit uncertainty. Do not expand into adjacent work, repeat completed checks, or assume the peer deadline can be extended indefinitely.
+8. Complete authorized work within scope instead of ending with a plan or an offer to continue. Resolve nonblocking ambiguity with stated assumptions. Await started commands and helpers within the deadline. Finish with evidence or explicit uncertainty for material claims; when blocked, report the blocker and uncovered scope. Repeat checks only when new evidence or changes justify them. The deadline remains a hard runtime limit.
 9. Return only the schema-constrained report.
 
 This prompt is advisory instruction to the model. Do not describe it as a sandbox, a provider-system override, or a security boundary: the peer CLI may also load provider-managed instructions, repository guidance, configured tools, and policy. The runtime uses the values persisted in the v2 request for its launch arguments and must not independently re-resolve Agent Collab settings in the peer process.
+
+Prompt review basis (2026-10-13): [GPT-6 Astra prompting](https://developers.openai.com/api/docs/guides/latest-model/gpt-6-astra.md#prompting-best-practices) and [Opus 5.5 prompting](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-opus-5-5). Apply persistence within the resolved authorization and deadline; effort is configured by the CLI, not by requests to reveal reasoning. Provider-specific API continuation or progress-display features are not implemented by this CLI wrapper.

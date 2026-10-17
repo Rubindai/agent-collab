@@ -62,6 +62,7 @@ CLAUDE_EFFORT_ENV_OVERRIDES = (
     "MAX_THINKING_TOKENS",
 )
 CLAUDE_KNOWN_MODEL_EFFORTS = (
+    ("claude-opus-5-5", ("low", "medium", "high", "xhigh", "max", "ultracode")),
     ("claude-opus-5", ("low", "medium", "high", "xhigh", "max", "ultracode")),
     ("claude-opus-4-8", ("low", "medium", "high", "xhigh", "max", "ultracode")),
     ("claude-fable-5", ("low", "medium", "high", "xhigh", "max", "ultracode")),

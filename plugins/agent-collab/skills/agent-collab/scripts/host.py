@@ -44,12 +44,12 @@ SETTING_DEFAULTS: dict[str, Any] = {
     "adjudicator_enabled": True,
     "agent_timeout_seconds": 2700,
     "safe_mode": False,
-    "codex_model": "gpt-5.6-sol",
-    "codex_effort": "max",
+    "codex_model": "gpt-6-astra",
+    "codex_effort": "xhigh",
     "online_research": True,
     "codex_config": [],
-    "claude_model": "claude-opus-5",
-    "claude_effort": "max",
+    "claude_model": "claude-opus-5-5",
+    "claude_effort": "xhigh",
     "claude_tools": "default",
     "history_retained_runs": DEFAULT_HISTORY_RETAINED_RUNS,
 }
@@ -4025,10 +4025,9 @@ def doctor(args: argparse.Namespace) -> int:
                 "claude": {"model": settings["claude_model"], "effort": settings["claude_effort"]},
                 "online_research": settings["online_research"],
                 "uses_built_in_model_effort_defaults": (
-                    settings["codex_model"] == "gpt-5.6-sol"
-                    and settings["codex_effort"] == "max"
-                    and settings["claude_model"] == "claude-opus-5"
-                    and settings["claude_effort"] == "max"
+                    all(settings[key] == SETTING_DEFAULTS[key] for key in (
+                        "codex_model", "codex_effort", "claude_model", "claude_effort"
+                    ))
                 ),
             },
         },

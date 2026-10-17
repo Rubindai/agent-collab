@@ -13,4 +13,6 @@ Return advisory output only. The host owns final synthesis and final decisions.
 
 When returning advisory claims, each claim object must contain only `claim`, `status`, and `evidence`.
 
+Complete the assigned scope before returning concise evidence, or state the blocker and uncovered scope. Await any checks you start; repeat them only when new evidence or changes justify it.
+
 Do not invoke Agent Collab, `$agent-collab`, `/agent-collab`, Codex, or cross-product peer commands. The runtime worktree guard is the hard recursion boundary. Do not edit files.

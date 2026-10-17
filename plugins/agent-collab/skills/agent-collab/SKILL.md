@@ -1,6 +1,6 @@
 ---
 name: agent-collab
-description: Use for high-stakes repo-grounded collaboration where an independent Claude or Codex peer provides a challenge-first second opinion. Trigger for strict review, security-sensitive work, current source-backed research, architecture tradeoffs, implementation plans, debugging, risky verification, or explicit Claude/Codex cross-checking. Avoid routine explanations, simple edits, formatting, naming, and low-risk questions.
+description: Get an independent Claude or Codex second opinion for repo-grounded review, research, design, planning, or debugging when cross-checking is requested or warranted by risk. Avoid routine edits and explanations.
 ---
 
 # Agent Collab
@@ -15,10 +15,10 @@ Default to the configured full-capability launch settings, `adjudicator_enabled=
 
 Resolve the opposite-product peer:
 
-- Codex host: default Claude peer `claude-opus-5` with `max`.
-- Claude host: default Codex peer `gpt-5.6-sol` with `max`.
-- Preserve an explicit user model and effort choice with per-run `--peer-model` and `--peer-effort` flags. Resolve only documented aliases such as “Fable 5 Max” to `claude-fable-5` and `max`.
-- For a Codex peer, do not use a hardcoded effort list. Require the exact pair to appear in the freshly refreshed `codex debug models` catalog. The current `gpt-5.6-sol` entry advertises `ultra`, which enables automatic delegation.
+- Codex host: default Claude peer `claude-opus-5-5` with `xhigh`.
+- Claude host: default Codex peer `gpt-6-astra` with `xhigh`.
+- Preserve an explicit user model and effort choice with per-run `--peer-model` and `--peer-effort` flags. Resolve only documented aliases such as “Opus 5.5 xhigh” to `claude-opus-5-5` and `xhigh`, “Astra xhigh” to `gpt-6-astra` and `xhigh`, or “Fable 5 Max” to `claude-fable-5` and `max`.
+- For a Codex peer, do not use a hardcoded effort list. Require the exact pair to appear in the freshly refreshed `codex debug models` catalog.
 - For a Claude peer, accept `low`, `medium`, `high`, `xhigh`, `max`, or `ultracode`. `ultracode` is an explicit CLI orchestration mode whose effective provider effort is `xhigh`; preserve the requested mode in the attestation while requiring the Stop hook to report `xhigh`.
 - Treat Fable as explicit-only. Never obtain it from built-in, environment, local, or global defaults.
 - Require `start` to attest availability before it creates a run or launches a peer. Codex uses the refreshed model catalog. In a live configuration-reduced Claude probe, API `modelUsage` must include the exact resolved model and the `Stop` hook must report the expected effective effort.
@@ -36,7 +36,7 @@ Create a compact, escaped, neutral brief before host analysis. Follow `reference
 - State the desired outcome first.
 - Include only context that can change the answer.
 - Name the expected output and what done means.
-- Ask for concise, deduplicated output and a concrete stopping condition; do not add generic self-review or repeated-verification instructions.
+- Ask for concise, deduplicated output. Require completion of authorized work, including pending commands and helpers, or an explicit blocker and uncovered scope. Use stated assumptions for nonblocking ambiguity; do not add generic self-review or repeated-verification instructions.
 - Include decisive boundaries such as scope, edit authorization, research availability, and recursion.
 - Give the peer available tests, commands, or other verification signals.
 - Leave room for independent investigation; omit host conclusions, suspected findings, and implementation defense.
@@ -86,7 +86,7 @@ Treat workspace mutation comparison as bounded detective evidence. It covers tra
 
 When Linux safe mode is selected for a Codex peer, the runtime preflights the `bwrap` backend required by Codex read-only sandboxing. If it cannot initialize, `start` emits a structured sandbox-unavailable result before creating a run. A Claude safe-mode peer uses provider-native `plan` permission mode; do not describe `plan` as an OS container. Agent Collab itself neither requests nor preflights `bwrap` for Claude or in full-capability mode, although separately loaded Claude settings can enable Claude's sandbox. Never retry a failed run with a different permission posture.
 
-Use only Agent Collab 2.0.0 strict settings and run schema 2.0. Reject legacy settings, runs, flags, package paths, installers, and output shapes instead of translating or probing them. Require Codex CLI 0.145.0 or newer, Claude Code 2.1.219 or newer, Python 3.10 or newer, and Linux or macOS for peer process supervision. On invalid legacy settings or state, tell the user to archive or remove the artifact and rerun `setup` or use a fresh run root; never coerce it.
+Use only strict settings and run schema 2.0. Reject legacy settings, runs, flags, package paths, installers, and output shapes instead of translating or probing them. Require Codex CLI 0.145.0 or newer, Claude Code 2.1.219 or newer, Python 3.10 or newer, and Linux or macOS for peer process supervision. On invalid legacy settings or state, tell the user to archive or remove the artifact and rerun `setup` or use a fresh run root; never coerce it.
 
 Useful commands:
 

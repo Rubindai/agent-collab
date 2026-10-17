@@ -100,8 +100,8 @@ def availability_attestation(peer, model, effort):
 def request(**overrides):
     peer = overrides.get("peer", "claude")
     host = overrides.get("host", "codex" if peer == "claude" else "claude")
-    model = overrides.get("peer_model", "claude-opus-5" if peer == "claude" else "gpt-5.6-sol")
-    effort = overrides.get("peer_effort", "max")
+    model = overrides.get("peer_model", "claude-opus-5-5" if peer == "claude" else "gpt-6-astra")
+    effort = overrides.get("peer_effort", "xhigh")
     data = {
         "schema_version": "2.0",
         "origin": host,
@@ -324,6 +324,26 @@ class AvailabilityV2Tests(TestCase):
             return SimpleNamespace(returncode=returncode, stdout=json.dumps(envelope), stderr=stderr)
 
         return fake_run
+
+    def test_opus_55_availability_requires_exact_model_and_xhigh(self):
+        availability = load_availability()
+        for observed_model, observed_effort, expected in (
+            ("claude-opus-5-5", "xhigh", "available"),
+            ("claude-opus-5", "xhigh", "unavailable"),
+            ("claude-opus-5-5", "high", "unavailable"),
+        ):
+            with self.subTest(model=observed_model, effort=observed_effort):
+                runner = mock.Mock(wraps=self.claude_runner(
+                    "claude-opus-5-5", observed_effort, usage_model=observed_model
+                ))
+                result = availability.check(
+                    "claude", "claude-opus-5-5", "xhigh", "2.1.296", REPO_ROOT, 5,
+                    runner=runner, env={},
+                )
+                self.assertEqual(result["status"], expected)
+                self.assertEqual(result["requested_model"], "claude-opus-5-5")
+                self.assertEqual(result["requested_effort"], "xhigh")
+                runner.assert_called_once()  # A mismatch must not trigger a fallback.
 
     def test_codex_live_catalog_preserves_model_specific_efforts(self):
         availability = load_availability()
@@ -688,8 +708,8 @@ class PeerV2Tests(TestCase):
         command = peer.build_peer_command(request(), "prompt", REPO_ROOT, PEER_SCHEMA, Path("/tmp/out"), {})
         args = command.args
         self.assertEqual(args[:2], ["claude", "-p"])
-        self.assertEqual(args[args.index("--model") + 1], "claude-opus-5")
-        self.assertEqual(args[args.index("--effort") + 1], "max")
+        self.assertEqual(args[args.index("--model") + 1], "claude-opus-5-5")
+        self.assertEqual(args[args.index("--effort") + 1], "xhigh")
         self.assertEqual(args[args.index("--permission-mode") + 1], "bypassPermissions")
         self.assertEqual(args[args.index("--tools") + 1], "default")
         self.assertNotIn("--max-turns", args)
@@ -727,9 +747,9 @@ class PeerV2Tests(TestCase):
         req = request(peer="codex", host="claude", origin="claude")
         args = peer.build_peer_command(req, "p", REPO_ROOT, PEER_SCHEMA, Path("/tmp/out"), {}).args
         self.assertEqual(args[:6], ["codex", "--ask-for-approval", "never", "exec", "--strict-config", "--ephemeral"])
-        self.assertEqual(args[args.index("--model") + 1], "gpt-5.6-sol")
+        self.assertEqual(args[args.index("--model") + 1], "gpt-6-astra")
         self.assertEqual(args[args.index("--sandbox") + 1], "danger-full-access")
-        self.assertIn('model_reasoning_effort="max"', args)
+        self.assertIn('model_reasoning_effort="xhigh"', args)
         self.assertIn('web_search="live"', args)
         self.assertIn("--json", args)
         self.assertEqual(args[-1], "-")
@@ -744,7 +764,7 @@ class PeerV2Tests(TestCase):
         args = peer.build_peer_command(req, "p", REPO_ROOT, PEER_SCHEMA, Path("/tmp/out"), {}).args
         self.assertEqual(args[args.index("--sandbox") + 1], "read-only")
         self.assertIn('web_search="disabled"', args)
-        self.assertGreater(args.index('model_reasoning_effort="max"'), args.index("foo=true"))
+        self.assertGreater(args.index('model_reasoning_effort="xhigh"'), args.index("foo=true"))
 
     def test_environment_cannot_override_resolved_request(self):
         peer = load_peer()
@@ -755,7 +775,7 @@ class PeerV2Tests(TestCase):
             "AGENT_COLLAB_WEB_RESEARCH": "disabled",
         }
         args = peer.build_peer_command(request(), "p", REPO_ROOT, PEER_SCHEMA, Path("/tmp/out"), env).args
-        self.assertEqual(args[args.index("--model") + 1], "claude-opus-5")
+        self.assertEqual(args[args.index("--model") + 1], "claude-opus-5-5")
         self.assertEqual(args[args.index("--permission-mode") + 1], "bypassPermissions")
 
     def test_current_effort_catalog_and_exact_claude_launch_controls(self):
@@ -769,7 +789,7 @@ class PeerV2Tests(TestCase):
         args = peer.build_peer_command(request(peer_effort="xhigh"), "p", REPO_ROOT, PEER_SCHEMA, Path("/tmp/out"), {}).args
         self.assertEqual(args[args.index("--effort") + 1], "xhigh")
         settings = json.loads(args[args.index("--settings") + 1])
-        self.assertEqual(settings["availableModels"], ["claude-opus-5"])
+        self.assertEqual(settings["availableModels"], ["claude-opus-5-5"])
         self.assertEqual(settings["fallbackModel"], [])
         self.assertIs(settings["switchModelsOnFlag"], False)
         self.assertIs(settings["disableAllHooks"], False)
@@ -811,7 +831,7 @@ class PeerV2Tests(TestCase):
         envelope = {
             "type": "result",
             "structured_output": valid_report(),
-            "modelUsage": {"claude-opus-5": {}},
+            "modelUsage": {"claude-opus-5-5": {}},
         }
 
         def fake_run(*args, **kwargs):
@@ -832,7 +852,7 @@ class PeerV2Tests(TestCase):
         sandbox_preflight.assert_not_called()
         for key in peer.CLAUDE_EFFORT_ENV_OVERRIDES:
             self.assertNotIn(key, captured["env"])
-        self.assertEqual(captured["env"]["CLAUDE_CODE_SUBAGENT_MODEL"], "claude-opus-5")
+        self.assertEqual(captured["env"]["CLAUDE_CODE_SUBAGENT_MODEL"], "claude-opus-5-5")
         self.assertEqual(captured["env"]["CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH"], "1")
         self.assertIn("<task>", captured["input"])
         self.assertIn("</task>", captured["input"])
@@ -851,7 +871,7 @@ class PeerV2Tests(TestCase):
         envelope = {
             "type": "result",
             "structured_output": valid_report(target="A &lt; B &amp;&amp; C &gt; D"),
-            "modelUsage": {"claude-opus-5": {}},
+            "modelUsage": {"claude-opus-5-5": {}},
         }
         completed = SimpleNamespace(returncode=0, stdout=json.dumps(envelope), stderr="")
         with (
@@ -1030,7 +1050,7 @@ class PeerV2Tests(TestCase):
         envelope = {
             "type": "result",
             "structured_output": valid_report(),
-            "modelUsage": {"claude-opus-5": {}},
+            "modelUsage": {"claude-opus-5-5": {}},
         }
         completed = SimpleNamespace(returncode=0, stdout=json.dumps(envelope), stderr="")
         for edit_allowed in (False, True):
@@ -1301,7 +1321,7 @@ class PeerV2Tests(TestCase):
         peer = load_peer()
         bare_claude = {
             **valid_report(),
-            "modelUsage": {"claude-opus-5": {}},
+            "modelUsage": {"claude-opus-5-5": {}},
         }
         with (
             tempfile.TemporaryDirectory() as tmp,
@@ -1347,7 +1367,7 @@ class PeerV2Tests(TestCase):
 
     def test_claude_api_error_preserves_model_usage(self):
         peer = load_peer()
-        envelope = {"type": "result", "is_error": True, "result": "unavailable", "modelUsage": {"claude-opus-5": {}}}
+        envelope = {"type": "result", "is_error": True, "result": "unavailable", "modelUsage": {"claude-opus-5-5": {}}}
         completed = SimpleNamespace(returncode=1, stdout=json.dumps(envelope), stderr="api error")
         with (
             tempfile.TemporaryDirectory() as tmp,
@@ -1358,7 +1378,7 @@ class PeerV2Tests(TestCase):
             result = peer.run_request(request(), Path(tmp))
         self.assertEqual(result["error"]["kind"], "peer_api_error")
         details = json.loads(result["error"]["details"])
-        self.assertEqual(details["modelUsage"], {"claude-opus-5": {}})
+        self.assertEqual(details["modelUsage"], {"claude-opus-5-5": {}})
 
     def test_claude_turn_limit_is_distinct_and_reports_only_an_explicit_cap(self):
         peer = load_peer()
@@ -1420,10 +1440,10 @@ class HostV2Tests(TestCase):
     def test_current_defaults_and_removed_settings(self):
         host = load_host()
         self.assertEqual(host.SETTINGS_SCHEMA_VERSION, "2.0")
-        self.assertEqual(host.SETTING_DEFAULTS["codex_model"], "gpt-5.6-sol")
-        self.assertEqual(host.SETTING_DEFAULTS["codex_effort"], "max")
-        self.assertEqual(host.SETTING_DEFAULTS["claude_model"], "claude-opus-5")
-        self.assertEqual(host.SETTING_DEFAULTS["claude_effort"], "max")
+        self.assertEqual(host.SETTING_DEFAULTS["codex_model"], "gpt-6-astra")
+        self.assertEqual(host.SETTING_DEFAULTS["codex_effort"], "xhigh")
+        self.assertEqual(host.SETTING_DEFAULTS["claude_model"], "claude-opus-5-5")
+        self.assertEqual(host.SETTING_DEFAULTS["claude_effort"], "xhigh")
         self.assertIs(host.SETTING_DEFAULTS["online_research"], True)
         self.assertIs(host.SETTING_DEFAULTS["adjudicator_enabled"], True)
         self.assertEqual(host.SETTING_DEFAULTS["agent_timeout_seconds"], 2700)
@@ -1448,6 +1468,25 @@ class HostV2Tests(TestCase):
                 )
         self.assertEqual(resolved["settings"]["claude_model"], "env")
         self.assertIs(resolved["settings"]["online_research"], False)
+
+    def test_model_upgrade_preserves_existing_v2_model_and_effort_overrides(self):
+        host = load_host()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            global_path, local_path = root / "global.json", root / "local.json"
+            original = complete_settings(
+                host, codex_model="gpt-5.6-sol", codex_effort="max",
+                claude_model="claude-opus-5", claude_effort="max",
+            )
+            host.write_settings_file(local_path, original)
+            original_bytes = local_path.read_bytes()
+            with (
+                mock.patch.object(host, "default_global_settings_path", return_value=global_path),
+                mock.patch.object(host, "default_local_settings_path", return_value=local_path),
+            ):
+                resolved = host.resolve_settings(root, {})
+            self.assertEqual(resolved["settings"], original)
+            self.assertEqual(local_path.read_bytes(), original_bytes)
 
     def test_legacy_and_partial_settings_are_rejected(self):
         host = load_host()
@@ -1534,7 +1573,7 @@ class HostV2Tests(TestCase):
                     root,
                     {"CLAUDE_AGENT_COLLAB_MODEL": "claude-fable-5"},
                 )
-        self.assertEqual(resolved["settings"]["claude_model"], "claude-opus-5")
+        self.assertEqual(resolved["settings"]["claude_model"], "claude-opus-5-5")
         self.assertIn("cannot persist Fable", resolved["environment_errors"][0])
 
     def test_cli_version_parser_and_floor(self):
@@ -1600,8 +1639,8 @@ class HostV2Tests(TestCase):
             unknown = availability.result(
                 status="unknown",
                 peer="claude",
-                model="claude-opus-5",
-                effort="max",
+                model="claude-opus-5-5",
+                effort="xhigh",
                 source="claude_cli_probe",
                 cli_version="2.1.219",
                 details="probe metadata unavailable",
@@ -1620,7 +1659,7 @@ class HostV2Tests(TestCase):
                 host.start(args)
             self.assertIn('"status": "unknown"', str(raised.exception))
             self.assertIn("Agent Collab stopped before run creation or peer launch", str(raised.exception))
-            self.assertIn("claude-opus-5/max", str(raised.exception))
+            self.assertIn("claude-opus-5-5/xhigh", str(raised.exception))
             self.assertIn("No peer, helper, host-first-pass, or adjudicator was started", str(raised.exception))
             acquire.assert_not_called()
             popen.assert_not_called()
@@ -1965,7 +2004,7 @@ class HostV2Tests(TestCase):
                     "local": {"path": "l", "settings": {}, "error": None},
                 },
             }
-            attestation = availability_attestation("claude", "claude-opus-5", "max")
+            attestation = availability_attestation("claude", "claude-opus-5-5", "xhigh")
             availability_runtime = SimpleNamespace(
                 check=lambda *args, **kwargs: attestation,
                 validate_result=lambda *args, **kwargs: None,
@@ -2011,7 +2050,7 @@ class HostV2Tests(TestCase):
                     "local": {"path": "l", "settings": {}, "error": None},
                 },
             }
-            attestation = availability_attestation("claude", "claude-opus-5", "max")
+            attestation = availability_attestation("claude", "claude-opus-5-5", "xhigh")
             availability_runtime = SimpleNamespace(
                 check=lambda *args, **kwargs: attestation,
                 validate_result=lambda *args, **kwargs: None,
@@ -2875,13 +2914,13 @@ class PackageTests(TestCase):
 
     def test_release_versions_match(self):
         version = (REPO_ROOT / "VERSION").read_text().strip()
-        self.assertEqual(version, "2.0.0")
+        self.assertEqual(version, "2.1.0")
         for manifest in (
             CODEX_PLUGIN_ROOT / ".codex-plugin" / "plugin.json",
             CLAUDE_PLUGIN_ROOT / ".claude-plugin" / "plugin.json",
         ):
             self.assertEqual(json.loads(manifest.read_text())["version"], version)
-        self.assertIn("## 2.0.0", (REPO_ROOT / "CHANGELOG.md").read_text())
+        self.assertIn("## 2.1.0", (REPO_ROOT / "CHANGELOG.md").read_text())
 
     def test_marketplaces_are_native_and_do_not_duplicate_version(self):
         codex = json.loads((REPO_ROOT / ".agents/plugins/marketplace.json").read_text())
@@ -2965,7 +3004,7 @@ class PackageTests(TestCase):
         self.assertNotIn("plugins/cache", codex)
         self.assertEqual(CODEX_SKILL_ROOT, CLAUDE_SKILL_ROOT)
         self.assertNotIn("allowed-tools:", frontmatter)
-        for token in ("gpt-5.6-sol", "claude-opus-5", "--peer-model", "--peer-effort"):
+        for token in ("gpt-6-astra", "claude-opus-5-5", "--peer-model", "--peer-effort"):
             self.assertIn(token, codex)
 
     def test_helpers_inherit_exact_run_selection_and_forbid_recursion(self):
@@ -2982,12 +3021,12 @@ class PackageTests(TestCase):
 
     def test_agents_claude_and_readme_document_current_contract(self):
         agents = (REPO_ROOT / "AGENTS.md").read_text()
-        for token in ("gpt-5.6-sol", "claude-opus-5", "schema 2.0", "active-workflow guard"):
+        for token in ("gpt-6-astra", "claude-opus-5-5", "schema 2.0", "active-workflow guard"):
             self.assertIn(token, agents)
         self.assertEqual((REPO_ROOT / "CLAUDE.md").read_text(), "@AGENTS.md\n")
         readme = (REPO_ROOT / "README.md").read_text()
         for token in (
-            "gpt-5.6-sol", "claude-opus-5", "claude-fable-5", "--peer-model",
+            "gpt-6-astra", "claude-opus-5-5", "claude-fable-5", "--peer-model",
             "--peer-effort", "Codex CLI 0.145.0", "Claude Code 2.1.219",
             "schema 2.0", "danger-full-access", "bypassPermissions",
         ):
@@ -3071,7 +3110,7 @@ class PackageTests(TestCase):
             with self.assertRaises(peer_runtime.RequestValidationError):
                 peer_runtime.validate_request(invalid_request)
         jsonschema.validate(
-            availability_attestation("claude", "claude-opus-5", "max"),
+            availability_attestation("claude", "claude-opus-5-5", "xhigh"),
             json.loads((RUNTIME_ROOT / "schemas/availability-attestation.schema.json").read_text()),
         )
         with self.assertRaises(jsonschema.ValidationError):

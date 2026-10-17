@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.1.0 — 2026-10-13
+
+- Default new Codex peer configurations to `gpt-6-astra` at `xhigh` and Claude peers to `claude-opus-5-5` at `xhigh`. Preserve persisted settings, explicit overrides, strict schema 2.0, and exact-pair availability checks without fallback.
+- Refresh peer, host, and helper instructions against the GPT-6 Astra and Opus 5.5 guides: complete authorized work, await pending checks, state blockers and uncovered scope, and repeat verification only when justified.
+- Tighten skill discovery and rewrite `AGENTS.md` into focused repository rules while preserving runtime, authorization, packaging, and release contracts.
+
 ## 2.0.0 — 2026-07-26
 
 - Upgrade the default Claude peer from `claude-opus-4-8` to fixed model ID `claude-opus-5` at `max`, require Claude Code 2.1.219+, and keep Fable 5 explicit-only.

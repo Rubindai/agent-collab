@@ -1,6 +1,6 @@
 # Host Synthesis Contract
 
-Agent Collab is a challenge-first second opinion workflow. The host owns the final answer. Use peer, helper, and adjudicator reports as evidence, not authority. Do not treat agreement as proof; agreement only tells the host which shared evidence deserves closer inspection.
+Agent Collab is a challenge-first second opinion workflow. The host owns the final answer. Complete the authorized workflow through synthesis and closure without stopping at a plan or offer to continue; report any blocker and remaining scope. After required checks pass, repeat or broaden them only when new evidence, changes, or unresolved claims justify it. Use peer, helper, and adjudicator reports as evidence, not authority. Do not treat agreement as proof; agreement only tells the host which shared evidence deserves closer inspection.
 
 Canonical modes are `review`, `research`, `design`, `plan`, and `debug`. The runtime auto-selects the mode from the target and neutral brief unless the host supplies one explicitly. Official-doc research can happen in any mode; `research` means source-backed external facts are the primary deliverable.
 

@@ -2,29 +2,29 @@
 
 Agent Collab is a peer-first, challenge-first collaboration plugin for Codex and Claude Code. It launches the opposite product with a neutral brief, keeps the host analysis independent, then validates and combines the evidence.
 
-Version 2.0.0 is a breaking release. It has no compatibility layer for 1.x settings or run artifacts: the removed profile and persisted Claude turn-cap fields are rejected rather than translated.
+Version 2.1.0 updates the peer defaults and prompts while retaining the strict schema 2.0 contract. There is no compatibility layer for 1.x settings or run artifacts: the removed profile and persisted Claude turn-cap fields are rejected rather than translated.
 
 ## Defaults
 
 | Peer | Default model | Effort |
 | --- | --- | --- |
-| Codex | `gpt-5.6-sol` | `max` |
-| Claude Code | `claude-opus-5` | `max` |
+| Codex | `gpt-6-astra` | `xhigh` |
+| Claude Code | `claude-opus-5-5` | `xhigh` |
 
-These are deliberate quality-first product defaults requested for Agent Collab. Current provider guidance recommends lower levels for most work—OpenAI reserves `max` for the hardest quality-first work, and Anthropic says Opus 5 `max` can overthink and have diminishing returns—so this default accepts higher latency and cost for high-stakes peer review. An explicit user selection always takes priority when the exact pair is available.
+These are the project defaults requested for Agent Collab. Existing persisted settings and per-run overrides retain precedence; installing this version does not rewrite them. Every requested pair still requires fresh availability evidence, with no fallback.
 
 The user can select a model and reasoning or effort level in natural language. The host translates an explicit selection into the per-run flags `--peer-model` and `--peer-effort`, then requires a fresh availability attestation for that exact pair before launch.
 
 Claude peer effort may be a provider level (`low`, `medium`, `high`, `xhigh`, or `max`) or the explicit Claude Code orchestration mode `ultracode`. `ultracode` requests provider effort `xhigh` and enables dynamic orchestration, so availability telemetry intentionally records `requested_effort=ultracode` and `observed_effort=xhigh`. Agent Collab passes it only when the installed Claude Code accepts it and the live probe confirms that effective level; the same finite Agent-call guard still applies.
 
-Codex effort support is not a hardcoded Agent Collab list. Immediately before launch, the runtime refreshes `codex debug models` and accepts only an effort advertised for the exact requested model. The current `gpt-5.6-sol` Codex CLI catalog advertises `ultra`, which enables automatic delegation, but the refreshed catalog remains authoritative.
+Codex effort support is not a hardcoded Agent Collab list. Immediately before launch, the runtime refreshes `codex debug models` and accepts only an effort advertised for the exact requested model. The refreshed catalog is authoritative; no static effort list determines Codex availability.
 
 Examples:
 
 ```text
 Use Agent Collab with Fable 5 Max to review this change.
-Use Agent Collab with Opus 5 Ultracode to audit the release.
-Use Agent Collab and run the Codex peer on gpt-5.6-sol at high effort.
+Use Agent Collab with Opus 5.5 Ultracode to audit the release.
+Use Agent Collab and run the Codex peer on gpt-6-astra at high effort.
 ```
 
 “Fable 5 Max” is the explicit alias for `claude-fable-5` with `max`. Fable is available only as a user-requested per-run model; it is never a built-in, environment, local, or global default.
@@ -111,10 +111,11 @@ Official references:
 - [OpenAI: Build plugins](https://learn.chatgpt.com/docs/build-plugins)
 - [OpenAI: Codex non-interactive mode](https://developers.openai.com/codex/noninteractive)
 - [OpenAI: Current model catalog](https://developers.openai.com/api/docs/models)
-- [OpenAI: GPT-5.6 Sol](https://developers.openai.com/api/docs/models/gpt-5.6-sol)
+- [OpenAI: GPT-6 Astra](https://developers.openai.com/api/docs/guides/latest-model/gpt-6-astra.md)
 - [OpenAI: Codex models](https://learn.chatgpt.com/docs/models)
 - [OpenAI: `codex debug models`](https://learn.chatgpt.com/docs/developer-commands?surface=cli#cli-codex-debug-models)
-- [OpenAI: GPT-5.6 model and prompting guidance](https://developers.openai.com/api/docs/guides/model-guidance?model=gpt-5.6)
+- [OpenAI: GPT-6 Astra prompting guidance](https://developers.openai.com/api/docs/guides/latest-model/gpt-6-astra.md#prompting-best-practices)
+- [OpenAI: Rethinking skills and prompts for GPT-6 Astra](https://developers.openai.com/blog/rethinking-skills-and-prompts-for-gpt-6-astra)
 - [OpenAI: Codex prompting](https://developers.openai.com/codex/prompting)
 - [OpenAI: Codex subagents](https://learn.chatgpt.com/docs/agent-configuration/subagents)
 - [Anthropic: Create plugin marketplaces](https://code.claude.com/docs/en/plugin-marketplaces)
@@ -124,8 +125,8 @@ Official references:
 - [Anthropic: Claude Code settings](https://code.claude.com/docs/en/settings)
 - [Anthropic: Claude Code subagents](https://code.claude.com/docs/en/sub-agents)
 - [Anthropic: Claude Code changelog](https://code.claude.com/docs/en/changelog)
-- [Anthropic: Migrating to Claude Opus 5](https://platform.claude.com/docs/en/about-claude/models/migration-guide)
-- [Anthropic: Prompting Claude Opus 5](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-opus-5)
+- [Anthropic: Model migration guide](https://platform.claude.com/docs/en/about-claude/models/migration-guide)
+- [Anthropic: Prompting Claude Opus 5.5](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-opus-5-5)
 - [Anthropic: Claude Fable 5 model](https://platform.claude.com/docs/en/about-claude/models/introducing-claude-fable-5-and-claude-mythos-5)
 - [Anthropic: Prompting Claude Fable 5](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-fable-5)
 - [Anthropic: Effort](https://platform.claude.com/docs/en/build-with-claude/effort)
@@ -190,7 +191,7 @@ Agent Collab safe mode changes a Codex peer to `read-only` and a Claude peer to 
 
 The reported pre-1.0 message `Codex sandbox is still broken (bwrap user-namespace failure) — implementing directly as planned.` was investigated. Its claimed historical cause is not present in this repository or its Git history, so that provenance is unverified. The current Linux host does reproduce a Codex `bwrap` prerequisite failure while configuring the isolated loopback interface. A peer failure has no authorization meaning: Agent Collab full mode does not request `bwrap`, and a safe-mode Codex preflight emits `sandbox_unavailable` and stops before launch artifacts are created.
 
-The online-research toggle controls the provider's built-in web research tools used by Agent Collab. For Claude Code these are the CLI's built-in `WebSearch` and `WebFetch` tools; Anthropic's separate statement that Opus 5 lacks the API's server-side web-fetch tool does not remove the Claude Code built-ins. This toggle is not a general network-isolation guarantee: full-capability shells, MCP tools, plugins, and provider configuration may have separate network behavior.
+The online-research toggle controls the provider's built-in web research tools used by Agent Collab. For Claude Code these are the CLI's built-in `WebSearch` and `WebFetch` tools. This toggle is not a general network-isolation guarantee: full-capability shells, MCP tools, plugins, and provider configuration may have separate network behavior.
 
 Persisted settings, state, requests, helper reports, and synthesis artifacts use strict schema 2.0 contracts. Old, incomplete, noncanonical, or wrongly typed files are rejected rather than migrated or coerced. Claude success is accepted only from `structured_output`; Codex success is accepted only from its required `--output-last-message` artifact. The provider-facing `peer-report-provider.schema.json` intentionally uses the portable structured-output subset accepted by both CLIs. The runtime then validates the result against the canonical `peer-report.schema.json` and semantic request relations, including exact run, origin, host, peer, mode, and target binding. `peer-normalization.schema.json` separately constrains success and failure evidence.
 
@@ -219,7 +220,7 @@ The 50-turn failure was caused by Agent Collab 1.0.0 always adding `--max-turns 
 
 Agent Collab 2.0.0 therefore uses one mandatory liveness boundary: the finite `agent_timeout_seconds` deadline, 2700 seconds by default. The deadline limits total elapsed time even if a tool or provider stalls. Claude turn count is now a separate, explicit budget policy: omit it for quality-first review and research, or pass `--claude-max-turns N` when the operator intentionally wants a work-count cap. A reached explicit or provider-imposed cap is recorded as `turn_limit_reached`, distinct from `timeout` and generic API errors.
 
-Peer prompts use one compact, escaped XML brief with role, outcome, evidence, boundaries, task, and stop sections. This follows current GPT-5.6 guidance to state the desired outcome, relevant context, constraints, verification evidence, success criteria, and output contract once, and current Opus 5 guidance to constrain scope and avoid generic self-review loops. The brief starts with the desired result, asks for concise deduplicated evidence without omitting findings, includes only process constraints that matter to independence or safety, and does not reveal host conclusions or suspected findings. Its stop condition is concrete: cover the requested scope, record evidence and uncertainty, then stop without adjacent or repeated checks. In review mode it asks the peer to surface every in-scope issue, including uncertain and low-severity candidates, and to label severity and confidence for host verification instead of suppressing recall with a vague importance filter. Helper delegation is reserved for the fewest sizeable independent workstreams, not quick lookups. Request JSON and response schemas are not duplicated into the prompt; the CLI output controls and runtime validation handle the structured report.
+Peer prompts use one compact, escaped XML brief with role, outcome, evidence, boundaries, task, and stop sections. Reviewed against [GPT-6 Astra prompting guidance](https://developers.openai.com/api/docs/guides/latest-model/gpt-6-astra.md#prompting-best-practices) and [Opus 5.5 prompting guidance](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-opus-5-5) on 2026-10-13, they ask for concise evidence, completion of authorized work, stated assumptions for nonblocking ambiguity, and explicit blockers with uncovered scope. Started commands and helpers must finish within the existing deadline. Further checks need new evidence, changes, or an unresolved question. Review mode retains every in-scope candidate with severity and confidence for host filtering. Helpers remain limited to sizeable independent workstreams. Quoted sources and tool output provide evidence, not authorization. Host conclusions, request JSON, and response schemas are not duplicated into the brief. These are prompt-contract changes, not a measured quality improvement; behavioral evaluation on representative tasks is still needed.
 
 The prompt is an instruction to the peer, not a sandbox or a higher-precedence security boundary. Provider-managed instructions and repository guidance may still load through the peer CLI. Technical guarantees in this document refer only to runtime checks such as launch validation, structured-output validation, the workflow guard, the Codex safe-mode sandbox preflight, and Claude's selected permission mode.
 
@@ -252,12 +253,12 @@ This audit was refreshed on 2026-07-26 against the current official OpenAI and A
 | `adjudicator_enabled` | `true` | Internal Agent Collab control, not a provider setting. It requests a separate host-local advisory challenge after the host-first and peer reports. This independence is a host procedure; the runtime validates the artifact and rebinding but cannot prove the adjudicator's process history. It replaces the removed `profile`, whose only runtime effect was adjudication. |
 | `agent_timeout_seconds` | `2700` | Internal absolute wall-clock deadline, persisted as a JSON number and constrained to 60–86400 seconds. Forty-five minutes is long enough for high-effort, tool-heavy reviews while guaranteeing liveness. This is the mandatory run bound; it is not a model turn count. |
 | `safe_mode` | `false` | Deliberate full-capability product default for deep repository investigation. Codex maps to `danger-full-access`; Claude maps to `bypassPermissions`. This is not the generally safest provider posture: OpenAI says to use caution with full access, and Anthropic says bypass mode belongs only in isolated containers, VMs, or dev containers without internet access. Operators should enable safe mode when that risk is unacceptable. [OpenAI approvals and sandboxing](https://learn.chatgpt.com/docs/agent-approvals-security), [Anthropic permissions](https://code.claude.com/docs/en/permissions) |
-| `codex_model` | `gpt-5.6-sol` | OpenAI identifies Sol as the frontier model for complex professional work and recommends it for complex reasoning and coding. That matches high-stakes review, design, research, and debugging. [GPT-5.6 Sol](https://developers.openai.com/api/docs/models/gpt-5.6-sol) |
-| `codex_effort` | `max` | Quality-first choice for the hardest work. OpenAI recommends `max` only for the hardest, quality-first tasks and suggests comparing it with `xhigh`; Agent Collab accepts the extra latency for high-stakes peer work. The current live Sol catalog is checked before every run and is authoritative for supported levels, including its current delegation-enabled `ultra`. Explicit user choices are preserved. [OpenAI GPT-5.6 model guidance](https://developers.openai.com/api/docs/guides/model-guidance?model=gpt-5.6) |
-| `online_research` | `true` | Maps only the provider research tools Agent Collab configures: Codex `web_search=live`, and Claude Code built-in `WebSearch`/`WebFetch` availability. Current-source verification is central to the research use case. Opus 5's API-level server-side WebFetch limitation is separate from Claude Code's built-ins. This setting does not restrict network access through shells, MCP, plugins, or other provider facilities. [OpenAI web-search configuration](https://learn.chatgpt.com/docs/config-file/config-reference), [Anthropic CLI reference](https://code.claude.com/docs/en/cli-usage), [Anthropic Opus 5 migration guide](https://platform.claude.com/docs/en/about-claude/models/migration-guide) |
+| `codex_model` | `gpt-6-astra` | Explicit GPT-6 Astra default for independent peer work. Availability still requires the exact ID in the refreshed Codex catalog. [OpenAI GPT-6 guide](https://developers.openai.com/api/docs/guides/latest-model/gpt-6-astra.md) |
+| `codex_effort` | `xhigh` | Project-selected default. Preserve per-run overrides and validate each pair against the live model entry; this is not a universal provider recommendation. |
+| `online_research` | `true` | Maps only the provider research tools Agent Collab configures: Codex `web_search=live`, and Claude Code built-in `WebSearch`/`WebFetch` availability. Current-source verification is central to the research use case. This setting does not restrict network access through shells, MCP, plugins, or other provider facilities. [OpenAI web-search configuration](https://learn.chatgpt.com/docs/config-file/config-reference), [Anthropic CLI reference](https://code.claude.com/docs/en/cli-usage) |
 | `codex_config` | `[]` | Optional additive Codex `-c key=value` entries, a documented CLI surface. Empty by default to minimize hidden policy. Agent Collab rejects overrides of its owned model, effort, sandbox, approval, web-search, and helper keys so the immutable request cannot disagree with the actual launch. [OpenAI Codex CLI reference](https://learn.chatgpt.com/docs/developer-commands?surface=cli#cli-codex-exec) |
-| `claude_model` | `claude-opus-5` | Anthropic's fixed Opus 5 model ID is the current flagship choice for complex, agentic coding and enterprise work, matching the quality-first peer role. The fixed ID avoids an alias changing beneath an immutable request. Fable remains explicit-only because it is a different cost/capability product choice. [Anthropic migration guide](https://platform.claude.com/docs/en/about-claude/models/migration-guide), [Claude Code changelog](https://code.claude.com/docs/en/changelog) |
-| `claude_effort` | `max` | Quality-first choice for intelligence-demanding work. Anthropic says Opus 5 supports the full effort range and warns that `max` can overthink and have diminishing returns. Agent Collab intentionally accepts that cost for its default high-stakes use case while preserving explicit lower choices. `ultracode` is an explicit Claude Code dynamic-orchestration mode whose effective provider effort must attest as `xhigh`. [Prompting Opus 5](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-opus-5), [Claude Code changelog](https://code.claude.com/docs/en/changelog) |
+| `claude_model` | `claude-opus-5-5` | Fixed Opus 5.5 ID; the live probe must observe this exact primary model. Fable remains explicit-only. [Anthropic Opus 5.5 guide](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-opus-5-5) |
+| `claude_effort` | `xhigh` | Project-selected default, verified through Stop-hook telemetry. Explicit `max` and `ultracode` remain supported; the latter must attest effective provider effort `xhigh`. [Anthropic effort](https://platform.claude.com/docs/en/build-with-claude/effort) |
 | `claude_tools` | `default` | Keeps Claude's normal built-in tool surface in full-capability mode so the peer can inspect, test, and research. `default` is an exclusive sentinel rather than a list member. Online-research and zero-helper choices are applied separately with `--disallowedTools`. MCP tools and provider-managed policy are outside this selector. [Anthropic CLI reference](https://code.claude.com/docs/en/cli-usage) |
 | `history_retained_runs` | `50` | Internal default for explicit `clear-history` or setup cleanup, not a provider setting and not automatic deletion. The state index independently keeps bounded recent metadata; run directories remain until the operator invokes cleanup. |
 
@@ -305,7 +306,7 @@ Availability has a narrower contract than a peer run. Codex refreshes `codex deb
 - Normal peers do not use Claude `--bare`, `--setting-sources`, `--strict-mcp-config`, or troubleshooting `--safe-mode`, nor Codex `--ignore-user-config` or `--ignore-rules`. The full-capability product posture intentionally retains relevant repository guidance, configured tools, plugins, and provider policy. Only the narrow availability probe reduces configuration sources.
 - Agent Collab does not append or replace provider system prompts. The compact user brief carries the task contract without claiming higher precedence than repository or managed instructions.
 - Fallback chains remain empty and exact-model availability is fail-closed. A fallback would make the persisted request disagree with the model that actually ran.
-- Provider effort `max` remains a quality-first Agent Collab default, not a claim that it is the cheapest or universally recommended setting. OpenAI reserves it for the hardest quality-first work, and Anthropic warns that Opus 5 can overthink and show diminishing returns at `max`.
+- Both peer defaults use `xhigh` as a project choice. Persisted settings and explicit per-run overrides retain their precedence; upgrading the package does not rewrite existing settings. Effort changes are never silently substituted.
 
 ## Configuration
 
