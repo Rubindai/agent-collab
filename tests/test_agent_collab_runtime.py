@@ -3377,21 +3377,6 @@ class PackageTests(TestCase):
             )
             self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
 
-    def test_official_codex_plugin_validator(self):
-        configured_validator = os.environ.get("CODEX_PLUGIN_VALIDATOR")
-        if not configured_validator:
-            self.skipTest(
-                "standalone Codex plugin validation is unavailable; set CODEX_PLUGIN_VALIDATOR "
-                "only after verifying an official Python validator's current provenance"
-            )
-        plugin_validator = Path(configured_validator).expanduser()
-        self.assertTrue(plugin_validator.is_file(), f"configured validator does not exist: {plugin_validator}")
-        completed = subprocess.run(
-            [sys.executable, str(plugin_validator), "plugins/agent-collab"],
-            cwd=REPO_ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        )
-        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
-
     def test_official_codex_skill_validators(self):
         codex_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
         skill_validator = codex_home / "skills/.system/skill-creator/scripts/quick_validate.py"

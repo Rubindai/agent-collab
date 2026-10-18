@@ -76,7 +76,7 @@ python -m unittest discover -s tests -v
 scripts/sync-packages.sh --check
 ```
 
-- Strictly parse every release JSON file and validate schemas, both manifests, the Codex skill, and the Claude marketplace/plugin with available official validators. Verify validator provenance against the installed package and current official documentation; do not infer availability from an old repository command. Commands and unavailable checks are in `README.md` under **Verify**.
-- Test with Codex CLI 0.163.0 or newer and Claude Code 2.1.295 or newer. Marketplace installation tests must be isolated; Claude installation must pass `--scope user` explicitly. A missing official validator is an outstanding release check, not a pass; keep independent validation and installation checks runnable.
+- Strictly parse every release JSON file and validate schemas, both manifests, the Codex skill, and the Claude marketplace/plugin through package checks, supported official validators, and isolated installations. Verify validator provenance against the installed package and current official documentation; historical undocumented commands are not required checks. Commands are in `README.md` under **Verify**.
+- Test with Codex CLI 0.163.0 or newer and Claude Code 2.1.295 or newer. Marketplace installation tests must be isolated; Claude installation must pass `--scope user` explicitly. A required check skipped because its supported tool is unavailable remains outstanding; keep independent validation and installation checks runnable.
 - Use Semantic Versioning 2.0.0. `VERSION` and both manifests must match. Record user-visible and breaking changes only in the root `CHANGELOG.md`.
 - Tagging, publishing, and modifying a user's marketplace require an explicit request.
