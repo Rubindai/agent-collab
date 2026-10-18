@@ -131,7 +131,7 @@ def should_ignore(path: Path, repo_root: Path, ignored_paths: Iterable[Path] | N
 def _run_git(repo_root: Path, args: list[str], deadline: float) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
-            ["git", *args],
+            ["git", "--no-optional-locks", "-c", "diff.autoRefreshIndex=false", *args],
             cwd=repo_root,
             text=True,
             stdout=subprocess.PIPE,
@@ -501,10 +501,14 @@ def diff_snapshots(before: dict[str, Any], after: dict[str, Any], limit: int = 2
             keys = set(before_entries) | set(after_entries)
             changed_paths = sorted(path for path in keys if before_entries.get(path) != after_entries.get(path))
     elif before.get("mode") == "git" and after.get("mode") == "git":
-        changed_path_set = set(_git_changed_paths(before)) | set(_git_changed_paths(after))
+        changed_path_set: set[str] = set()
         before_sections = before.get("sections", {})
         after_sections = after.get("sections", {})
         if isinstance(before_sections, dict) and isinstance(after_sections, dict):
+            if any(before_sections.get(key) != after_sections.get(key)
+                   for key in ("status_z", "status", "diff", "diff_cached")):
+                changed_path_set.update(_git_changed_paths(before))
+                changed_path_set.update(_git_changed_paths(after))
             if before_sections.get("head") != after_sections.get("head"):
                 changed_path_set.add("<HEAD>")
             if before_sections.get("index") != after_sections.get("index"):

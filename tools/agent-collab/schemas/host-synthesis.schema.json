@@ -12,6 +12,7 @@
     "claims",
     "unresolved_risks",
     "workspace_mutation_sha256",
+    "claim_matrix_sha256",
     "final_answer_ready"
   ],
   "properties": {
@@ -52,6 +53,7 @@
     },
     "unresolved_risks": {"type": "array", "items": {"type": "string"}},
     "workspace_mutation_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "claim_matrix_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "final_answer_ready": {"const": true}
   }
 }

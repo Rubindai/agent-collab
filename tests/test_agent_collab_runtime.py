@@ -7,6 +7,7 @@ import json
 import os
 import re
 import signal
+import shlex
 import shutil
 import stat
 import subprocess
@@ -150,6 +151,28 @@ def request(**overrides):
     return data
 
 
+
+def record_claude_stop(args, effort=None):
+    if args[0] != "claude":
+        return
+    settings = json.loads(args[args.index("--settings") + 1])
+    effort = effort or settings["env"]["CLAUDE_CODE_EFFORT_LEVEL"]
+    command = settings["hooks"]["Stop"][0]["hooks"][0]["command"]
+    completed = subprocess.run(
+        shlex.split(command), input=json.dumps({"hook_event_name": "Stop", "effort": {"level": effort}}),
+        text=True, capture_output=True,
+    )
+    if completed.returncode:
+        raise AssertionError(completed.stderr)
+
+
+def claude_result_runner(completed):
+    def run(args, **kwargs):
+        record_claude_stop(args)
+        return completed
+    return run
+
+
 def valid_report(**overrides):
     req = request()
     data = {
@@ -188,7 +211,7 @@ def valid_host_first_pass(run_id="agent-collab-test"):
     }
 
 
-def valid_host_synthesis(run_id="agent-collab-test"):
+def valid_host_synthesis(run_id="agent-collab-test", run_dir=None):
     return {
         "schema_version": "2.0",
         "run_id": run_id,
@@ -197,6 +220,10 @@ def valid_host_synthesis(run_id="agent-collab-test"):
         "claims": [{"claim": "Synthesized claim", "status": "confirmed", "evidence": "verified evidence"}],
         "unresolved_risks": [],
         "workspace_mutation_sha256": hashlib.sha256(b"null").hexdigest(),
+        "claim_matrix_sha256": (
+            json.loads((run_dir / "host-result.json").read_text())["claim_matrix_sha256"]
+            if run_dir is not None else "0" * 64
+        ),
         "final_answer_ready": True,
     }
 
@@ -643,6 +670,10 @@ class PeerV2Tests(TestCase):
         for owned_key in (
             "model",
             "model_reasoning_effort",
+            "model_provider",
+            "model_providers.custom.base_url",
+            "profile",
+            "profiles.custom.model",
             "web_search",
             "sandbox_mode",
             "approval_policy",
@@ -707,7 +738,7 @@ class PeerV2Tests(TestCase):
         self.assertIn("Helpers must use this peer's exact model and effective effort", codex_helpers)
         self.assertIn("at most 8 total helper spawn calls", codex_helpers)
         self.assertIn("fresh contexts without parent conversation history", codex_helpers)
-        self.assertIn("Do not select custom agents", codex_helpers)
+        self.assertIn("Do not use explicit spawn overrides or custom agents", codex_helpers)
         writable = peer.build_prompt(request(edit_allowed=True), REPO_ROOT, PEER_SCHEMA)
         self.assertIn("disjoint writable paths and one integration owner", writable)
 
@@ -748,7 +779,7 @@ class PeerV2Tests(TestCase):
         ).args
         self.assertEqual(safe[safe.index("--permission-mode") + 1], "plan")
         self.assertEqual(safe[safe.index("--tools") + 1], "Read,Grep")
-        self.assertEqual(safe[safe.index("--disallowedTools") + 1], "WebSearch,WebFetch,Agent(fork)")
+        self.assertEqual(safe[safe.index("--disallowedTools") + 1], "Workflow,WebSearch,WebFetch,Agent(fork)")
 
     def test_codex_command_has_current_global_flag_shape(self):
         peer = load_peer()
@@ -816,15 +847,20 @@ class PeerV2Tests(TestCase):
         self.assertEqual(settings["fallbackModel"], [])
         self.assertIs(settings["switchModelsOnFlag"], False)
         self.assertIs(settings["disableAllHooks"], False)
+        self.assertEqual(settings["crossSessionInbound"], "refuse")
+        self.assertEqual(settings["hooks"]["PreToolUse"][0]["hooks"][0]["onFailure"], "block")
         self.assertEqual(settings["hooks"]["PreToolUse"][0]["matcher"], "Agent")
         self.assertEqual(args[-2:], ["--tools", "default"])
         self.assertIn("Agent(fork)", args[args.index("--disallowedTools") + 1].split(","))
         self.assertNotIn("--fallback-model", args)
         peer.validate_request(request(peer_effort="ultracode"))
-        ultracode_args = peer.build_peer_command(
-            request(peer_effort="ultracode"), "p", REPO_ROOT, PEER_SCHEMA, Path("/tmp/out"), {}
-        ).args
-        self.assertEqual(ultracode_args[ultracode_args.index("--effort") + 1], "ultracode")
+        with self.assertRaisesRegex(ValueError, "cannot enforce its helper bound"):
+            peer.build_peer_command(
+                request(peer_effort="ultracode"), "p", REPO_ROOT, PEER_SCHEMA, Path("/tmp/out"), {}
+            )
+        self.assertTrue(settings["disableWorkflows"])
+        self.assertFalse(settings["ultracode"])
+        self.assertIn("Workflow", args[args.index("--disallowedTools") + 1].split(","))
 
         no_agents = peer.build_peer_command(
             request(local_subagents_allowed=False, max_local_subagents=0),
@@ -854,7 +890,7 @@ class PeerV2Tests(TestCase):
         cases = (
             ("claude-opus-5-5", "xhigh", "xhigh", False),
             ("claude-fable-5", "max", "max", False),
-            ("claude-opus-5-5", "ultracode", "xhigh", True),
+            ("claude-opus-5-5", "high", "high", True),
         )
         for model, effort, effective_effort, safe_mode in cases:
             with self.subTest(model=model, effort=effort, safe_mode=safe_mode):
@@ -867,6 +903,7 @@ class PeerV2Tests(TestCase):
 
                 def fake_run(args, **kwargs):
                     captured.update(args=args, env=kwargs["env"], input=kwargs["input"])
+                    record_claude_stop(args)
                     return SimpleNamespace(returncode=0, stdout=json.dumps(envelope), stderr="")
 
                 overrides = {key: "forced" for key in peer.CLAUDE_EFFORT_ENV_OVERRIDES}
@@ -888,9 +925,12 @@ class PeerV2Tests(TestCase):
                     )
                 self.assertEqual(result["status"], "ok")
                 sandbox_preflight.assert_not_called()
-                for key in peer.CLAUDE_EFFORT_ENV_OVERRIDES:
-                    if key != "CLAUDE_CODE_EFFORT_LEVEL":
-                        self.assertNotIn(key, captured["env"])
+                settings = json.loads(captured["args"][captured["args"].index("--settings") + 1])
+                self.assertEqual(settings["env"], peer.claude_helper_environment(
+                    request(peer_model=model, peer_effort=effort, safe_mode=safe_mode)
+                ))
+                for key, value in settings["env"].items():
+                    self.assertEqual(captured["env"][key], value)
                 self.assertEqual(captured["env"]["CLAUDE_CODE_EFFORT_LEVEL"], effective_effort)
                 self.assertEqual(captured["env"]["CLAUDE_CODE_SUBAGENT_MODEL"], model)
                 self.assertEqual(captured["env"]["CLAUDE_CODE_SUBAGENT_MODEL_FORCE"], "1")
@@ -922,7 +962,7 @@ class PeerV2Tests(TestCase):
             tempfile.TemporaryDirectory() as tmp_name,
             mock.patch.object(peer, "git_mutation_snapshot", return_value={"same": True}),
             mock.patch.object(peer.shutil, "which", return_value="/usr/bin/claude"),
-            mock.patch.object(peer, "run_peer_command", return_value=completed),
+            mock.patch.object(peer, "run_peer_command", side_effect=claude_result_runner(completed)),
         ):
             tmp = Path(tmp_name)
             normalization = tmp / "peer-normalization.json"
@@ -933,6 +973,14 @@ class PeerV2Tests(TestCase):
                 normalization_output_path=normalization,
             )
             metadata = json.loads(normalization.read_text(encoding="utf-8"))
+            host = load_host()
+            host.validate_peer_normalization(metadata)
+            host.write_json(tmp / 'peer-report.json', result)
+            host.normalize_peer_report_from_artifacts(peer, tmp, req)
+            rebuilt = json.loads(normalization.read_text(encoding='utf-8'))
+            host.validate_peer_normalization(rebuilt)
+            self.assertEqual(rebuilt['artifact_source'], 'peer_report')
+            self.assertIn('target_xml_entities_canonicalized', rebuilt['warnings'])
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["target"], req["target"])
         self.assertIn("target_xml_entities_canonicalized", metadata["warnings"])
@@ -977,10 +1025,15 @@ class PeerV2Tests(TestCase):
         req = request(peer="codex", host="claude", origin="claude")
         report = valid_report(origin="claude", host="claude", peer="codex")
 
+        telemetry = json.dumps({
+            "type": "turn.completed",
+            "usage": {"input_tokens": 100, "cached_input_tokens": 80, "output_tokens": 20},
+        }) + "\n"
+
         def fake_run(args, **kwargs):
             output = Path(args[args.index("--output-last-message") + 1])
             output.write_text(json.dumps(report))
-            return SimpleNamespace(returncode=0, stdout="not the report", stderr="")
+            return SimpleNamespace(returncode=0, stdout=telemetry, stderr="")
 
         with (
             tempfile.TemporaryDirectory() as tmp,
@@ -988,7 +1041,13 @@ class PeerV2Tests(TestCase):
             mock.patch.object(peer.shutil, "which", return_value="/usr/bin/codex"),
             mock.patch.object(peer, "run_peer_command", side_effect=fake_run),
         ):
-            result = peer.run_request(req, Path(tmp))
+            raw = Path(tmp) / "run" / "peer-raw.txt"
+            raw.parent.mkdir(mode=0o700)
+            result = peer.run_request(req, Path(tmp), raw_output_path=raw)
+            saved_stdout = raw.with_name("peer-stdout.txt")
+            self.assertEqual(saved_stdout.read_text(), telemetry)
+            self.assertEqual(stat.S_IMODE(saved_stdout.stat().st_mode), 0o600)
+            self.assertEqual(json.loads(raw.read_text()), report)
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["peer"], "codex")
 
@@ -1109,7 +1168,7 @@ class PeerV2Tests(TestCase):
                     ),
                     mock.patch.object(peer, "mutation_error_details", return_value={"source": "peer_snapshot"}),
                     mock.patch.object(peer.shutil, "which", return_value="/usr/bin/claude"),
-                    mock.patch.object(peer, "run_peer_command", return_value=completed),
+                    mock.patch.object(peer, "run_peer_command", side_effect=claude_result_runner(completed)),
                 ):
                     result = peer.run_request(
                         request(edit_allowed=edit_allowed),
@@ -1374,7 +1433,9 @@ class PeerV2Tests(TestCase):
             mock.patch.object(
                 peer,
                 "run_peer_command",
-                return_value=SimpleNamespace(returncode=0, stdout=json.dumps(bare_claude), stderr=""),
+                side_effect=claude_result_runner(
+                    SimpleNamespace(returncode=0, stdout=json.dumps(bare_claude), stderr="")
+                ),
             ),
         ):
             claude_result = peer.run_request(request(), Path(tmp))
@@ -1417,7 +1478,7 @@ class PeerV2Tests(TestCase):
             tempfile.TemporaryDirectory() as tmp,
             mock.patch.object(peer, "git_mutation_snapshot", return_value={"same": True}),
             mock.patch.object(peer.shutil, "which", return_value="/usr/bin/claude"),
-            mock.patch.object(peer, "run_peer_command", return_value=completed),
+            mock.patch.object(peer, "run_peer_command", side_effect=claude_result_runner(completed)),
         ):
             result = peer.run_request(request(), Path(tmp))
         self.assertEqual(result["error"]["kind"], "peer_api_error")
@@ -1452,7 +1513,7 @@ class PeerV2Tests(TestCase):
             tempfile.TemporaryDirectory() as tmp,
             mock.patch.object(peer, "git_mutation_snapshot", return_value={"same": True}),
             mock.patch.object(peer.shutil, "which", return_value="/usr/bin/claude"),
-            mock.patch.object(peer, "run_peer_command", return_value=completed),
+            mock.patch.object(peer, "run_peer_command", side_effect=claude_result_runner(completed)),
         ):
             result = peer.run_request(request(), Path(tmp))
         self.assertEqual(result["error"]["kind"], "turn_limit_reached")
@@ -1476,10 +1537,19 @@ class HostV2Tests(TestCase):
         args = host.build_parser().parse_args([
             "start", "--host", "codex", "--target", "diff", "--brief", "review",
         ])
-        with mock.patch.object(host.os, "name", "nt"), self.assertRaisesRegex(
-            SystemExit, "requires a POSIX platform"
-        ):
-            host.start(args)
+        for os_name, platform in (("nt", "win32"), ("posix", "freebsd14"), ("posix", "sunos5")):
+            with (
+                self.subTest(os_name=os_name, platform=platform),
+                mock.patch.object(host.os, "name", os_name),
+                mock.patch.object(host.sys, "platform", platform),
+                mock.patch.object(host, "load_state_runtime") as state,
+                self.assertRaisesRegex(SystemExit, "requires a POSIX platform"),
+            ):
+                host.start(args)
+            state.assert_not_called()
+        for platform in ("linux", "darwin"):
+            with mock.patch.object(host.os, "name", "posix"), mock.patch.object(host.sys, "platform", platform):
+                self.assertTrue(host.is_supported_platform())
 
     def test_current_defaults_and_removed_settings(self):
         host = load_host()
@@ -1625,7 +1695,7 @@ class HostV2Tests(TestCase):
         self.assertEqual(host.parse_cli_version("codex-cli 0.144.5"), (0, 144, 5))
         self.assertEqual(host.parse_cli_version("2.1.212 (Claude Code)"), (2, 1, 212))
         self.assertEqual(host.MIN_CLI_VERSIONS["codex"], (0, 163, 0))
-        self.assertEqual(host.MIN_CLI_VERSIONS["claude"], (2, 1, 257))
+        self.assertEqual(host.MIN_CLI_VERSIONS["claude"], (2, 1, 295))
         old = SimpleNamespace(returncode=0, stdout="codex-cli 0.162.99", stderr="")
         with (
             mock.patch.object(host.shutil, "which", return_value="/usr/bin/codex"),
@@ -1633,7 +1703,7 @@ class HostV2Tests(TestCase):
             self.assertRaises(SystemExit),
         ):
             host.require_peer_cli_version("codex")
-        old_claude = SimpleNamespace(returncode=0, stdout="2.1.256 (Claude Code)", stderr="")
+        old_claude = SimpleNamespace(returncode=0, stdout="2.1.294 (Claude Code)", stderr="")
         with (
             mock.patch.object(host.shutil, "which", return_value="/usr/bin/claude"),
             mock.patch.object(host.subprocess, "run", return_value=old_claude),
@@ -1951,7 +2021,7 @@ class HostV2Tests(TestCase):
             guard = root / "active-v2.json"
             with mock.patch.object(host, "workspace_guard_path", return_value=guard):
                 host.acquire_workspace_guard(root, "stale", "codex", root / "runs" / "stale")
-                with mock.patch.object(host.SAFETY, "process_identity_matches", return_value=False):
+                with mock.patch.object(host.SAFETY, "process_identity_state", return_value="dead_or_replaced"):
                     host.require_workspace_guard_available(root)
                 self.assertFalse(guard.exists())
 
@@ -1983,11 +2053,11 @@ class HostV2Tests(TestCase):
                 def dead_launcher(_identity):
                     identity_checked.set()
                     self.assertTrue(allow_recovery.wait(timeout=2))
-                    return False
+                    return "dead_or_replaced"
 
                 with (
                     mock.patch.object(
-                        host.SAFETY, "process_identity_matches", side_effect=dead_launcher
+                        host.SAFETY, "process_identity_state", side_effect=dead_launcher
                     ),
                     ThreadPoolExecutor(max_workers=2) as executor,
                 ):
@@ -2220,7 +2290,7 @@ class HostV2Tests(TestCase):
                 ):
                     host.complete(complete_args)
                 self.assertTrue(guard.exists())
-                (run_dir / "host-synthesis.json").write_text(json.dumps(valid_host_synthesis()))
+                (run_dir / "host-synthesis.json").write_text(json.dumps(valid_host_synthesis(run_dir=run_dir)))
                 adjudicator = json.loads((run_dir / "adjudicator-report.json").read_text())
                 adjudicator.update(
                     status="ok",
@@ -2239,6 +2309,9 @@ class HostV2Tests(TestCase):
                     redirect_stdout(io.StringIO()),
                 ):
                     self.assertEqual(host.finish(finish_args), 0)
+                (run_dir / "host-synthesis.json").write_text(
+                    json.dumps(valid_host_synthesis(run_dir=run_dir))
+                )
                 with (
                     mock.patch.object(host, "process_identity_matches", return_value=True),
                     mock.patch.object(host, "process_alive", return_value=True),
@@ -2269,7 +2342,7 @@ class HostV2Tests(TestCase):
                 self.assertTrue(guard.exists())
                 host.release_workspace_guard(root, request()["run_id"])
                 (run_dir / "host-synthesis.json").write_text(
-                    json.dumps({**valid_host_synthesis(), "final_answer_ready": False})
+                    json.dumps({**valid_host_synthesis(run_dir=run_dir), "final_answer_ready": False})
                 )
                 with self.assertRaises(SystemExit):
                     host.complete(complete_args)
@@ -2304,7 +2377,7 @@ class HostV2Tests(TestCase):
                     redirect_stdout(io.StringIO()),
                 ):
                     self.assertEqual(host.finish(finish_args), 0)
-                (run_dir / "host-synthesis.json").write_text(json.dumps(valid_host_synthesis()))
+                (run_dir / "host-synthesis.json").write_text(json.dumps(valid_host_synthesis(run_dir=run_dir)))
                 tracked.write_text("after", encoding="utf-8")
                 complete_args = host.build_parser().parse_args([
                     "complete", str(run_dir), "--run-root", str(run_root), "--repo-root", str(root),
@@ -2315,7 +2388,7 @@ class HostV2Tests(TestCase):
                 refreshed = json.loads((run_dir / "host-result.json").read_text())
                 self.assertIs(refreshed["workspace_mutation"]["changed"], True)
                 self.assertIn("tracked.txt", refreshed["workspace_mutation"]["changed_paths"])
-                synthesis = valid_host_synthesis()
+                synthesis = valid_host_synthesis(run_dir=run_dir)
                 synthesis["workspace_mutation_sha256"] = refreshed["workspace_mutation_sha256"]
                 (run_dir / "host-synthesis.json").write_text(json.dumps(synthesis))
                 with redirect_stdout(io.StringIO()):
@@ -2509,7 +2582,7 @@ class HostV2Tests(TestCase):
                     redirect_stdout(io.StringIO()),
                 ):
                     self.assertEqual(host.finish(finish_args), 0)
-                (run_dir / "host-synthesis.json").write_text(json.dumps(valid_host_synthesis()))
+                (run_dir / "host-synthesis.json").write_text(json.dumps(valid_host_synthesis(run_dir=run_dir)))
 
                 entered_wait = threading.Event()
                 release_wait = threading.Event()
@@ -2718,6 +2791,7 @@ class HostV2Tests(TestCase):
                 "adjudicator_report": None,
                 "workspace_mutation": None,
                 "workspace_mutation_sha256": hashlib.sha256(b"null").hexdigest(),
+                "claim_matrix_sha256": "0" * 64,
             }
             host.validate_host_result(result, disabled_request, run_dir)
             with self.assertRaisesRegex(host.ArtifactValidationError, "must be null"):
@@ -2959,13 +3033,13 @@ class PackageTests(TestCase):
 
     def test_release_versions_match(self):
         version = (REPO_ROOT / "VERSION").read_text().strip()
-        self.assertEqual(version, "2.1.0")
+        self.assertEqual(version, "3.0.0")
         for manifest in (
             CODEX_PLUGIN_ROOT / ".codex-plugin" / "plugin.json",
             CLAUDE_PLUGIN_ROOT / ".claude-plugin" / "plugin.json",
         ):
             self.assertEqual(json.loads(manifest.read_text())["version"], version)
-        self.assertIn("## 2.1.0", (REPO_ROOT / "CHANGELOG.md").read_text())
+        self.assertIn("## 3.0.0", (REPO_ROOT / "CHANGELOG.md").read_text())
 
     def test_marketplaces_are_native_and_do_not_duplicate_version(self):
         codex = json.loads((REPO_ROOT / ".agents/plugins/marketplace.json").read_text())
@@ -3073,7 +3147,7 @@ class PackageTests(TestCase):
         readme = (REPO_ROOT / "README.md").read_text()
         for token in (
             "gpt-6-astra", "claude-opus-5-5", "claude-fable-5", "--peer-model",
-            "--peer-effort", "Codex CLI 0.163.0", "Claude Code 2.1.257",
+            "--peer-effort", "Codex CLI 0.163.0", "Claude Code 2.1.295",
             "schema 2.0", "danger-full-access", "bypassPermissions",
         ):
             self.assertIn(token, readme)
@@ -3304,10 +3378,14 @@ class PackageTests(TestCase):
             self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
 
     def test_official_codex_plugin_validator(self):
-        codex_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
-        plugin_validator = codex_home / "skills/.system/plugin-creator/scripts/validate_plugin.py"
-        if not plugin_validator.is_file():
-            self.skipTest("official Codex plugin validator is unavailable; provision plugin-creator before release")
+        configured_validator = os.environ.get("CODEX_PLUGIN_VALIDATOR")
+        if not configured_validator:
+            self.skipTest(
+                "standalone Codex plugin validation is unavailable; set CODEX_PLUGIN_VALIDATOR "
+                "only after verifying an official Python validator's current provenance"
+            )
+        plugin_validator = Path(configured_validator).expanduser()
+        self.assertTrue(plugin_validator.is_file(), f"configured validator does not exist: {plugin_validator}")
         completed = subprocess.run(
             [sys.executable, str(plugin_validator), "plugins/agent-collab"],
             cwd=REPO_ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -3333,6 +3411,9 @@ class PackageTests(TestCase):
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
 
     def test_official_codex_isolated_install(self):
+        launch_env = {**_SAVED_TEST_ENV, **os.environ}
+        if launch_env.get("AGENT_COLLAB_PEER_ONLY") == "true" and launch_env.get("AGENT_COLLAB_HOST") == "codex":
+            self.skipTest("host Codex CLI is intentionally unavailable inside a Claude peer")
         if shutil.which("codex") is None:
             self.skipTest("Codex CLI unavailable")
         with tempfile.TemporaryDirectory() as tmp:

@@ -10,7 +10,7 @@ Required flow:
 
 1. Default to the configured full-capability launch posture, `adjudicator_enabled=true`, and `edit_allowed=false`. Full capability, including Claude `bypassPermissions`, has host-level consequences; Anthropic recommends that mode only inside isolated containers, VMs, or development containers without internet access where host damage is impossible. Safe mode is an explicit user choice. Classify the target and mode, and enable edits only when the user explicitly delegates changes. Launch capability and edit authorization are independent decisions.
 2. Build a neutral peer brief before doing host analysis. Lead with the outcome, then supply relevant context, expected output or done condition, decisive boundaries, and available verification signals. Include only process constraints that matter to independence or safety; omit host conclusions, suspected findings, and implementation defense.
-3. Start the peer run before host analysis. Use `scripts/host.py start` so the runtime first attests the exact model and effort pair, then creates the run directory, resolved request, workspace snapshot, recursion guard, and background peer process. For Codex, require the exact pair in freshly refreshed `codex debug models` output. In a bounded, configuration-reduced Claude probe outside the target repository, require API `modelUsage` to include the exact resolved model and the `Stop` hook to report the expected effective effort (`xhigh` for `ultracode`, otherwise the requested provider level). If the result is unavailable or unknown, or a Codex safe-mode sandbox prerequisite fails, report the structured failure instead of retrying another model, effort, permission posture, or isolation mode.
+3. Start the peer run before host analysis. Use `scripts/host.py start` so the runtime first attests the exact model and effort pair, then creates the run directory, resolved request, workspace snapshot, recursion guard, and background peer process. For Codex, require the exact pair in freshly refreshed `codex debug models` output. In a bounded, configuration-reduced Claude probe outside the target repository, require API `modelUsage` to include the exact resolved model and the `Stop` hook to report the expected effective effort (`xhigh` for `ultracode`, otherwise the requested provider level). Explicit `ultracode` execution fails before launch with `helper_policy_unavailable`, because Workflow orchestration bypasses the finite helper counter; do not substitute another mode. If the result is unavailable or unknown, or a Codex safe-mode sandbox prerequisite fails, report the structured failure instead of retrying another model, effort, permission posture, or isolation mode.
 4. Do not read peer output until independent host work is complete and `host-first-pass.json` exists. This is a procedural independence rule; artifact ordering is evidence of the sequence but the runtime cannot prove the host's reading history.
 5. While the peer is running, do independent challenge-first host analysis. Use host-local helpers for independent lenses such as mapping, review, research, architecture, security, debugging, test strategy, and verification only when materially useful. Enforce the resolved finite helper count and instructed depth, eight helpers by default. Claude peer total Agent calls are runtime-enforced. Codex peer concurrent threads are provider-enforced, while total calls and depth remain instruction-level bounds. In full mode retain native tools and permissions, subject to provider policy. Do not poll peer status during this independent phase.
 6. Start host-local helpers in fresh contexts, without parent conversation forks. Supply a neutral bounded task and lens, required inputs, edit authorization, remaining deadline, and expected evidence; omit peer findings, host conclusions, suspected answers, and implementation defense. Preserve the spawning host's exact model and effective effort, avoid conflicting custom agent definitions, and reuse helpers for follow-ups. Count every new spawn against the resolved finite total, even after a helper completes. Explicitly forbid Agent Collab, `$agent-collab`, `/agent-collab`, provider peer CLIs, and cross-product peer commands. The worktree guard is the hard recursion boundary. The runtime enforces Claude peer total `Agent` calls, Codex peer concurrency, and helper artifact admission; Claude resumes through `SendMessage` do not consume Agent calls. Host-native launch discipline and Codex total/depth bounds remain instructions because the runtime cannot intercept them.
@@ -91,16 +91,26 @@ After the host has performed final verification and prepared its synthesis, writ
   ],
   "unresolved_risks": [],
   "workspace_mutation_sha256": "copy the exact digest from host-result.json",
+  "claim_matrix_sha256": "copy the exact digest from host-result.json",
   "final_answer_ready": true
 }
 ```
 
-Copy `workspace_mutation_sha256` exactly from the ready `host-result.json` after reviewing its
-`workspace_mutation` value. `complete` validates this binding, rebuilds the claim matrix from the
+Copy `workspace_mutation_sha256` and `claim_matrix_sha256` exactly from the ready `host-result.json`
+after reviewing its `workspace_mutation` value and the referenced `claim-matrix.json`.
+The matrix includes canonical hashes of the complete admitted host, peer, helper, and adjudicator
+reports, so changes to findings, severity, summaries, or other evidence also require resynthesis.
+`complete` validates both bindings, rebuilds the claim matrix from the
 current host, peer, helper, and adjudicator artifacts, and refuses to release the worktree guard
 when synthesis evidence is missing, malformed, detached from those sources, belongs to another
-run, or predates changed mutation evidence. If `complete` refreshes that evidence, inspect it and
-synthesize again with the new digest before retrying.
+run, or predates changed mutation or claim evidence. After reports change, rerun `finish`, review
+the current claim matrix, and synthesize again with both current digests before retrying.
+
+Before peer launch, the host admits only a canonical baseline snapshot that fits its finite
+16 MiB JSON read limit; a larger baseline rolls startup back. After snapshots may be larger.
+If cancellation is interrupted after its mutation diagnostic is committed, retrying validates
+and reuses the recorded snapshot hashes without overwriting that evidence. The recorded snapshot
+describes the cancellation capture point; later workspace edits are outside that capture.
 
 Claim labels:
 

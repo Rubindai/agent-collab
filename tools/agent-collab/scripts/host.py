@@ -68,7 +68,8 @@ SETTING_ENV_KEYS = {
     "claude_tools": "CLAUDE_AGENT_COLLAB_TOOLS",
     "history_retained_runs": "AGENT_COLLAB_HISTORY_RETAINED_RUNS",
 }
-MIN_CLI_VERSIONS = {"codex": (0, 163, 0), "claude": (2, 1, 257)}
+MIN_CLI_VERSIONS = {"codex": (0, 163, 0), "claude": (2, 1, 295)}
+MAX_JSON_ARTIFACT_BYTES = 16 * 1024 * 1024
 DEFAULT_AVAILABILITY_TIMEOUT_SECONDS = 30.0
 MAX_AVAILABILITY_TIMEOUT_SECONDS = 60.0
 CLAIM_STATUSES = {
@@ -444,11 +445,19 @@ def classify_mode(target: str, brief: str) -> str:
     return "review"
 
 
+def is_supported_platform() -> bool:
+    return (
+        os.name == "posix"
+        and (sys.platform.startswith("linux") or sys.platform == "darwin")
+        and all(hasattr(os, name) for name in ("getpgid", "killpg"))
+    )
+
+
 def require_supported_platform() -> None:
-    if os.name != "posix" or not all(hasattr(os, name) for name in ("getpgid", "killpg")):
+    if not is_supported_platform():
         raise SystemExit(
             "Agent Collab runtime process supervision requires a POSIX platform "
-            "(supported: Linux and macOS); Windows is not supported"
+            f"running Linux or macOS; unsupported host: {sys.platform} ({os.name})"
         )
 
 
@@ -553,7 +562,7 @@ def normalize_codex_config(value: Any, source: str) -> list[str]:
 
 def is_fable_model(value: Any) -> bool:
     normalized = str(value).strip().casefold()
-    return normalized == "fable" or normalized.startswith("claude-fable-")
+    return re.search(r"(?:^|[^a-z0-9])fable(?:$|[^a-z0-9])", normalized) is not None
 
 
 def validate_claude_tools(value: Any, source: str) -> str:
@@ -817,6 +826,10 @@ def run_snapshot(
         deadline=deadline,
     )
     write_json(snapshot_json_path(output_path), data)
+    if output_path.name == "before.snapshot":
+        # Every terminal path must be able to read this baseline. Reject an
+        # oversized snapshot while start can still roll back without a peer.
+        load_json(snapshot_json_path(output_path))
     snapshot.write_workspace_snapshot(
         repo_root,
         output_path,
@@ -840,10 +853,14 @@ def record_workspace_mutation(
     if not before_path.exists() or before_path.stat().st_size == 0:
         raise ArtifactValidationError("canonical before.snapshot.json is missing or empty")
     before = load_json(before_path)
+    mutation_path = run_dir / mutation_name
+    if source == "cancel_snapshot" and mutation_path.exists():
+        existing = load_json(mutation_path)
+        validate_cancel_mutation_evidence(existing, request, run_dir)
+        return existing
     after = run_snapshot(repo_root, run_dir / after_snapshot_name, ignored_paths=[run_dir])
     snapshot = load_snapshot_runtime()
     diff = snapshot.diff_snapshots(before, after)
-    mutation_path = run_dir / mutation_name
     if diff["changed"]:
         diagnostic = {
             **diff,
@@ -859,6 +876,11 @@ def record_workspace_mutation(
             ],
         }
         if source == "cancel_snapshot":
+            diagnostic["before_snapshot_sha256"] = file_sha256_or_none(before_path)
+            diagnostic["after_snapshot_sha256"] = file_sha256_or_none(
+                snapshot_json_path(run_dir / after_snapshot_name)
+            )
+            validate_cancel_mutation_evidence(diagnostic, request, run_dir)
             if not write_json_once(mutation_path, diagnostic):
                 existing = load_json(mutation_path)
                 if existing != diagnostic:
@@ -902,11 +924,21 @@ def record_cancel_workspace_mutation(
     )
 
 
+def canonical_artifact_sha256(value: dict[str, Any] | None) -> str:
+    canonical = STRICT_JSON.dumps(value, indent=None, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
 def workspace_mutation_sha256(value: dict[str, Any] | None) -> str:
     """Bind synthesis to the exact mutation evidence visible at finish."""
 
-    canonical = STRICT_JSON.dumps(value, indent=None, sort_keys=True).encode("utf-8")
-    return hashlib.sha256(canonical).hexdigest()
+    return canonical_artifact_sha256(value)
+
+
+def claim_matrix_sha256(value: dict[str, Any]) -> str:
+    """Bind the final synthesis to the admitted claims, including helper claims."""
+
+    return canonical_artifact_sha256(value)
 
 
 def file_sha256_or_none(path: Path) -> str | None:
@@ -917,6 +949,59 @@ def file_sha256_or_none(path: Path) -> str | None:
         while chunk := handle.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def validate_cancel_mutation_evidence(
+    value: dict[str, Any], request: dict[str, Any], run_dir: Path
+) -> None:
+    """Validate a committed cancellation snapshot without taking a newer one.
+
+    Snapshot file hashes are streamed: an after snapshot may grow beyond the
+    baseline admission limit and must not make cancellation unrecoverable.
+    """
+
+    required = {
+        "changed", "snapshot_mode", "before_digest", "after_digest",
+        "changed_path_count", "changed_paths", "changed_paths_truncated",
+        "schema_version", "source", "edit_allowed", "message",
+        "coverage_limitations", "before_snapshot_sha256", "after_snapshot_sha256",
+    }
+    if not isinstance(value, dict) or set(value) != required:
+        raise ArtifactValidationError("invalid immutable cancellation mutation evidence fields")
+    if (
+        value["schema_version"] != ARTIFACT_SCHEMA_VERSION
+        or value["source"] != "cancel_snapshot"
+        or value["changed"] is not True
+        or type(value["edit_allowed"]) is not bool
+        or value["edit_allowed"] != request["edit_allowed"]
+        or value["snapshot_mode"] not in {"git", "filesystem"}
+        or value["message"] != "Workspace changed during the Agent Collab run; attribution is unknown."
+        or value["coverage_limitations"] != [
+            "Known high-volume generated and dependency directories are excluded.",
+            "Transient changes that were reverted before a snapshot are not observable.",
+        ]
+    ):
+        raise ArtifactValidationError("invalid immutable cancellation mutation evidence metadata")
+    paths, count = value["changed_paths"], value["changed_path_count"]
+    if (
+        not isinstance(paths, list)
+        or not all(isinstance(path, str) for path in paths)
+        or type(count) is not int or count < 0
+        or len(paths) != min(count, 200)
+        or type(value["changed_paths_truncated"]) is not bool
+        or value["changed_paths_truncated"] != (count > 200)
+    ):
+        raise ArtifactValidationError("invalid immutable cancellation changed-path evidence")
+    for key in ("before_digest", "after_digest", "before_snapshot_sha256", "after_snapshot_sha256"):
+        if not isinstance(value[key], str) or re.fullmatch(r"[0-9a-f]{64}", value[key]) is None:
+            raise ArtifactValidationError(f"invalid cancellation {key}")
+    for prefix, name in (("before", "before.snapshot"), ("after", "cancel-after.snapshot")):
+        snapshot_path = snapshot_json_path(run_dir / name)
+        if value[f"{prefix}_snapshot_sha256"] != file_sha256_or_none(snapshot_path):
+            raise ArtifactValidationError(f"recorded cancellation {prefix} snapshot changed or is missing")
+    before = load_json(snapshot_json_path(run_dir / "before.snapshot"))
+    if value["before_digest"] != before.get("digest"):
+        raise ArtifactValidationError("cancellation baseline digest does not match the admitted snapshot")
 
 
 CANCEL_PRESERVED_ARTIFACTS = {
@@ -1003,7 +1088,7 @@ def validate_cancel_result(report: dict[str, Any], request: dict[str, Any], run_
     if not isinstance(preserved, dict) or set(preserved) != set(CANCEL_PRESERVED_ARTIFACTS):
         raise ArtifactValidationError("cancel-result preserved_artifacts keys are invalid")
     for value in preserved.values():
-        if value is not None and re.fullmatch(r"[0-9a-f]{64}", str(value)) is None:
+        if value is not None and (not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None):
             raise ArtifactValidationError("cancel-result artifact hashes must be lowercase SHA-256 or null")
     mutation = report["workspace_mutation"]
     mutation_path = run_dir / "cancel-workspace-mutation.json"
@@ -1012,6 +1097,7 @@ def validate_cancel_result(report: dict[str, Any], request: dict[str, Any], run_
         if not isinstance(mutation, str) or Path(mutation).resolve() != expected_path:
             raise ArtifactValidationError("cancel-result workspace_mutation path is invalid")
         mutation_value = load_json(mutation_path)
+        validate_cancel_mutation_evidence(mutation_value, request, run_dir)
     else:
         if mutation_path.exists():
             raise ArtifactValidationError(
@@ -1228,11 +1314,11 @@ def _read_workspace_guard_unlocked(repo_root: Path) -> tuple[Path, dict[str, Any
         or parsed.get("schema_version") != WORKSPACE_GUARD_SCHEMA_VERSION
     ):
         raise SystemExit(f"invalid active Agent Collab workspace guard at {path}; manual inspection is required")
-    if not is_safe_run_id(str(parsed.get("run_id") or "")):
+    if not isinstance(parsed["run_id"], str) or not is_safe_run_id(parsed["run_id"]):
         raise SystemExit(f"invalid active Agent Collab run_id in workspace guard at {path}")
     if parsed["host"] not in ORIGINS or parsed["phase"] not in {"starting", "peer_running", "ready_for_synthesis"}:
         raise SystemExit(f"invalid active Agent Collab host/phase in workspace guard at {path}")
-    if Path(str(parsed["repo_root"])).resolve() != repo_root.resolve():
+    if not isinstance(parsed["repo_root"], str) or Path(parsed["repo_root"]).resolve() != repo_root.resolve():
         raise SystemExit(f"active Agent Collab workspace guard repo_root mismatch at {path}")
     if not isinstance(parsed["run_dir"], str) or not parsed["run_dir"]:
         raise SystemExit(f"invalid active Agent Collab run_dir in workspace guard at {path}")
@@ -1260,7 +1346,10 @@ def _require_workspace_guard_available_unlocked(repo_root: Path) -> None:
     path, active = _read_workspace_guard_unlocked(repo_root)
     if active is None:
         return
-    if active["phase"] == "starting" and not SAFETY.process_identity_matches(active["launcher_identity"]):
+    if (
+        active["phase"] == "starting"
+        and SAFETY.process_identity_state(active["launcher_identity"]) == "dead_or_replaced"
+    ):
         # A launcher that died before it could create a peer cannot complete or
         # cancel its workflow. This narrow stale-start recovery prevents a
         # permanent worktree wedge without unlocking a running/synthesis run.
@@ -1381,7 +1470,7 @@ def validate_peer_process(data: dict[str, Any], request: dict[str, Any], run_dir
             raise ArtifactValidationError(f"peer-process {key} does not match host request")
     if type(data["adjudicator_enabled"]) is not bool:
         raise ArtifactValidationError("peer-process adjudicator_enabled must be a JSON boolean")
-    if Path(str(data["run_dir"])).resolve() != run_dir.resolve():
+    if not isinstance(data["run_dir"], str) or Path(data["run_dir"]).resolve() != run_dir.resolve():
         raise ArtifactValidationError("peer-process run_dir does not match the resolved run directory")
     for key in ("pid", "pgid"):
         if type(data[key]) is not int or data[key] <= 0:
@@ -1857,6 +1946,10 @@ def start(args: argparse.Namespace) -> int:
         raise SystemExit("--claude-max-turns must be a positive integer")
     if claude_max_turns is not None and peer != "claude":
         raise SystemExit("--claude-max-turns may be used only when the resolved peer is Claude")
+    if peer == "claude":
+        policy_failure = SAFETY.claude_helper_policy_failure(peer_model, peer_effort)
+        if policy_failure is not None:
+            raise SystemExit(STRICT_JSON.dumps(policy_failure))
     # Codex read-only sandboxing uses bubblewrap on Linux. Claude's plan
     # permission mode is provider-native and does not use this backend.
     if safe_mode and peer == "codex":
@@ -2133,7 +2226,7 @@ def start(args: argparse.Namespace) -> int:
 
 
 def load_json(path: Path) -> dict[str, Any]:
-    data = STRICT_JSON.load(path, max_bytes=16 * 1024 * 1024)
+    data = STRICT_JSON.load(path, max_bytes=MAX_JSON_ARTIFACT_BYTES)
     if not isinstance(data, dict):
         raise ValueError(f"{path} must contain a JSON object")
     return data
@@ -2203,6 +2296,7 @@ def validate_host_synthesis(report: dict[str, Any], request: dict[str, Any]) -> 
         "claims",
         "unresolved_risks",
         "workspace_mutation_sha256",
+        "claim_matrix_sha256",
         "final_answer_ready",
     }
     if not isinstance(report, dict) or set(report) != required:
@@ -2223,10 +2317,9 @@ def validate_host_synthesis(report: dict[str, Any], request: dict[str, Any]) -> 
         isinstance(item, str) for item in report["unresolved_risks"]
     ):
         raise ArtifactValidationError("host-synthesis unresolved_risks must be an array of strings")
-    if re.fullmatch(r"[0-9a-f]{64}", str(report["workspace_mutation_sha256"])) is None:
-        raise ArtifactValidationError(
-            "host-synthesis workspace_mutation_sha256 must be a lowercase SHA-256 digest"
-        )
+    for key in ("workspace_mutation_sha256", "claim_matrix_sha256"):
+        if not isinstance(report[key], str) or re.fullmatch(r"[0-9a-f]{64}", report[key]) is None:
+            raise ArtifactValidationError(f"host-synthesis {key} must be a lowercase SHA-256 digest")
     if report["final_answer_ready"] is not True:
         raise ArtifactValidationError("host-synthesis final_answer_ready must be true")
 
@@ -2255,13 +2348,13 @@ def validate_host_result(report: dict[str, Any], request: dict[str, Any], run_di
             )
         if report["schema_version"] != ARTIFACT_SCHEMA_VERSION or report["run_id"] != request["run_id"]:
             raise ArtifactValidationError("host-result schema_version/run_id does not match the v2 request")
-        if Path(str(report["run_dir"])).resolve() != run_dir.resolve():
+        if not isinstance(report["run_dir"], str) or Path(report["run_dir"]).resolve() != run_dir.resolve():
             raise ArtifactValidationError("host-result run_dir does not match the resolved run directory")
         if report["status"] != "peer_running":
             raise ArtifactValidationError("waiting host-result status must be peer_running")
         if type(report["peer_pid"]) is not int or report["peer_pid"] <= 0:
             raise ArtifactValidationError("waiting host-result peer_pid must be a positive integer")
-        if Path(str(report["peer_report"])).resolve() != (run_dir / "peer-report.json").resolve():
+        if not isinstance(report["peer_report"], str) or Path(report["peer_report"]).resolve() != (run_dir / "peer-report.json").resolve():
             raise ArtifactValidationError("waiting host-result peer_report path is invalid")
         if not isinstance(report["message"], str) or not report["message"].strip():
             raise ArtifactValidationError("waiting host-result message must be a non-empty string")
@@ -2277,6 +2370,7 @@ def validate_host_result(report: dict[str, Any], request: dict[str, Any], run_di
             "finish_timeout_source",
             "normalization",
             "claim_matrix",
+            "claim_matrix_sha256",
             "adjudicator_report",
             "workspace_mutation",
             "workspace_mutation_sha256",
@@ -2289,7 +2383,7 @@ def validate_host_result(report: dict[str, Any], request: dict[str, Any], run_di
             )
         if report["schema_version"] != ARTIFACT_SCHEMA_VERSION or report["run_id"] != request["run_id"]:
             raise ArtifactValidationError("host-result schema_version/run_id does not match the v2 request")
-        if Path(str(report["run_dir"])).resolve() != run_dir.resolve():
+        if not isinstance(report["run_dir"], str) or Path(report["run_dir"]).resolve() != run_dir.resolve():
             raise ArtifactValidationError("host-result run_dir does not match the resolved run directory")
         if report["peer_status"] not in {"ok", "peer_failed"}:
             raise ArtifactValidationError("host-result peer_status is invalid")
@@ -2323,6 +2417,9 @@ def validate_host_result(report: dict[str, Any], request: dict[str, Any], run_di
         expected_mutation_digest = workspace_mutation_sha256(report["workspace_mutation"])
         if report["workspace_mutation_sha256"] != expected_mutation_digest:
             raise ArtifactValidationError("host-result workspace_mutation_sha256 is invalid")
+        matrix_digest = report["claim_matrix_sha256"]
+        if not isinstance(matrix_digest, str) or re.fullmatch(r"[0-9a-f]{64}", matrix_digest) is None:
+            raise ArtifactValidationError("host-result claim_matrix_sha256 must be a lowercase SHA-256 digest")
         if phase == "done" and parse_utc_timestamp(report["completed_at"]) is None:
             raise ArtifactValidationError("host-result completed_at must be an ISO-8601 timestamp")
     else:
@@ -2348,7 +2445,7 @@ def validate_peer_report_matches_request(report: dict[str, Any], request: dict[s
 
 
 def validate_claim_matrix(report: dict[str, Any], request: dict[str, Any]) -> None:
-    required = {"schema_version", "run_id", "claims"}
+    required = {"schema_version", "run_id", "claims", "source_report_sha256"}
     missing = required - report.keys()
     if missing:
         raise ArtifactValidationError(f"claim-matrix missing required keys: {sorted(missing)}")
@@ -2363,6 +2460,19 @@ def validate_claim_matrix(report: dict[str, Any], request: dict[str, Any]) -> No
         raise ArtifactValidationError("claim-matrix claims must be an array")
     for claim in report["claims"]:
         validate_claim_shape(claim, "claim-matrix", require_source=True)
+    sources = report["source_report_sha256"]
+    keys = {"host_first_pass", "peer_report", "helper_reports", "adjudicator_report"}
+    if not isinstance(sources, dict) or set(sources) != keys:
+        raise ArtifactValidationError("claim-matrix source_report_sha256 must identify each canonical source")
+    for key, digest in sources.items():
+        if digest is None and key in {"helper_reports", "adjudicator_report"}:
+            continue
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise ArtifactValidationError(f"claim-matrix source {key} must have a lowercase SHA-256 digest")
+    if request["adjudicator_enabled"] != (sources["adjudicator_report"] is not None):
+        raise ArtifactValidationError("claim-matrix adjudicator source does not match the request")
+    if sources["helper_reports"] is None and any(claim["source"] == "helper" for claim in report["claims"]):
+        raise ArtifactValidationError("claim-matrix helper claims require an admitted helper-report digest")
 
 
 def validate_adjudicator_report(report: dict[str, Any], request: dict[str, Any]) -> None:
@@ -2410,10 +2520,12 @@ def claims_with_source(report: dict[str, Any], source: str) -> list[dict[str, An
     ]
 
 
-def load_helper_claims(run_dir: Path, request: dict[str, Any]) -> list[dict[str, Any]]:
+def load_helper_evidence(
+    run_dir: Path, request: dict[str, Any]
+) -> tuple[list[dict[str, Any]], str | None]:
     path = run_dir / "helper-reports.json"
     if not path.exists():
-        return []
+        return [], None
     data = STRICT_JSON.load(path, max_bytes=16 * 1024 * 1024)
     required = {"schema_version", "run_id", "reports"}
     if not isinstance(data, dict) or set(data) != required:
@@ -2447,7 +2559,11 @@ def load_helper_claims(run_dir: Path, request: dict[str, Any]) -> list[dict[str,
         for claim in report["claims"]:
             validate_claim_shape(claim, "helper-report")
             claims.append({**claim, "source": "helper"})
-    return claims
+    return claims, canonical_artifact_sha256(data)
+
+
+def load_helper_claims(run_dir: Path, request: dict[str, Any]) -> list[dict[str, Any]]:
+    return load_helper_evidence(run_dir, request)[0]
 
 
 def build_claim_matrix(
@@ -2456,10 +2572,19 @@ def build_claim_matrix(
     peer_report: dict[str, Any],
     helper_claims: list[dict[str, Any]] | None = None,
     adjudicator_report: dict[str, Any] | None = None,
+    helper_reports_sha256: str | None = None,
 ) -> dict[str, Any]:
     claim_matrix = {
         "schema_version": ARTIFACT_SCHEMA_VERSION,
         "run_id": request["run_id"],
+        "source_report_sha256": {
+            "host_first_pass": canonical_artifact_sha256(host_report),
+            "peer_report": canonical_artifact_sha256(peer_report),
+            "helper_reports": helper_reports_sha256,
+            "adjudicator_report": (
+                canonical_artifact_sha256(adjudicator_report) if adjudicator_report is not None else None
+            ),
+        },
         "claims": (
             claims_with_source(host_report, "host")
             + claims_with_source(peer_report, "peer")
@@ -2506,12 +2631,14 @@ def validate_peer_normalization(metadata: dict[str, Any]) -> None:
         raise ArtifactValidationError("peer-normalization schema_version must be 2.0")
     if status not in VALIDATION_STATUSES:
         raise ArtifactValidationError("peer-normalization validation_status is invalid")
-    if metadata["artifact_source"] != "peer_report":
-        raise ArtifactValidationError("peer-normalization artifact_source must be peer_report")
-    expected_source = "direct_json" if status == "ok" else "none"
-    if metadata["source"] != expected_source:
+    if metadata["artifact_source"] not in {"peer_report", "peer_raw"}:
+        raise ArtifactValidationError("peer-normalization artifact_source must be peer_report or peer_raw")
+    expected_sources = {"none"} if status != "ok" else (
+        {"direct_json", "structured_output"} if metadata["artifact_source"] == "peer_raw" else {"direct_json"}
+    )
+    if metadata["source"] not in expected_sources:
         raise ArtifactValidationError(
-            f"peer-normalization source must be {expected_source!r} for {status!r}"
+            f"peer-normalization source must be one of {sorted(expected_sources)!r} for {status!r}"
         )
     if type(metadata["input_bytes"]) is not int or metadata["input_bytes"] < 0:
         raise ArtifactValidationError("peer-normalization input_bytes must be non-negative integer")
@@ -2548,6 +2675,10 @@ def normalize_peer_report_from_artifacts(
             last_error = exc
         else:
             metadata = dict(normalized.metadata)
+            if normalization_path.exists() and normalization_path.stat().st_size:
+                previous = load_json(normalization_path)
+                validate_peer_normalization(previous)
+                metadata["warnings"] = list(dict.fromkeys(previous["warnings"] + metadata["warnings"]))
             metadata["artifact_source"] = "peer_report"
             metadata["validation_status"] = "ok"
             write_json(normalization_path, metadata)
@@ -2822,8 +2953,10 @@ def _finish_after_wait_locked(
         )
 
     try:
-        helper_claims = load_helper_claims(run_dir, request)
-        claim_matrix = build_claim_matrix(request, host_report, peer_report, helper_claims, adjudicator)
+        helper_claims, helper_digest = load_helper_evidence(run_dir, request)
+        claim_matrix = build_claim_matrix(
+            request, host_report, peer_report, helper_claims, adjudicator, helper_digest
+        )
     except ArtifactValidationError as exc:
         raise SystemExit(f"invalid helper or claim-matrix artifact in {run_dir}: {exc}") from exc
     write_json(run_dir / "claim-matrix.json", claim_matrix)
@@ -2842,6 +2975,7 @@ def _finish_after_wait_locked(
         "finish_timeout_source": finish_timeout_source,
         "normalization": str(run_dir / "peer-normalization.json"),
         "claim_matrix": str(run_dir / "claim-matrix.json"),
+        "claim_matrix_sha256": claim_matrix_sha256(claim_matrix),
         "adjudicator_report": str(adjudicator_path) if adjudicator is not None else None,
         "workspace_mutation": workspace_mutation,
         "workspace_mutation_sha256": workspace_mutation_sha256(workspace_mutation),
@@ -2914,17 +3048,25 @@ def validate_completion_artifacts(
         raise ArtifactValidationError(
             "host-synthesis does not bind the current workspace mutation evidence; inspect the diagnostic and resynthesize"
         )
-    helper_claims = load_helper_claims(run_dir, request)
+    helper_claims, helper_digest = load_helper_evidence(run_dir, request)
     expected_claim_matrix = build_claim_matrix(
         request,
         host_report,
         peer_report,
         helper_claims,
         adjudicator,
+        helper_digest,
     )
     if claim_matrix != expected_claim_matrix:
         raise ArtifactValidationError(
             "claim-matrix does not derive from the current host, peer, helper, and adjudicator reports; rerun finish"
+        )
+    current_digest = claim_matrix_sha256(expected_claim_matrix)
+    if host_result["claim_matrix_sha256"] != current_digest:
+        raise ArtifactValidationError("host-result does not bind the current claim-matrix; rerun finish")
+    if host_synthesis["claim_matrix_sha256"] != current_digest:
+        raise ArtifactValidationError(
+            "host-synthesis does not bind the current claim-matrix; inspect the claims and resynthesize"
         )
     return peer_report
 
@@ -3999,7 +4141,7 @@ def doctor(args: argparse.Namespace) -> int:
         "run_root": {"ok": run_root.exists() or path_is_creatable(run_root), "value": str(run_root)},
         "python": {"ok": sys.version_info >= (3, 10), "value": sys.version.split()[0]},
         "platform": {
-            "ok": os.name == "posix" and all(hasattr(os, name) for name in ("getpgid", "killpg")),
+            "ok": is_supported_platform(),
             "value": {"os_name": os.name, "platform": sys.platform, "supported": ["Linux", "macOS"]},
         },
         "git": {"ok": shutil.which("git") is not None, "value": shutil.which("git")},

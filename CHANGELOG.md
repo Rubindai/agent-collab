@@ -1,9 +1,19 @@
 # Changelog
 
-## Unreleased
+## 3.0.0 — Unreleased
 
-- Raise supported CLI minimums to Codex 0.163.0 and Claude Code 2.1.257 for current helper-selection controls; older versions now fail before run creation.
-- Pin Codex helper model and effort defaults to the selected peer pair, force Claude helper model selection, and pin Claude effective effort, including `xhigh` for explicit `ultracode` runs. Document the remaining Codex custom-agent override boundary.
+- Treat plain-language "use agent collab" as an explicit request for the real opposite-product peer workflow while retaining implicit discovery.
+- Fix availability-probe interruption cleanup, launch-time attestation expiry, snapshot index self-mutation, strict artifact types, symlink rejection, and preservation of normalization warnings. Harden prefixed Fable admission, Agent counters, conflicting Claude evidence, and effort escaping.
+- Reject every conflicting Codex model/effort observation, even when matching telemetry also appears. Require bounded actual-run Claude Stop-hook effort evidence; later matching observations cannot erase a mismatch.
+- **Breaking:** deny Workflow orchestration after a live zero-helper probe demonstrated that Workflow agents bypass the Agent-call counter. Explicit `ultracode` now fails with `helper_policy_unavailable` before run creation; it is never silently downgraded. Provider availability checks still distinguish CLI support from this runtime-policy restriction.
+- **Breaking:** require Claude Code 2.1.295+ for fail-closed helper hooks; reject Codex provider/profile overrides that would detach launch from availability. New strict synthesis/result/matrix digest fields bind the complete admitted evidence; close active runs before upgrading.
+- Preserve workflow ownership when process identity cannot be inspected, reject oversized baselines before launch, and make interrupted cancellation resume from immutable snapshot evidence.
+- Apply Claude helper pins through command-line settings, refuse inbound cross-session messages, and document the limits of process-group and helper accounting.
+- Reassess the complete README and repository guidance on 2026-10-18; correct local Claude marketplace reload behavior, current sandbox evidence, fallback-setting semantics, and the unverified standalone Codex validator provenance.
+- Document current helper-cache tradeoffs and provider-managed cache lifetimes without claiming measured cost or quality gains. Move per-run identity after shared outcome/evidence text and retain bounded Codex stdout usage telemetry separately from the required final report.
+- Enforce the documented Linux/macOS launch boundary for other POSIX platforms as well as Windows, and use the same platform predicate in diagnostics.
+- Require Codex 0.163.0+ for current helper-selection controls; older versions fail before run creation.
+- Pin Codex helper model and effort defaults to the selected peer pair, force Claude helper model selection, and pin Claude effective effort, with provider `ultracode` semantics documented separately from the execution-policy rejection. Document the remaining Codex custom-agent override boundary.
 - Require fresh independent helper contexts, disable Claude conversation forks, state the numeric Codex total-spawn bound, and assign disjoint write scopes with one integration owner for authorized parallel edits.
 - Separate Codex plugin, skill, and isolated installation checks so an unavailable standalone plugin validator does not suppress the other checks. A skipped official validator remains an outstanding release check.
 

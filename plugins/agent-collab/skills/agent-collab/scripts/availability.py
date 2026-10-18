@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import re
+import signal
 import shlex
 import subprocess
 import sys
@@ -107,7 +108,7 @@ SAFETY = load_safety_runtime()
 
 
 def run_bounded_command(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-    """Run one short text probe with bounded output and descendant cleanup."""
+    """Run one short text probe with bounded output and owned-group cleanup."""
 
     timeout = kwargs.pop("timeout", None)
     check = bool(kwargs.pop("check", False))
@@ -127,109 +128,141 @@ def run_bounded_command(args: list[str], **kwargs: Any) -> subprocess.CompletedP
     errors = str(kwargs.get("errors") or "replace")
     process: subprocess.Popen[str] | None = None
     identity: dict[str, Any] | None = None
+    writer: threading.Thread | None = None
     gate_read: int | None = None
     gate_write: int | None = None
-    popen_args = args
-    if os.name == "posix":
-        gate_read, gate_write = os.pipe()
-        os.set_inheritable(gate_read, True)
-        popen_args = [sys.executable, "-c", PROBE_GATE_CODE, str(gate_read), *args]
-        kwargs["pass_fds"] = tuple(kwargs.get("pass_fds", ())) + (gate_read,)
+    previous_handlers: dict[int, Any] = {}
+    pending_signals: list[int] = []
 
-    with tempfile.TemporaryFile(mode="w+", encoding=encoding, errors=errors) as stdout_file, tempfile.TemporaryFile(
-        mode="w+", encoding=encoding, errors=errors
-    ) as stderr_file:
+    def defer_signal(signum: int, _frame: Any) -> None:
+        # Raising inside Popen can lose the new child before its handle is
+        # assigned. Defer interruption until ownership is recorded; also let
+        # bounded cleanup finish if another signal arrives during shutdown.
+        if not pending_signals:
+            pending_signals.append(signum)
+
+    def raise_pending_signal() -> None:
+        if pending_signals:
+            signum = pending_signals[0]
+            if signum == signal.SIGINT:
+                raise KeyboardInterrupt
+            raise SystemExit(128 + signum)
+
+    def write_input() -> None:
+        if process is None or process.stdin is None:
+            return
         try:
-            process = subprocess.Popen(
-                popen_args,
-                stdout=stdout_file,
-                stderr=stderr_file,
-                start_new_session=True,
-                **kwargs,
-            )
-            identity = SAFETY.process_identity(process.pid)
-            if gate_write is not None:
-                os.write(gate_write, b"1")
-                os.close(gate_write)
-                gate_write = None
-                os.close(gate_read)
-                gate_read = None
-        except BaseException:
-            for descriptor in (gate_write, gate_read):
-                if descriptor is not None:
-                    try:
-                        os.close(descriptor)
-                    except OSError:
-                        pass
-            if process is not None:
-                cleanup = SAFETY.terminate_process_group(int(process.pid))
-                if not cleanup["quiescent"]:
-                    raise OSError(f"probe startup cleanup failed: {cleanup}")
-            raise
-
-        def write_input() -> None:
-            if process is None or process.stdin is None:
-                return
+            if input_text is not None:
+                process.stdin.write(input_text)
+                process.stdin.flush()
+        except (BrokenPipeError, OSError, ValueError):
+            pass
+        finally:
             try:
-                if input_text is not None:
-                    process.stdin.write(input_text)
-                    process.stdin.flush()
-            except (BrokenPipeError, OSError, ValueError):
+                process.stdin.close()
+            except (OSError, ValueError):
                 pass
-            finally:
-                try:
-                    process.stdin.close()
-                except (OSError, ValueError):
-                    pass
 
-        writer = threading.Thread(target=write_input, daemon=True)
-        writer.start()
-        deadline = None if timeout is None else time.monotonic() + float(timeout)
-        stop_reason: str | None = None
-        while process.poll() is None:
-            captured_bytes = os.fstat(stdout_file.fileno()).st_size + os.fstat(stderr_file.fileno()).st_size
-            if captured_bytes > MAX_PROBE_OUTPUT_BYTES:
-                stop_reason = "output_limit"
-                break
-            if deadline is not None and time.monotonic() >= deadline:
-                stop_reason = "timeout"
-                break
-            time.sleep(0.02)
-
-        returncode = process.poll()
-        cleanup = SAFETY.terminate_process_group(int(identity["pgid"]))
-        writer.join(timeout=1)
-        if writer.is_alive() or not cleanup["quiescent"]:
-            raise OSError(
-                "probe process group or input writer did not become quiescent: "
-                f"{dict(cleanup, input_writer_quiescent=not writer.is_alive())}"
-            )
-        if returncode is None:
+    try:
+        if os.name == "posix" and threading.current_thread() is threading.main_thread():
+            for signum in (signal.SIGTERM, signal.SIGINT):
+                previous_handlers[signum] = signal.getsignal(signum)
+                signal.signal(signum, defer_signal)
+        with tempfile.TemporaryFile(mode="w+", encoding=encoding, errors=errors) as stdout_file, tempfile.TemporaryFile(
+            mode="w+", encoding=encoding, errors=errors
+        ) as stderr_file:
+            stop_reason: str | None = None
             try:
-                returncode = process.wait(timeout=1)
-            except subprocess.TimeoutExpired as exc:
-                raise OSError("probe leader was not reaped after process-group cleanup") from exc
+                popen_args = args
+                if os.name == "posix":
+                    gate_read, gate_write = os.pipe()
+                    os.set_inheritable(gate_read, True)
+                    popen_args = [sys.executable, "-c", PROBE_GATE_CODE, str(gate_read), *args]
+                    kwargs["pass_fds"] = tuple(kwargs.get("pass_fds", ())) + (gate_read,)
+                raise_pending_signal()
+                process = subprocess.Popen(
+                    popen_args,
+                    stdout=stdout_file,
+                    stderr=stderr_file,
+                    start_new_session=True,
+                    **kwargs,
+                )
+                identity = SAFETY.process_identity(process.pid)
+                raise_pending_signal()
+                if gate_write is not None:
+                    os.write(gate_write, b"1")
+                    os.close(gate_write)
+                    gate_write = None
+                    os.close(gate_read)
+                    gate_read = None
+                writer = threading.Thread(target=write_input, daemon=True)
+                writer.start()
+                deadline = None if timeout is None else time.monotonic() + float(timeout)
+                while process.poll() is None:
+                    raise_pending_signal()
+                    captured_bytes = os.fstat(stdout_file.fileno()).st_size + os.fstat(stderr_file.fileno()).st_size
+                    if captured_bytes > MAX_PROBE_OUTPUT_BYTES:
+                        stop_reason = "output_limit"
+                        break
+                    if deadline is not None and time.monotonic() >= deadline:
+                        stop_reason = "timeout"
+                        break
+                    time.sleep(0.02)
+            finally:
+                # This covers startup failures, interrupted supervision, and
+                # normal exits. Close an unopened gate before terminating its
+                # owned new-session child; never release it during rollback.
+                for descriptor in (gate_write, gate_read):
+                    if descriptor is not None:
+                        try:
+                            os.close(descriptor)
+                        except OSError:
+                            pass
+                if process is not None:
+                    # start_new_session makes the Popen child's PID its PGID,
+                    # even if exact identity capture failed before gate release.
+                    pgid = int(identity["pgid"]) if identity is not None else int(process.pid)
+                    cleanup = SAFETY.terminate_process_group(pgid)
+                    try:
+                        process.wait(timeout=1)
+                    except subprocess.TimeoutExpired as exc:
+                        raise OSError("probe leader was not reaped after process-group cleanup") from exc
+                    if writer is not None and writer.ident is not None:
+                        writer.join(timeout=1)
+                    elif process.stdin is not None:
+                        process.stdin.close()
+                    writer_quiescent = writer is None or not writer.is_alive()
+                    if not writer_quiescent or not cleanup["quiescent"]:
+                        raise OSError(
+                            "probe process group or input writer did not become quiescent: "
+                            f"{dict(cleanup, input_writer_quiescent=writer_quiescent)}"
+                        )
 
-        stdout_file.seek(0)
-        stderr_file.seek(0)
-        stdout = stdout_file.read(MAX_PROBE_OUTPUT_BYTES + 1)
-        stderr = stderr_file.read(MAX_PROBE_OUTPUT_BYTES + 1)
-        captured_bytes = len(stdout.encode(encoding, errors=errors)) + len(
-            stderr.encode(encoding, errors=errors)
-        )
-        if stop_reason == "output_limit" or captured_bytes > MAX_PROBE_OUTPUT_BYTES:
-            raise OSError(
-                f"probe output exceeded the finite {MAX_PROBE_OUTPUT_BYTES}-byte capture limit"
+            raise_pending_signal()
+            stdout_file.seek(0)
+            stderr_file.seek(0)
+            stdout = stdout_file.read(MAX_PROBE_OUTPUT_BYTES + 1)
+            stderr = stderr_file.read(MAX_PROBE_OUTPUT_BYTES + 1)
+            captured_bytes = len(stdout.encode(encoding, errors=errors)) + len(
+                stderr.encode(encoding, errors=errors)
             )
-        if stop_reason == "timeout":
-            raise subprocess.TimeoutExpired(args, timeout, output=stdout, stderr=stderr)
+            if stop_reason == "output_limit" or captured_bytes > MAX_PROBE_OUTPUT_BYTES:
+                raise OSError(
+                    f"probe output exceeded the finite {MAX_PROBE_OUTPUT_BYTES}-byte capture limit"
+                )
+            if stop_reason == "timeout":
+                raise subprocess.TimeoutExpired(args, timeout, output=stdout, stderr=stderr)
 
-    completed = subprocess.CompletedProcess(args, returncode, stdout, stderr)
-    if check and completed.returncode != 0:
-        raise subprocess.CalledProcessError(
-            completed.returncode, args, output=stdout, stderr=stderr
-        )
-    return completed
+        completed = subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
+        raise_pending_signal()
+        if check and completed.returncode != 0:
+            raise subprocess.CalledProcessError(
+                completed.returncode, args, output=stdout, stderr=stderr
+            )
+        return completed
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
 
 
 def utc_timestamp() -> str:
@@ -316,7 +349,7 @@ def validate_result(output: dict[str, Any], *, require_available: bool = False) 
         raise ValueError(f"availability source must be one of {sorted(SOURCES)}")
     if output["effort_evidence"] not in EFFORT_EVIDENCE:
         raise ValueError(f"availability effort_evidence must be one of {sorted(EFFORT_EVIDENCE)}")
-    if re.fullmatch(r"[0-9a-f]{64}", str(output["evidence_sha256"])) is None:
+    if not isinstance(output["evidence_sha256"], str) or re.fullmatch(r"[0-9a-f]{64}", output["evidence_sha256"]) is None:
         raise ValueError("availability evidence_sha256 must be a lowercase SHA-256 digest")
     if output["status"] == "available":
         if not output["requested_model"].strip() or not output["requested_effort"].strip():
@@ -591,7 +624,7 @@ def model_identifier_matches(requested_model: str, observed_model: str) -> bool:
     return observed == requested
 
 
-def observed_effort(envelope: dict[str, Any], requested_model: str) -> str | None:
+def observed_efforts(envelope: dict[str, Any], requested_model: str) -> list[str]:
     effort_keys = ("effort", "effortLevel", "effort_level", "reasoningEffort", "reasoning_effort")
     observed: list[str] = []
     for key in effort_keys:
@@ -609,7 +642,19 @@ def observed_effort(envelope: dict[str, Any], requested_model: str) -> str | Non
                 value = usage.get(key)
                 if isinstance(value, str) and value not in observed:
                     observed.append(value)
+    return observed
+
+
+def observed_effort(envelope: dict[str, Any], requested_model: str) -> str | None:
+    observed = observed_efforts(envelope, requested_model)
     return observed[0] if len(observed) == 1 else None
+
+
+def allowed_auxiliary_model(requested_model: str, observed_model: str) -> bool:
+    return (
+        re.search(r"(?:^|[^a-z0-9])haiku(?:$|[^a-z0-9])", requested_model.casefold()) is None
+        and observed_model.casefold().startswith(CLAUDE_AUXILIARY_MODEL_PREFIXES)
+    )
 
 
 def error_is_unavailable(text: str) -> bool:
@@ -887,12 +932,15 @@ def claude_availability(
         item
         for item in usage_models
         if not model_identifier_matches(model, item)
-        and not item.casefold().startswith(CLAUDE_AUXILIARY_MODEL_PREFIXES)
+        and not allowed_auxiliary_model(model, item)
     ]
     matching_usage = [item for item in usage_models if model_identifier_matches(model, item)]
     model_mismatch = bool(unexpected_usage) or not matching_usage
     expected_reported_effort = effective_claude_effort(effort)
-    if model_mismatch or reported_effort != expected_reported_effort:
+    envelope_efforts = observed_efforts(envelope, model)
+    if model_mismatch or reported_effort != expected_reported_effort or any(
+        observed != expected_reported_effort for observed in envelope_efforts
+    ):
         return result(
             status="unavailable",
             peer="claude",
@@ -903,7 +951,8 @@ def claude_availability(
             details=(
                 "Claude resolved a model or effective effort different from the exact requested pair; "
                 f"modelUsage={usage_models}; requested_cli_effort={effort}; "
-                f"expected_provider_effort={expected_reported_effort}; observed_effort={reported_effort}"
+                f"expected_provider_effort={expected_reported_effort}; observed_effort={reported_effort}; "
+                f"envelope_efforts={envelope_efforts}"
             ),
             evidence=evidence,
             supported_efforts=[effort] if reported_effort == expected_reported_effort else [],

@@ -81,6 +81,22 @@ class SafetyTests(unittest.TestCase):
         self.assertTrue(safety.process_identity_matches(identity))
         self.assertFalse(safety.process_identity_matches({**identity, "start_time": "not-the-start-time"}))
 
+    def test_process_identity_read_failures_do_not_prove_termination(self):
+        identity = safety.process_identity(os.getpid())
+        for error in (PermissionError("denied"), FileNotFoundError("proc read raced"),
+                      RuntimeError("ps failed"), subprocess.TimeoutExpired("ps", 5)):
+            with self.subTest(error=type(error).__name__), mock.patch.object(
+                safety, "process_identity", side_effect=error
+            ), mock.patch.object(safety.os, "kill", return_value=None):
+                self.assertEqual(safety.process_identity_state(identity), "unknown")
+        with mock.patch.object(safety, "process_identity", side_effect=ProcessLookupError()):
+            self.assertEqual(safety.process_identity_state(identity), "dead_or_replaced")
+        with mock.patch.object(safety, "process_identity", side_effect=PermissionError()), mock.patch.object(
+            safety.os, "kill", side_effect=ProcessLookupError()
+        ):
+            self.assertEqual(safety.process_identity_state(identity), "dead_or_replaced")
+        self.assertEqual(safety.process_identity_state({}), "unknown")
+
     def test_claude_agent_guard_blocks_after_finite_limit(self):
         with tempfile.TemporaryDirectory() as tmp_name:
             counter = Path(tmp_name) / "agent-calls.count"

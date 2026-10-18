@@ -4,18 +4,35 @@
   "title": "Agent Collab Claim Matrix",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "run_id", "claims"],
+  "required": [
+    "schema_version",
+    "run_id",
+    "claims",
+    "source_report_sha256"
+  ],
   "properties": {
-    "schema_version": {"const": "2.0"},
-    "run_id": {"type": "string", "minLength": 1},
+    "schema_version": {
+      "const": "2.0"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
     "claims": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["claim", "status", "evidence", "source"],
+        "required": [
+          "claim",
+          "status",
+          "evidence",
+          "source"
+        ],
         "additionalProperties": false,
         "properties": {
-          "claim": {"type": "string"},
+          "claim": {
+            "type": "string"
+          },
           "status": {
             "enum": [
               "confirmed",
@@ -25,8 +42,59 @@
               "needs_human_input"
             ]
           },
-          "evidence": {"type": "string"},
-          "source": {"enum": ["host", "peer", "helper", "adjudicator"]}
+          "evidence": {
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "host",
+              "peer",
+              "helper",
+              "adjudicator"
+            ]
+          }
+        }
+      }
+    },
+    "source_report_sha256": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "host_first_pass",
+        "peer_report",
+        "helper_reports",
+        "adjudicator_report"
+      ],
+      "properties": {
+        "host_first_pass": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "peer_report": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "helper_reports": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "adjudicator_report": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       }
     }

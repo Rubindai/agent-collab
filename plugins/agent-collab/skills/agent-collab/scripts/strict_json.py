@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import stat
 import tempfile
 from pathlib import Path
 from typing import Any, Iterable, TextIO
@@ -22,8 +23,23 @@ def ensure_private_directory(path: Path) -> Path:
 
     path.mkdir(parents=True, exist_ok=True, mode=PRIVATE_DIRECTORY_MODE)
     if os.name == "posix":
-        os.chmod(path, PRIVATE_DIRECTORY_MODE)
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                             | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+        try:
+            os.fchmod(descriptor, PRIVATE_DIRECTORY_MODE)
+        finally:
+            os.close(descriptor)
     return path
+
+
+def reject_symlink_destination(path: Path) -> None:
+    """Reject existing final-component links without resolving their targets."""
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(mode):
+        raise OSError(f"artifact destination must not be a symlink: {path}")
 
 
 def open_private_text(path: Path) -> TextIO:
@@ -49,6 +65,7 @@ def write_text(path: Path, text: str) -> None:
     if not isinstance(text, str):
         raise TypeError("text artifact must be a string")
     ensure_private_directory(path.parent)
+    reject_symlink_destination(path)
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temporary_path = Path(temporary_name)
     try:
@@ -59,9 +76,8 @@ def write_text(path: Path, text: str) -> None:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
+        reject_symlink_destination(path)
         os.replace(temporary_path, path)
-        if os.name == "posix":
-            os.chmod(path, PRIVATE_FILE_MODE)
         fsync_directory(path.parent)
     except BaseException:
         if descriptor >= 0:
@@ -156,21 +172,4 @@ def dumps(value: Any, *, indent: int | None = 2, sort_keys: bool = True) -> str:
 
 
 def write(path: Path, value: Any) -> None:
-    ensure_private_directory(path.parent)
-    payload = dumps(value) + "\n"
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    temporary_path = Path(temporary_name)
-    try:
-        if os.name == "posix":
-            os.fchmod(descriptor, PRIVATE_FILE_MODE)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary_path, path)
-        if os.name == "posix":
-            os.chmod(path, PRIVATE_FILE_MODE)
-        fsync_directory(path.parent)
-    except BaseException:
-        temporary_path.unlink(missing_ok=True)
-        raise
+    write_text(path, dumps(value) + "\n")

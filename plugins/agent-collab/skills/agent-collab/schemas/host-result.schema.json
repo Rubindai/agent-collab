@@ -45,6 +45,7 @@
         "finish_timeout_source",
         "normalization",
         "claim_matrix",
+        "claim_matrix_sha256",
         "adjudicator_report",
         "workspace_mutation",
         "workspace_mutation_sha256"
@@ -68,6 +69,7 @@
         "finish_timeout_source": {"enum": ["explicit", "peer_timeout_plus_grace"]},
         "normalization": {"type": "string", "minLength": 1},
         "claim_matrix": {"type": "string", "minLength": 1},
+        "claim_matrix_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "adjudicator_report": {
           "anyOf": [
             {"type": "string", "minLength": 1},

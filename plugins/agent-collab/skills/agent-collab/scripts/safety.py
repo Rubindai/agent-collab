@@ -32,7 +32,11 @@ AGENT_COLLAB_OWNED_CODEX_CONFIG_KEYS = {
     "features",
     "features.multi_agent",
     "model",
+    "model_provider",
+    "model_providers",
     "model_reasoning_effort",
+    "profile",
+    "profiles",
     "sandbox_mode",
     "web_search",
 }
@@ -102,12 +106,30 @@ def validate_process_identity(value: Any) -> None:
             raise ValueError(f"process identity {key} must be a non-empty string")
 
 
-def process_identity_matches(expected: Any) -> bool:
+def process_identity_state(expected: Any) -> str:
+    """Distinguish proven termination/replacement from unavailable evidence."""
     try:
         validate_process_identity(expected)
-        return process_identity(int(expected["pid"])) == expected
+    except ValueError:
+        return "unknown"
+    try:
+        observed = process_identity(expected["pid"])
+    except ProcessLookupError:
+        return "dead_or_replaced"
     except (OSError, RuntimeError, subprocess.SubprocessError, ValueError):
-        return False
+        # A failed /proc or ps read is not proof that the launcher has exited.
+        try:
+            os.kill(expected["pid"], 0)
+        except ProcessLookupError:
+            return "dead_or_replaced"
+        except OSError:
+            pass
+        return "unknown"
+    return "matching" if observed == expected else "dead_or_replaced"
+
+
+def process_identity_matches(expected: Any) -> bool:
+    return process_identity_state(expected) == "matching"
 
 
 def _linux_process_group_members(pgid: int) -> list[tuple[int, str]]:
@@ -236,7 +258,9 @@ def sandbox_preflight(repo_root: Path, env: Mapping[str, str] | None = None) -> 
         "--die-with-parent",
         "--chdir",
         str(repo_root),
-        "/usr/bin/true",
+        sys.executable,
+        "-c",
+        "pass",
     ]
     try:
         completed = subprocess.run(
@@ -297,6 +321,9 @@ def claude_agent_guard_settings(
         "availableModels": [model],
         "fallbackModel": [],
         "switchModelsOnFlag": False,
+        "crossSessionInbound": "refuse",
+        "disableWorkflows": True,
+        "ultracode": False,
         "disableAllHooks": False,
         "hooks": {
             "PreToolUse": [
@@ -307,11 +334,29 @@ def claude_agent_guard_settings(
                             "type": "command",
                             "command": claude_agent_guard_command(counter_path, limit),
                             "timeout": 5,
+                            "onFailure": "block",
                         }
                     ],
                 }
             ]
         },
+    }
+
+
+def claude_helper_policy_failure(model: str, effort: str) -> dict[str, Any] | None:
+    if effort != "ultracode":
+        return None
+    return {
+        "schema_version": "2.0",
+        "status": "helper_policy_unavailable",
+        "peer": "claude",
+        "requested_model": model,
+        "requested_effort": effort,
+        "details": (
+            "Explicit ultracode requires Workflow orchestration, whose agents bypass the finite "
+            "Agent-call counter. Agent Collab cannot enforce its helper bound for this mode. "
+            "No peer was launched and no model or effort fallback was selected."
+        ),
     }
 
 
@@ -408,30 +453,45 @@ def _run_claude_agent_guard(counter_path: Path, limit: int) -> int:
             raise ValueError("invalid Agent call limit")
         counter_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         if os.name == "posix":
-            os.chmod(counter_path.parent, 0o700)
-        flags = os.O_RDWR | os.O_CREAT
+            directory_fd = os.open(counter_path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                                   | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                os.fchmod(directory_fd, 0o700)
+            finally:
+                os.close(directory_fd)
+        flags = os.O_RDWR
         flags |= getattr(os, "O_CLOEXEC", 0)
         flags |= getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(counter_path, flags, 0o600)
-        if os.name == "posix":
-            os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "a+", encoding="utf-8") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            handle.seek(0)
-            raw = handle.read().strip()
-            count = int(raw) if raw else 0
-            if count >= limit:
-                print(
-                    f"Agent Collab blocked Agent tool call {count + 1}: the finite per-run limit is {limit}.",
-                    file=sys.stderr,
-                )
-                return 2
-            handle.seek(0)
-            handle.truncate()
-            handle.write(str(count + 1))
-            handle.flush()
-            os.fsync(handle.fileno())
-            return 0
+        lock_descriptor = os.open(counter_path.with_name(counter_path.name + '.lock'), flags | os.O_CREAT, 0o600)
+        os.fchmod(lock_descriptor, 0o600)
+        with os.fdopen(lock_descriptor, 'a+') as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                descriptor = os.open(counter_path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+                created = True
+            except FileExistsError:
+                descriptor = os.open(counter_path, flags, 0o600)
+                created = False
+            if os.name == "posix":
+                os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "a+", encoding="utf-8") as handle:
+                handle.seek(0)
+                raw = handle.read(64)
+                if (not raw and not created) or (raw and (re.fullmatch(r"0|[1-9][0-9]*", raw) is None or len(raw) > 2)):
+                    raise ValueError("Agent call counter must be a canonical non-negative integer")
+                count = int(raw) if raw else 0
+                if count >= limit:
+                    print(
+                        f"Agent Collab blocked Agent tool call {count + 1}: the finite per-run limit is {limit}.",
+                        file=sys.stderr,
+                    )
+                    return 2
+                handle.seek(0)
+                handle.truncate()
+                handle.write(str(count + 1))
+                handle.flush()
+                os.fsync(handle.fileno())
+                return 0
     except BaseException as exc:
         print(f"Agent Collab could not enforce the Agent tool call limit: {exc}", file=sys.stderr)
         return 2

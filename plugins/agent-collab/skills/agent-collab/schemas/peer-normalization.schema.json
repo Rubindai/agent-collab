@@ -15,13 +15,53 @@
         "validation_status"
       ],
       "properties": {
-        "schema_version": {"const": "2.0"},
-        "source": {"const": "direct_json"},
-        "artifact_source": {"const": "peer_report"},
-        "input_bytes": {"type": "integer", "minimum": 0},
-        "warnings": {"type": "array", "items": {"type": "string"}},
-        "validation_status": {"const": "ok"}
-      }
+        "schema_version": {
+          "const": "2.0"
+        },
+        "source": {
+          "enum": [
+            "direct_json",
+            "structured_output"
+          ]
+        },
+        "artifact_source": {
+          "enum": [
+            "peer_report",
+            "peer_raw"
+          ]
+        },
+        "input_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "validation_status": {
+          "const": "ok"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "artifact_source": {
+                "const": "peer_report"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "source": {
+                "const": "direct_json"
+              }
+            }
+          }
+        }
+      ]
     },
     {
       "type": "object",
@@ -36,11 +76,28 @@
         "error"
       ],
       "properties": {
-        "schema_version": {"const": "2.0"},
-        "source": {"const": "none"},
-        "artifact_source": {"const": "peer_report"},
-        "input_bytes": {"type": "integer", "minimum": 0},
-        "warnings": {"type": "array", "items": {"type": "string"}},
+        "schema_version": {
+          "const": "2.0"
+        },
+        "source": {
+          "const": "none"
+        },
+        "artifact_source": {
+          "enum": [
+            "peer_report",
+            "peer_raw"
+          ]
+        },
+        "input_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "validation_status": {
           "enum": [
             "invalid_json",
@@ -49,7 +106,10 @@
             "peer_report_mismatch"
           ]
         },
-        "error": {"type": "string", "minLength": 1}
+        "error": {
+          "type": "string",
+          "minLength": 1
+        }
       }
     }
   ]
