@@ -19,6 +19,7 @@
     "max_local_subagents",
     "online_research",
     "safe_mode",
+    "workspace_mode",
     "peer_model",
     "peer_effort",
     "availability_attestation",
@@ -48,6 +49,7 @@
     "max_local_subagents": {"type": "integer", "minimum": 0, "maximum": 64},
     "online_research": {"type": "boolean"},
     "safe_mode": {"type": "boolean"},
+    "workspace_mode": {"enum": ["isolated", "direct"]},
     "peer_model": {"type": "string", "minLength": 1},
     "peer_effort": {"type": "string", "minLength": 1},
     "availability_attestation": {
@@ -178,6 +180,10 @@
     }
   },
   "allOf": [
+    {
+      "if": {"properties": {"workspace_mode": {"const": "isolated"}}, "required": ["workspace_mode"]},
+      "then": {"properties": {"safe_mode": {"const": false}, "edit_allowed": {"const": false}}}
+    },
     {
       "if": {"properties": {"origin": {"const": "codex"}}, "required": ["origin"]},
       "then": {

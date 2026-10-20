@@ -38,12 +38,20 @@ MODES = {
 ARTIFACT_SCHEMA_VERSION = "2.0"
 SETTINGS_SCHEMA_VERSION = "2.0"
 DEFAULT_HISTORY_RETAINED_RUNS = 50
+
+
+def platform_default_workspace_mode(platform_name: str) -> str:
+    """Use the supported disposable backend only where it exists."""
+    return "direct" if platform_name == "darwin" else "isolated"
+
+
 SETTING_DEFAULTS: dict[str, Any] = {
     "local_subagents_allowed": True,
     "max_local_subagents": 8,
     "adjudicator_enabled": True,
     "agent_timeout_seconds": 2700,
     "safe_mode": False,
+    "workspace_mode": platform_default_workspace_mode(sys.platform),
     "codex_model": "gpt-6-astra",
     "codex_effort": "xhigh",
     "online_research": True,
@@ -59,6 +67,7 @@ SETTING_ENV_KEYS = {
     "adjudicator_enabled": "AGENT_COLLAB_ADJUDICATOR_ENABLED",
     "agent_timeout_seconds": "AGENT_COLLAB_TIMEOUT_SECONDS",
     "safe_mode": "AGENT_COLLAB_SAFE_MODE",
+    "workspace_mode": "AGENT_COLLAB_WORKSPACE_MODE",
     "codex_model": "CODEX_AGENT_COLLAB_MODEL",
     "codex_effort": "CODEX_AGENT_COLLAB_EFFORT",
     "online_research": "AGENT_COLLAB_ONLINE_RESEARCH",
@@ -70,6 +79,11 @@ SETTING_ENV_KEYS = {
 }
 MIN_CLI_VERSIONS = {"codex": (0, 163, 0), "claude": (2, 1, 295)}
 MAX_JSON_ARTIFACT_BYTES = 16 * 1024 * 1024
+COVERAGE_LIMITATIONS = [
+    "Known high-volume generated and dependency directories are excluded.",
+    "Large manifests retain complete digests but only a bounded path sample.",
+    "Transient changes that were reverted before a snapshot are not observable.",
+]
 DEFAULT_AVAILABILITY_TIMEOUT_SECONDS = 30.0
 MAX_AVAILABILITY_TIMEOUT_SECONDS = 60.0
 CLAIM_STATUSES = {
@@ -314,6 +328,17 @@ def load_snapshot_runtime() -> Any:
     spec = importlib.util.spec_from_file_location("agent_collab_snapshot", path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"cannot load snapshot runtime: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_isolation_runtime() -> Any:
+    path = runtime_dir() / "isolation.py"
+    spec = importlib.util.spec_from_file_location("agent_collab_isolation_host", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load isolation runtime: {path}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
@@ -607,6 +632,10 @@ def normalize_settings(raw_settings: dict[str, Any], source: str) -> dict[str, A
             normalized[key] = text
         elif key == "codex_config":
             normalized[key] = normalize_codex_config(value, source)
+        elif key == "workspace_mode":
+            if value not in {"isolated", "direct"}:
+                raise ValueError(f"{source} workspace_mode must be isolated or direct")
+            normalized[key] = value
         elif key == "claude_tools":
             normalized[key] = validate_claude_tools(value, source)
         elif key == "agent_timeout_seconds":
@@ -639,6 +668,7 @@ def validate_v2_settings_types(raw_settings: dict[str, Any], source: str) -> dic
         "claude_model",
         "claude_effort",
         "claude_tools",
+        "workspace_mode",
     }
     for key in bool_keys:
         if type(raw_settings[key]) is not bool:
@@ -658,6 +688,8 @@ def validate_v2_settings_types(raw_settings: dict[str, Any], source: str) -> dic
             f"{source} claude_model cannot persist Fable; use a per-run --peer-model override"
         )
     validate_claude_tools(raw_settings["claude_tools"], source)
+    if raw_settings["workspace_mode"] not in {"isolated", "direct"}:
+        raise ValueError(f"{source} workspace_mode must be isolated or direct")
     if type(raw_settings["agent_timeout_seconds"]) not in {int, float}:
         raise ValueError(f"{source} agent_timeout_seconds must be a JSON number")
     normalize_timeout(raw_settings["agent_timeout_seconds"])
@@ -770,6 +802,7 @@ def settings_to_env(settings: dict[str, Any]) -> dict[str, str]:
         "AGENT_COLLAB_ADJUDICATOR_ENABLED": "1" if settings["adjudicator_enabled"] else "0",
         "AGENT_COLLAB_TIMEOUT_SECONDS": str(settings["agent_timeout_seconds"]),
         "AGENT_COLLAB_SAFE_MODE": "1" if settings["safe_mode"] else "0",
+        "AGENT_COLLAB_WORKSPACE_MODE": str(settings["workspace_mode"]),
         "CODEX_AGENT_COLLAB_MODEL": str(settings["codex_model"]),
         "CODEX_AGENT_COLLAB_EFFORT": str(settings["codex_effort"]),
         "AGENT_COLLAB_ONLINE_RESEARCH": "1" if settings["online_research"] else "0",
@@ -817,13 +850,15 @@ def run_snapshot(
     repo_root: Path,
     output_path: Path,
     ignored_paths: list[Path] | None = None,
+    *,
+    workspace_mode: str = "direct",
 ) -> dict[str, Any]:
     snapshot = load_snapshot_runtime()
     deadline = time.monotonic() + snapshot.DEFAULT_SNAPSHOT_TIMEOUT_SECONDS
-    data = snapshot.mutation_snapshot(
-        repo_root,
-        ignored_paths=ignored_paths,
-        deadline=deadline,
+    data = (
+        {"mode": "isolated", "digest": hashlib.sha256(str(repo_root).encode()).hexdigest()}
+        if workspace_mode == "isolated"
+        else snapshot.mutation_snapshot(repo_root, ignored_paths=ignored_paths, deadline=deadline)
     )
     write_json(snapshot_json_path(output_path), data)
     if output_path.name == "before.snapshot":
@@ -858,7 +893,7 @@ def record_workspace_mutation(
         existing = load_json(mutation_path)
         validate_cancel_mutation_evidence(existing, request, run_dir)
         return existing
-    after = run_snapshot(repo_root, run_dir / after_snapshot_name, ignored_paths=[run_dir])
+    after = run_snapshot(repo_root, run_dir / after_snapshot_name, ignored_paths=[run_dir], workspace_mode=request["workspace_mode"])
     snapshot = load_snapshot_runtime()
     diff = snapshot.diff_snapshots(before, after)
     if diff["changed"]:
@@ -870,10 +905,7 @@ def record_workspace_mutation(
             "message": (
                 "Workspace changed during the Agent Collab run; attribution is unknown."
             ),
-            "coverage_limitations": [
-                "Known high-volume generated and dependency directories are excluded.",
-                "Transient changes that were reverted before a snapshot are not observable.",
-            ],
+            "coverage_limitations": COVERAGE_LIMITATIONS,
         }
         if source == "cancel_snapshot":
             diagnostic["before_snapshot_sha256"] = file_sha256_or_none(before_path)
@@ -974,12 +1006,9 @@ def validate_cancel_mutation_evidence(
         or value["changed"] is not True
         or type(value["edit_allowed"]) is not bool
         or value["edit_allowed"] != request["edit_allowed"]
-        or value["snapshot_mode"] not in {"git", "filesystem"}
+        or value["snapshot_mode"] not in {"git", "filesystem", "isolated"}
         or value["message"] != "Workspace changed during the Agent Collab run; attribution is unknown."
-        or value["coverage_limitations"] != [
-            "Known high-volume generated and dependency directories are excluded.",
-            "Transient changes that were reverted before a snapshot are not observable.",
-        ]
+        or value["coverage_limitations"] != COVERAGE_LIMITATIONS
     ):
         raise ArtifactValidationError("invalid immutable cancellation mutation evidence metadata")
     paths, count = value["changed_paths"], value["changed_path_count"]
@@ -989,7 +1018,9 @@ def validate_cancel_mutation_evidence(
         or type(count) is not int or count < 0
         or len(paths) != min(count, 200)
         or type(value["changed_paths_truncated"]) is not bool
-        or value["changed_paths_truncated"] != (count > 200)
+        or value["changed_paths_truncated"] != (
+            count > 200 or any("beyond retained" in path for path in paths)
+        )
     ):
         raise ArtifactValidationError("invalid immutable cancellation changed-path evidence")
     for key in ("before_digest", "after_digest", "before_snapshot_sha256", "after_snapshot_sha256"):
@@ -1584,12 +1615,27 @@ def require_process_tree_quiescent(
     *,
     wrapper_quiescence_proven: bool = False,
 ) -> dict[str, Any]:
+    provider = load_provider_process(run_dir, request)
+    isolation_path = run_dir / "isolation-state.json"
     if not wrapper_quiescence_proven:
         if process_identity_matches(process_info) and process_alive(int(process_info["pid"])):
             raise ArtifactValidationError("peer wrapper is still running")
+        if request["workspace_mode"] == "isolated" and provider["status"] in {"pending", "quiescent"}:
+            if provider["status"] != "pending" and not isolation_path.exists():
+                raise ArtifactValidationError("isolated provider is missing its cleanup state")
+            try:
+                load_isolation_runtime().cleanup_state(isolation_path)
+            except (OSError, ValueError, RuntimeError) as exc:
+                raise ArtifactValidationError(f"isolated workspace cleanup failed: {exc}") from exc
         if SAFETY.process_group_alive(int(process_info["pgid"])):
             raise ArtifactValidationError("peer wrapper group still has live members")
-    provider = load_provider_process(run_dir, request)
+    if request["workspace_mode"] == "isolated":
+        if provider["status"] != "pending" and not isolation_path.exists():
+            raise ArtifactValidationError("isolated provider is missing its cleanup state")
+        try:
+            load_isolation_runtime().cleanup_state(isolation_path)
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise ArtifactValidationError(f"isolated workspace cleanup failed: {exc}") from exc
     if provider["status"] == "pending":
         return provider
     if provider["status"] != "quiescent":
@@ -1934,6 +1980,11 @@ def start(args: argparse.Namespace) -> int:
             "--peer-model claude-fable-5"
         )
     safe_mode = bool(settings["safe_mode"]) if args.safe_mode is None else bool(args.safe_mode)
+    workspace_mode = args.workspace_mode or ("direct" if safe_mode else settings["workspace_mode"])
+    if safe_mode and workspace_mode == "isolated":
+        raise SystemExit("safe mode uses provider-native permissions; select --workspace-mode direct")
+    if workspace_mode == "isolated" and args.edit_allowed:
+        raise SystemExit("durable delegated edits require --workspace-mode direct")
     if type(max_local_subagents) is not int or not 0 <= max_local_subagents <= SAFETY.MAX_LOCAL_SUBAGENTS:
         raise SystemExit(f"max_local_subagents must be between 0 and {SAFETY.MAX_LOCAL_SUBAGENTS}")
     agent_timeout = configured_timeout_seconds(
@@ -1967,6 +2018,17 @@ def start(args: argparse.Namespace) -> int:
                     }
                 )
             )
+    if workspace_mode == "isolated":
+        isolation = load_isolation_runtime().preflight(repo_root)
+        if isolation["status"] != "available":
+            raise SystemExit(STRICT_JSON.dumps({
+                "schema_version": ARTIFACT_SCHEMA_VERSION,
+                "status": "sandbox_unavailable",
+                "peer": peer,
+                "workspace_mode": workspace_mode,
+                "backend": isolation["backend"],
+                "details": isolation["details"],
+            }))
     peer_cli_version = require_peer_cli_version(peer)
     availability_attestation = availability_runtime.check(
         peer,
@@ -2000,6 +2062,7 @@ def start(args: argparse.Namespace) -> int:
         "max_local_subagents": max_local_subagents,
         "online_research": online_research,
         "safe_mode": safe_mode,
+        "workspace_mode": workspace_mode,
         "peer_model": peer_model,
         "peer_effort": peer_effort,
         "availability_attestation": availability_attestation,
@@ -2032,7 +2095,7 @@ def start(args: argparse.Namespace) -> int:
 
         request_path = run_dir / "host-request.json"
         write_json(request_path, request)
-        run_snapshot(repo_root, run_dir / "before.snapshot", ignored_paths=[run_dir])
+        run_snapshot(repo_root, run_dir / "before.snapshot", ignored_paths=[run_dir], workspace_mode=workspace_mode)
         peer_stdout = STRICT_JSON.open_private_text(run_dir / "peer-report.json")
         peer_stderr = STRICT_JSON.open_private_text(run_dir / "peer.stderr.log")
         env = dict(os.environ)
@@ -3544,6 +3607,18 @@ def terminate_tracked_process_tree(
             }
             write_json(run_dir / "provider-process.json", provider)
 
+    if (
+        request["workspace_mode"] == "isolated"
+        and provider_cleanup.get("quiescent")
+        and not process_identity_matches(process_info)
+    ):
+        try:
+            load_isolation_runtime().cleanup_state(run_dir / "isolation-state.json")
+        except (OSError, ValueError, RuntimeError) as exc:
+            provider_cleanup = {
+                "outcome": f"isolated_workspace_cleanup_failed: {exc}",
+                "quiescent": False,
+            }
     wrapper_pgid = int(process_info["pgid"])
     if process_identity_matches(process_info):
         wrapper_cleanup = SAFETY.terminate_process_group(wrapper_pgid)
@@ -3828,6 +3903,7 @@ def settings_from_args(args: argparse.Namespace) -> dict[str, Any]:
         "max_local_subagents": "max_local_subagents",
         "adjudicator_enabled": "adjudicator_enabled",
         "safe_mode": "safe_mode",
+        "workspace_mode": "workspace_mode",
         "codex_model": "codex_model",
         "codex_effort": "codex_effort",
         "online_research": "online_research",
@@ -3921,6 +3997,9 @@ def interactive_setup(current: dict[str, Any]) -> dict[str, Any]:
     full_permission = not bool(settings["safe_mode"])
     full_permission = choose_bool("Use full peer permissions by default", full_permission)
     settings["safe_mode"] = not full_permission
+    settings["workspace_mode"] = choose_text(
+        "Full-mode workspace (isolated or direct)", str(settings["workspace_mode"])
+    )
     settings["agent_timeout_seconds"] = choose_timeout(settings["agent_timeout_seconds"])
     settings["history_retained_runs"] = int(choose_text("Terminal run history retained", str(settings["history_retained_runs"])))
     settings["local_subagents_allowed"] = choose_bool("Allow local subagents", bool(settings["local_subagents_allowed"]))
@@ -4136,6 +4215,13 @@ def doctor(args: argparse.Namespace) -> int:
             },
         }
 
+    doctor_workspace_mode = "direct" if settings["safe_mode"] else settings["workspace_mode"]
+    isolation_check = (
+        load_isolation_runtime().preflight(repo_root)
+        if doctor_workspace_mode == "isolated" else
+        {"status": "not_required", "backend": None, "details": "direct workspace mode"}
+    )
+
     checks = {
         "repo_root": {"ok": repo_root.exists(), "value": str(repo_root)},
         "run_root": {"ok": run_root.exists() or path_is_creatable(run_root), "value": str(run_root)},
@@ -4145,6 +4231,10 @@ def doctor(args: argparse.Namespace) -> int:
             "value": {"os_name": os.name, "platform": sys.platform, "supported": ["Linux", "macOS"]},
         },
         "git": {"ok": shutil.which("git") is not None, "value": shutil.which("git")},
+        "workspace_isolation": {
+            "ok": isolation_check["status"] in {"available", "not_required"},
+            "value": {"mode": doctor_workspace_mode, **isolation_check},
+        },
         "claude_cli": cli_version_check("claude", claude_path),
         "codex_cli": cli_version_check("codex", codex_path),
         "settings": {
@@ -4166,6 +4256,7 @@ def doctor(args: argparse.Namespace) -> int:
                 "codex": {"model": settings["codex_model"], "effort": settings["codex_effort"]},
                 "claude": {"model": settings["claude_model"], "effort": settings["claude_effort"]},
                 "online_research": settings["online_research"],
+                "workspace_mode": doctor_workspace_mode,
                 "uses_built_in_model_effort_defaults": (
                     all(settings[key] == SETTING_DEFAULTS[key] for key in (
                         "codex_model", "codex_effort", "claude_model", "claude_effort"
@@ -4251,6 +4342,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override the resolved permission posture for this run.",
     )
     start_parser.add_argument(
+        "--workspace-mode", choices=["isolated", "direct"],
+        help="Select a disposable copy-on-write workspace or direct host access for this run.",
+    )
+    start_parser.add_argument(
         "--timeout-seconds",
         type=float,
         default=None,
@@ -4296,6 +4391,7 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument("--clear-history", action="store_true", help="Clear old run history after setup.")
     setup_parser.add_argument("--yes", action="store_true", help="Confirm setup actions that delete run history.")
     setup_parser.add_argument("--safe-mode", action=argparse.BooleanOptionalAction)
+    setup_parser.add_argument("--workspace-mode", choices=["isolated", "direct"])
     setup_parser.add_argument("--codex-model")
     setup_parser.add_argument("--codex-effort")
     setup_parser.add_argument("--online-research", action=argparse.BooleanOptionalAction)

@@ -4,8 +4,10 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import os
+import select
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -44,6 +46,10 @@ IGNORED_REL_FILES = {
     ("tools", "agent-collab", "settings.local.json"),
 }
 DEFAULT_SNAPSHOT_TIMEOUT_SECONDS = 300.0
+MAX_RETAINED_ENTRIES = 1024
+MAX_RETAINED_ENTRY_BYTES = 512 * 1024
+MAX_RETAINED_STATUS_BYTES = 512 * 1024
+EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 
 
 def _load_strict_json_runtime() -> Any:
@@ -165,6 +171,51 @@ def _git_stdout(repo_root: Path, args: list[str], deadline: float) -> str:
     return completed.stdout.rstrip("\n")
 
 
+def _git_output_digest(repo_root: Path, args: list[str], deadline: float) -> str:
+    """Hash potentially large Git output without retaining a patch or index listing."""
+    try:
+        with tempfile.TemporaryFile(mode="w+b") as errors:
+            process = subprocess.Popen(
+                ["git", "--no-optional-locks", "-c", "diff.autoRefreshIndex=false", *args],
+                cwd=repo_root,
+                stdout=subprocess.PIPE,
+                stderr=errors,
+            )
+            try:
+                assert process.stdout is not None
+                digest = hashlib.sha256()
+                size = 0
+                while True:
+                    ready, _, _ = select.select([process.stdout], [], [], _remaining_seconds(deadline))
+                    if not ready:
+                        raise TimeoutError(f"git {' '.join(args)} exceeded the workspace snapshot deadline")
+                    chunk = process.stdout.read1(1024 * 1024)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+                    size += len(chunk)
+                returncode = process.wait(timeout=_remaining_seconds(deadline))
+            except (TimeoutError, subprocess.TimeoutExpired):
+                process.kill()
+                process.wait()
+                raise TimeoutError(f"git {' '.join(args)} exceeded the workspace snapshot deadline")
+            except BaseException:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+                raise
+            finally:
+                if process.stdout is not None:
+                    process.stdout.close()
+            if returncode != 0:
+                errors.seek(0)
+                detail = errors.read(8192).decode("utf-8", "replace").strip()
+                raise RuntimeError(f"git {' '.join(args)} failed: {detail or f'exit status {returncode}'}")
+            return f"sha256={digest.hexdigest()} bytes={size}"
+    except OSError as exc:
+        raise RuntimeError(f"could not execute git {' '.join(args)}: {exc}") from exc
+
+
 def _git_head(repo_root: Path, deadline: float) -> str:
     completed = _run_git(repo_root, ["rev-parse", "--verify", "HEAD^{commit}"], deadline)
     if completed.returncode == 0:
@@ -195,6 +246,31 @@ def _digest_lines(lines: Iterable[str]) -> str:
         digest.update(line.encode("utf-8", "surrogateescape"))
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+def _bounded_entries(entries: dict[str, str]) -> tuple[dict[str, str], int, str]:
+    """Retain useful paths while binding every entry into a full digest."""
+    retained: dict[str, str] = {}
+    retained_bytes = 0
+    digest = hashlib.sha256()
+    for path, signature in sorted(entries.items()):
+        line = f"{path}\0{signature}".encode("utf-8", "surrogateescape")
+        digest.update(line)
+        digest.update(b"\0")
+        if len(retained) < MAX_RETAINED_ENTRIES and retained_bytes + len(line) <= MAX_RETAINED_ENTRY_BYTES:
+            retained[path] = signature
+            retained_bytes += len(line)
+    return retained, len(entries), digest.hexdigest()
+
+
+def _bounded_status(value: str, separator: str) -> tuple[str, str, bool]:
+    raw = value.encode("utf-8", "surrogateescape")
+    digest = hashlib.sha256(raw).hexdigest()
+    if len(raw) <= MAX_RETAINED_STATUS_BYTES:
+        return value, digest, False
+    boundary = raw.rfind(separator.encode(), 0, MAX_RETAINED_STATUS_BYTES)
+    prefix = raw[:boundary + 1] if boundary >= 0 else b""
+    return prefix.decode("utf-8", "surrogateescape"), digest, True
 
 
 def _hash_file(path: Path, deadline: float) -> str:
@@ -383,36 +459,53 @@ def _git_snapshot(
 ) -> dict[str, Any]:
     pathspecs = _git_pathspecs(repo_root, ignored_paths)
     head = _git_head(repo_root, deadline)
-    index = _git_stdout(repo_root, ["ls-files", "--stage", "-z", *pathspecs], deadline)
-    untracked = _git_untracked_entries(repo_root, ignored_paths, deadline)
-    ignored = _git_ignored_entries(repo_root, ignored_paths, deadline)
-    git_control = _git_control_entries(repo_root, deadline)
+    index = _git_output_digest(repo_root, ["ls-files", "--stage", "-z", *pathspecs], deadline)
+    untracked, untracked_count, untracked_digest = _bounded_entries(
+        _git_untracked_entries(repo_root, ignored_paths, deadline)
+    )
+    ignored, ignored_count, ignored_digest = _bounded_entries(
+        _git_ignored_entries(repo_root, ignored_paths, deadline)
+    )
+    git_control, git_control_count, git_control_digest = _bounded_entries(
+        _git_control_entries(repo_root, deadline)
+    )
+    status, status_digest, status_truncated = _bounded_status(
+        _git_stdout(repo_root, ["status", "--porcelain=v1", "--untracked-files=no", *pathspecs], deadline),
+        "\n",
+    )
+    status_z, status_z_digest, status_z_truncated = _bounded_status(
+        _git_stdout(repo_root, ["status", "--porcelain=v1", "-z", "--untracked-files=no", *pathspecs], deadline),
+        "\0",
+    )
     sections = {
         "head": head,
         "index": index,
         "untracked": untracked,
+        "untracked_count": untracked_count,
+        "untracked_digest": untracked_digest,
         "ignored": ignored,
+        "ignored_count": ignored_count,
+        "ignored_digest": ignored_digest,
         "git_control": git_control,
+        "git_control_count": git_control_count,
+        "git_control_digest": git_control_digest,
         # Track working-tree changes here, but hash untracked files through the
         # separately filtered manifest so generated-directory exclusions do
         # not hide tracked files with the same path prefix.
-        "status": _git_stdout(repo_root, ["status", "--porcelain=v1", "--untracked-files=no", *pathspecs], deadline),
-        "status_z": _git_stdout(repo_root, ["status", "--porcelain=v1", "-z", "--untracked-files=no", *pathspecs], deadline),
-        "diff": _git_stdout(repo_root, ["diff", "--binary", "--no-ext-diff", *pathspecs], deadline),
-        "diff_cached": _git_stdout(repo_root, ["diff", "--cached", "--binary", "--no-ext-diff", *pathspecs], deadline),
+        "status": status,
+        "status_digest": status_digest,
+        "status_truncated": status_truncated,
+        "status_z": status_z,
+        "status_z_digest": status_z_digest,
+        "status_z_truncated": status_z_truncated,
+        "diff": _git_output_digest(repo_root, ["diff", "--binary", "--no-ext-diff", *pathspecs], deadline),
+        "diff_cached": _git_output_digest(repo_root, ["diff", "--cached", "--binary", "--no-ext-diff", *pathspecs], deadline),
     }
-    untracked_digest = _digest_lines(
-        f"{path}\0{signature}" for path, signature in untracked.items()
-    )
-    ignored_digest = _digest_lines(f"{path}\0{signature}" for path, signature in ignored.items())
-    git_control_digest = _digest_lines(
-        f"{path}\0{signature}" for path, signature in git_control.items()
-    )
     digest = _digest_lines(
         [
             head,
             index,
-            sections["status_z"],
+            status_z_digest,
             sections["diff"],
             sections["diff_cached"],
             untracked_digest,
@@ -434,14 +527,14 @@ def _filesystem_snapshot(
     ignored_paths: Iterable[Path] | None,
     deadline: float,
 ) -> dict[str, Any]:
-    entries = _filesystem_entries(repo_root, ignored_paths, deadline)
-    digest = _digest_lines(f"{path}\0{signature}" for path, signature in entries.items())
+    entries, count, digest = _bounded_entries(_filesystem_entries(repo_root, ignored_paths, deadline))
     return {
         "schema_version": "2.0",
         "mode": "filesystem",
         "repo_root": str(_resolve(repo_root)),
         "digest": digest,
         "entries": entries,
+        "entries_count": count,
     }
 
 
@@ -500,15 +593,21 @@ def diff_snapshots(before: dict[str, Any], after: dict[str, Any], limit: int = 2
         if isinstance(before_entries, dict) and isinstance(after_entries, dict):
             keys = set(before_entries) | set(after_entries)
             changed_paths = sorted(path for path in keys if before_entries.get(path) != after_entries.get(path))
+        if (before.get("digest") != after.get("digest")
+                and (before.get("entries_count", len(before_entries)) > len(before_entries)
+                     or after.get("entries_count", len(after_entries)) > len(after_entries))):
+            changed_paths.append("<filesystem entries beyond retained path sample may have changed>")
     elif before.get("mode") == "git" and after.get("mode") == "git":
         changed_path_set: set[str] = set()
         before_sections = before.get("sections", {})
         after_sections = after.get("sections", {})
         if isinstance(before_sections, dict) and isinstance(after_sections, dict):
             if any(before_sections.get(key) != after_sections.get(key)
-                   for key in ("status_z", "status", "diff", "diff_cached")):
+                   for key in ("status_z_digest", "status_digest", "diff", "diff_cached")):
                 changed_path_set.update(_git_changed_paths(before))
                 changed_path_set.update(_git_changed_paths(after))
+                if before_sections.get("status_z_truncated") or after_sections.get("status_z_truncated"):
+                    changed_path_set.add("<tracked paths beyond retained status sample may have changed>")
             if before_sections.get("head") != after_sections.get("head"):
                 changed_path_set.add("<HEAD>")
             if before_sections.get("index") != after_sections.get("index"):
@@ -520,6 +619,10 @@ def diff_snapshots(before: dict[str, Any], after: dict[str, Any], limit: int = 2
                 changed_path_set.update(
                     path for path in keys if before_untracked.get(path) != after_untracked.get(path)
                 )
+                if (before_sections.get("untracked_digest") != after_sections.get("untracked_digest")
+                        and (before_sections.get("untracked_count", len(before_untracked)) > len(before_untracked)
+                             or after_sections.get("untracked_count", len(after_untracked)) > len(after_untracked))):
+                    changed_path_set.add("<untracked entries beyond retained path sample may have changed>")
             before_ignored = before_sections.get("ignored", {})
             after_ignored = after_sections.get("ignored", {})
             if isinstance(before_ignored, dict) and isinstance(after_ignored, dict):
@@ -527,6 +630,10 @@ def diff_snapshots(before: dict[str, Any], after: dict[str, Any], limit: int = 2
                 changed_path_set.update(
                     path for path in keys if before_ignored.get(path) != after_ignored.get(path)
                 )
+                if (before_sections.get("ignored_digest") != after_sections.get("ignored_digest")
+                        and (before_sections.get("ignored_count", len(before_ignored)) > len(before_ignored)
+                             or after_sections.get("ignored_count", len(after_ignored)) > len(after_ignored))):
+                    changed_path_set.add("<ignored entries beyond retained path sample may have changed>")
             before_control = before_sections.get("git_control", {})
             after_control = after_sections.get("git_control", {})
             if isinstance(before_control, dict) and isinstance(after_control, dict):
@@ -536,6 +643,10 @@ def diff_snapshots(before: dict[str, Any], after: dict[str, Any], limit: int = 2
                     for path in keys
                     if before_control.get(path) != after_control.get(path)
                 )
+                if (before_sections.get("git_control_digest") != after_sections.get("git_control_digest")
+                        and (before_sections.get("git_control_count", len(before_control)) > len(before_control)
+                             or after_sections.get("git_control_count", len(after_control)) > len(after_control))):
+                    changed_path_set.add("<git-control entries beyond retained path sample may have changed>")
         changed_paths = sorted(changed_path_set)
     elif changed:
         changed_paths = ["<snapshot mode changed>"]
@@ -546,7 +657,10 @@ def diff_snapshots(before: dict[str, Any], after: dict[str, Any], limit: int = 2
         "after_digest": after.get("digest", ""),
         "changed_path_count": len(changed_paths),
         "changed_paths": changed_paths[:limit],
-        "changed_paths_truncated": len(changed_paths) > limit,
+        "changed_paths_truncated": (
+            len(changed_paths) > limit
+            or any("beyond retained" in path for path in changed_paths)
+        ),
     }
 
 
@@ -571,28 +685,37 @@ def snapshot_text(
         f"mode={snapshot['mode']}",
         f"digest={snapshot['digest']}",
     ]
-    if snapshot["mode"] == "git":
+    if snapshot["mode"] == "isolated":
+        lines.append("Host workspace is outside the disposable peer overlay; no content scan was performed.")
+    elif snapshot["mode"] == "git":
         pathspecs = _git_pathspecs(repo_root, ignored_paths)
         status = snapshot["sections"]["status"]
+        diff_names, _, diff_names_truncated = _bounded_status(
+            _git_stdout(repo_root, ["diff", "--name-status", *pathspecs], effective_deadline), "\n"
+        )
+        staged_names, _, staged_names_truncated = _bounded_status(
+            _git_stdout(repo_root, ["diff", "--cached", "--name-status", *pathspecs], effective_deadline), "\n"
+        )
         lines.extend(
             [
                 f"branch={_git_stdout(repo_root, ['branch', '--show-current'], effective_deadline)}",
                 f"head={snapshot['sections']['head']}",
-                f"dirty={'true' if status or snapshot['sections']['untracked'] else 'false'}",
-                f"untracked_entry_count={len(snapshot['sections']['untracked'])}",
-                f"ignored_entry_count={len(snapshot['sections']['ignored'])}",
-                f"git_control_entry_count={len(snapshot['sections']['git_control'])}",
+                f"dirty={'true' if snapshot['sections']['status_z_digest'] != EMPTY_SHA256 or snapshot['sections']['untracked_count'] else 'false'}",
+                f"untracked_entry_count={snapshot['sections']['untracked_count']}",
+                f"ignored_entry_count={snapshot['sections']['ignored_count']}",
+                f"git_control_entry_count={snapshot['sections']['git_control_count']}",
+                f"status_truncated={'true' if snapshot['sections']['status_truncated'] else 'false'}",
                 "-- status_porcelain_v1",
                 status,
-                "-- diff_name_status",
-                _git_stdout(repo_root, ["diff", "--name-status", *pathspecs], effective_deadline),
-                "-- staged_name_status",
-                _git_stdout(repo_root, ["diff", "--cached", "--name-status", *pathspecs], effective_deadline),
+                f"-- diff_name_status{'_sample' if diff_names_truncated else ''}",
+                diff_names,
+                f"-- staged_name_status{'_sample' if staged_names_truncated else ''}",
+                staged_names,
             ]
         )
     else:
         entries = snapshot["entries"]
-        lines.extend([f"entry_count={len(entries)}", "-- filesystem_manifest"])
+        lines.extend([f"entry_count={snapshot['entries_count']}", "-- filesystem_manifest_sample"])
         lines.extend(f"{path}\t{signature}" for path, signature in entries.items())
     return "\n".join(lines).rstrip() + "\n"
 

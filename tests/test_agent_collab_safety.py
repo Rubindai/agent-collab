@@ -243,6 +243,61 @@ class SafetyTests(unittest.TestCase):
         self.assertIn("provider.secret", difference["changed_paths"])
         self.assertIn("<git-control>/common/config", difference["changed_paths"])
 
+    def test_large_ignored_manifest_stays_bounded_and_detects_changes_beyond_sample(self):
+        with tempfile.TemporaryDirectory() as tmp_name:
+            repo = Path(tmp_name)
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            entries = {
+                f"data/{number:06d}/{'x' * 250}": "file size=1 mode=644 sha256=" + "a" * 64
+                for number in range(65_000)
+            }
+            self.assertGreater(len(strict_json.dumps(entries).encode()), 16 * 1024 * 1024)
+            with mock.patch.object(snapshot, "_git_ignored_entries", return_value=entries):
+                before = snapshot.mutation_snapshot(repo)
+            changed_entries = dict(entries)
+            last_path = next(reversed(changed_entries))
+            changed_entries[last_path] = changed_entries[last_path][:-1] + "b"
+            with mock.patch.object(snapshot, "_git_ignored_entries", return_value=changed_entries):
+                after = snapshot.mutation_snapshot(repo)
+
+        self.assertLess(len(strict_json.dumps(before).encode()), 16 * 1024 * 1024)
+        self.assertEqual(before["sections"]["ignored_count"], 65_000)
+        self.assertLessEqual(len(before["sections"]["ignored"]), snapshot.MAX_RETAINED_ENTRIES)
+        self.assertNotEqual(before["digest"], after["digest"])
+        difference = snapshot.diff_snapshots(before, after)
+        self.assertIn(
+            "<ignored entries beyond retained path sample may have changed>",
+            difference["changed_paths"],
+        )
+        self.assertTrue(difference["changed_paths_truncated"])
+
+    def test_large_tracked_status_retains_digest_and_bounded_path_sample(self):
+        status = "".join(f" M source/file-{number:06d}.py\0" for number in range(40_000))
+        sample, digest, truncated = snapshot._bounded_status(status, "\0")
+        self.assertTrue(truncated)
+        self.assertLessEqual(len(sample.encode()), snapshot.MAX_RETAINED_STATUS_BYTES)
+        self.assertEqual(digest, snapshot.hashlib.sha256(status.encode()).hexdigest())
+        self.assertTrue(sample.endswith("\0"))
+        self.assertNotEqual(digest, snapshot._bounded_status(status + " M later.py\0", "\0")[1])
+
+    def test_large_staged_patch_is_streamed_into_a_small_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp_name:
+            repo = Path(tmp_name)
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            binary = repo / "large.bin"
+            binary.write_bytes(os.urandom(17 * 1024 * 1024))
+            subprocess.run(["git", "add", "large.bin"], cwd=repo, check=True)
+            before = snapshot.mutation_snapshot(repo)
+            self.assertGreater(
+                int(before["sections"]["diff_cached"].split("bytes=")[1]),
+                16 * 1024 * 1024,
+            )
+            self.assertLess(len(strict_json.dumps(before).encode()), 16 * 1024 * 1024)
+            binary.write_bytes(b"replacement")
+            after = snapshot.mutation_snapshot(repo)
+        self.assertNotEqual(before["digest"], after["digest"])
+        self.assertIn("large.bin", snapshot.diff_snapshots(before, after)["changed_paths"])
+
     def test_noncurrent_refs_and_raw_index_are_in_mutation_digest(self):
         with tempfile.TemporaryDirectory() as tmp_name:
             repo = Path(tmp_name)

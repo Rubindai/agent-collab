@@ -14,6 +14,7 @@ import sys
 import tempfile
 import threading
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -79,6 +80,7 @@ REQUIRED_REQUEST_KEYS = {
     "max_local_subagents",
     "online_research",
     "safe_mode",
+    "workspace_mode",
     "peer_model",
     "peer_effort",
     "availability_attestation",
@@ -530,6 +532,17 @@ def load_snapshot_runtime() -> Any:
     return module
 
 
+def load_isolation_runtime() -> Any:
+    path = runtime_dir() / "isolation.py"
+    spec = importlib.util.spec_from_file_location("agent_collab_isolation_peer", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load isolation runtime: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def load_availability_runtime() -> Any:
     path = runtime_dir() / "availability.py"
     spec = importlib.util.spec_from_file_location("agent_collab_availability", path)
@@ -638,6 +651,10 @@ def validate_request(
     for key in ("online_research", "safe_mode"):
         if not isinstance(request[key], bool):
             raise RequestValidationError(f"{key} must be a boolean")
+    if type(request["workspace_mode"]) is not str or request["workspace_mode"] not in {"isolated", "direct"}:
+        raise RequestValidationError("workspace_mode must be isolated or direct")
+    if request["workspace_mode"] == "isolated" and (request["safe_mode"] or request["edit_allowed"]):
+        raise RequestValidationError("isolated workspace requires full mode and edit_allowed=false")
     for key in ("peer_model", "peer_effort", "claude_tools"):
         if not isinstance(request[key], str) or not request[key].strip():
             raise RequestValidationError(f"{key} must be a non-empty string")
@@ -733,7 +750,12 @@ def build_prompt(request: dict[str, Any], repo_root: Path, schema_path: Path) ->
         "assign disjoint writable paths and one integration owner; serialize overlapping edits and "
         "preserve other agents' changes."
         if request["edit_allowed"]
-        else "Do not modify files or create working-tree changes."
+        else (
+            "You may make temporary validation changes inside the disposable workspace; "
+            "they are discarded. Do not present them as edits to the host repository."
+            if request["workspace_mode"] == "isolated"
+            else "Do not modify files or create working-tree changes."
+        )
     )
     research_rule = (
         "Use current official documentation or primary sources for unstable external claims."
@@ -1510,17 +1532,27 @@ def invoke_peer(
         mutation_output_path = workspace_mutation_output_path(
             effective_env, raw_output_path, normalization_output_path
         )
-        before_snapshot = git_mutation_snapshot(
-            repo_root,
-            snapshot_ignored_paths,
-            deadline=absolute_deadline,
-        )
-    except TimeoutError as exc:
+        if request["workspace_mode"] == "isolated":
+            git_probe = subprocess.run(
+                ["git", "-C", str(repo_root), "rev-parse", "--is-inside-work-tree"],
+                capture_output=True, text=True, timeout=10,
+            )
+            before_snapshot = {
+                "mode": "git" if git_probe.returncode == 0 else "filesystem",
+                "digest": "disposable_overlay",
+            }
+        else:
+            before_snapshot = git_mutation_snapshot(
+                repo_root, snapshot_ignored_paths, deadline=absolute_deadline,
+            )
+    except (TimeoutError, subprocess.TimeoutExpired) as exc:
         return failure("timeout", f"Workspace snapshot preflight exceeded the peer deadline: {exc}", request)
     except (OSError, RuntimeError, ValueError) as exc:
         return failure("snapshot_unavailable", f"Workspace snapshot preflight failed: {exc}", request)
 
     def with_mutation_check(report: dict[str, Any]) -> dict[str, Any]:
+        if request["workspace_mode"] == "isolated":
+            return report
         try:
             after_snapshot = git_mutation_snapshot(
                 repo_root,
@@ -1570,7 +1602,10 @@ def invoke_peer(
                 return {**report, "error": error}
         return report
 
-    with tempfile.TemporaryDirectory(prefix="agent-collab-") as tmp_name:
+    with tempfile.TemporaryDirectory(
+        prefix="agent-collab-",
+        dir="/tmp" if request["workspace_mode"] == "isolated" else None,
+    ) as tmp_name:
         tmp = Path(tmp_name)
         output_path = tmp / "peer-output.json"
         effort_path = tmp / "claude-effort.json"
@@ -1590,7 +1625,7 @@ def invoke_peer(
                 effective_env,
                 before_snapshot.get("mode"),
             )
-            peer_timeout = remaining_peer_seconds()
+            remaining_peer_seconds()
         except TimeoutError as exc:
             return with_mutation_check(failure("timeout", str(exc), request))
         except ValueError as exc:
@@ -1615,32 +1650,43 @@ def invoke_peer(
         guard_bin = make_host_cli_guard(tmp, request["host"])
         peer_env["PATH"] = f"{guard_bin}{os.pathsep}{peer_env.get('PATH', '')}"
 
+        isolation = None
         try:
-            completed = run_peer_command(
-                command.args,
-                cwd=repo_root,
-                env=peer_env,
-                input=command.stdin,
-                text=True,
-                errors="replace",
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=peer_timeout,
-                check=False,
-                provider_process_path=(
-                    raw_output_path.with_name("provider-process.json")
-                    if raw_output_path is not None
-                    else None
-                ),
-                run_id=request["run_id"],
-                launch_check=lambda: validate_request(request, require_fresh_attestation=True),
-            )
+            isolation = load_isolation_runtime() if request["workspace_mode"] == "isolated" else None
+            run_dir = Path(effective_env["AGENT_COLLAB_RUN_DIR"]) if isolation else None
+            workspace = isolation.Workspace(repo_root, run_dir, absolute_deadline) if isolation else nullcontext()
+            with workspace as active_workspace:
+                provider_args = (
+                    active_workspace.command(command.args, tmp)
+                    if isolation else command.args
+                )
+                completed = run_peer_command(
+                    provider_args,
+                    cwd=repo_root,
+                    env=peer_env,
+                    input=command.stdin,
+                    text=True,
+                    errors="replace",
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=remaining_peer_seconds(),
+                    check=False,
+                    provider_process_path=(
+                        raw_output_path.with_name("provider-process.json")
+                        if raw_output_path is not None
+                        else None
+                    ),
+                    run_id=request["run_id"],
+                    launch_check=lambda: validate_request(request, require_fresh_attestation=True),
+                )
         except RequestValidationError as exc:
             return with_mutation_check(failure("invalid_request", str(exc), request))
         except subprocess.TimeoutExpired as exc:
             return with_mutation_check(
                 failure("timeout", "Peer run exceeded AGENT_COLLAB_TIMEOUT_SECONDS", request, str(exc))
             )
+        except TimeoutError as exc:
+            return with_mutation_check(failure("timeout", str(exc), request))
         except FileNotFoundError as exc:
             return with_mutation_check(failure("missing_cli", f"Required peer CLI not found: {executable}", request, str(exc)))
         except ProviderCleanupError as exc:
@@ -1661,6 +1707,9 @@ def invoke_peer(
                     exc.details,
                 )
             )
+        except (KeyError, RuntimeError, OSError) as exc:
+            status = "sandbox_unavailable" if isolation else "provider_runtime_error"
+            return with_mutation_check(failure(status, f"Peer launch failed: {exc}", request))
 
         stdout_bytes = len(completed.stdout.encode("utf-8"))
         stderr_bytes = len(completed.stderr.encode("utf-8"))

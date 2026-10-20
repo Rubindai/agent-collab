@@ -19,7 +19,7 @@ Required flow:
 9. Respect the hard finite peer deadline, 2700 seconds by default. Empty `peer-report.json` or stderr does not mean the process is stalled before that deadline. Do not replace Agent Collab with a direct provider peer-CLI fallback. At the deadline, terminate the peer and preserve the structured timeout result; never wait indefinitely. Do not configure a Claude turn cap unless the user explicitly requests `--claude-max-turns N`; if reached, preserve `turn_limit_reached` separately from timeout.
 10. After host first pass and peer output exist, run an advisory host-local adjudicator when `adjudicator_enabled` is true and one is available. The adjudicator receives the neutral brief, host first pass, peer report, helper reports, and claim matrix. It must not call the other product or invoke Agent Collab. This independence is also procedural; the runtime validates the artifact but cannot prove the adjudicator's process history. If no adjudicator artifact exists, `finish` writes an `advisory_pending` marker, which means no adjudicator report was supplied rather than that adjudication happened. Run `finish` again after writing an adjudicator report so the claim matrix is rebuilt from it. When adjudication is disabled, do not create or accept `adjudicator-report.json`.
 11. Verify important peer, helper, and adjudicator claims yourself before final synthesis.
-12. Snapshot workspace state after the run and surface unexpected mutation diagnostics, especially when `edit_allowed=false`; do not discard otherwise valid peer claims solely because a diagnostic exists. In full-capability mode, no-edit prompting and mutation comparison are advisory and detective, not a preventive filesystem boundary.
+12. In isolated mode, verify the disposable workspace has been cleaned before closing the guard; the host boundary receipt does not scan repository contents. In direct mode, compare before/after snapshots and surface unexpected mutation diagnostics, especially when `edit_allowed=false`; do not discard otherwise valid peer claims solely because a diagnostic exists.
 13. Synthesize the final result in Markdown.
 14. Immediately before returning the final answer, run `host.py complete RUN` to close the workflow and release the worktree guard. Helpers must never call `complete`. An explicitly cancelled run releases the guard through `cancel` after writing immutable cancellation-specific evidence without replacing peer or synthesis artifacts. If cancel reports `already_terminal`, keep the guard and run `finish` instead.
 
@@ -106,8 +106,15 @@ when synthesis evidence is missing, malformed, detached from those sources, belo
 run, or predates changed mutation or claim evidence. After reports change, rerun `finish`, review
 the current claim matrix, and synthesize again with both current digests before retrying.
 
-Before peer launch, the host admits only a canonical baseline snapshot that fits its finite
-16 MiB JSON read limit; a larger baseline rolls startup back. After snapshots may be larger.
+In direct mode, before peer launch, the host admits only a canonical baseline snapshot that fits its finite
+16 MiB JSON read limit; a larger baseline rolls startup back. Large Git index and patch output
+is represented by streamed digests. Large status and file manifests retain complete digests and
+counts with bounded path samples; changes beyond a sample remain detectable, but exact paths
+may be unavailable. The scan itself still reads the included file contents and can hit its
+finite deadline. After snapshots may be larger.
+Isolated mode uses a small boundary receipt instead of reading file contents. Its writable
+overlay is discarded after the provider and wrapper are quiescent; only Agent Collab run
+artifacts are bound back. This does not observe external writes or network effects.
 If cancellation is interrupted after its mutation diagnostic is committed, retrying validates
 and reuses the recorded snapshot hashes without overwriting that evidence. The recorded snapshot
 describes the cancellation capture point; later workspace edits are outside that capture.
