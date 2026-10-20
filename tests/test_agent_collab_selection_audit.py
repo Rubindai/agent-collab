@@ -42,7 +42,7 @@ class SelectionAuditTests(TestCase):
         req = fixtures.request(host='claude', peer='codex', peer_model='gpt-6-astra', peer_effort=effort)
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            command = peer.build_peer_command(req, 'review', root, peer.default_schema_path(), root / 'output.json', {})
+            command = peer.build_peer_command(req, 'review', root, peer.default_schema_path(), root / 'output.json', {}, 'filesystem')
         config = next(value for value in command.args if value.startswith('model_reasoning_effort='))
         self.assertEqual(json.loads(config.split('=', 1)[1]), effort)
         self.assertNotIn('\n', config)
@@ -67,7 +67,7 @@ class SelectionAuditTests(TestCase):
             self.assertIsNotNone(telemetry.pending_capture_details(path))
             return SimpleNamespace(returncode=0, stdout=report, stderr='')
         with (tempfile.TemporaryDirectory() as tmp,
-              mock.patch.object(peer, 'git_mutation_snapshot', return_value={'same': True}),
+              mock.patch.object(peer, 'git_mutation_snapshot', return_value={'mode': 'git', 'same': True}),
               mock.patch.object(peer.shutil, 'which', return_value='/usr/bin/claude'),
               mock.patch.object(peer, 'run_peer_command', side_effect=run)):
             result = peer.run_request(fixtures.request(), Path(tmp), raw_output_path=Path(tmp) / 'raw.json')
@@ -108,7 +108,7 @@ class SelectionAuditTests(TestCase):
                         peer.CLAUDE_TELEMETRY.capture(output, fixtures.request()["run_id"], "xhigh", json.dumps(payload))
                     return SimpleNamespace(returncode=0, stdout=report, stderr="")
                 with (
-                    mock.patch.object(peer, "git_mutation_snapshot", return_value={"same": True}),
+                    mock.patch.object(peer, "git_mutation_snapshot", return_value={"mode": "git", "same": True}),
                     mock.patch.object(peer.shutil, "which", return_value="/usr/bin/claude"),
                     mock.patch.object(peer, "run_peer_command", side_effect=run),
                 ):

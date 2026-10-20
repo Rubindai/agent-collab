@@ -178,7 +178,7 @@ class FinalAuditTests(TestCase):
                 "from pathlib import Path; import sys; Path(sys.argv[1]).write_text('ran')", str(marker)], stdin='')
             def snapshot(*args, **kwargs):
                 request['availability_attestation']['checked_at'] = '2026-01-01T00:00:00Z'
-                return {'same': True}
+                return {'mode': 'git', 'same': True}
             with (mock.patch.object(peer, 'git_mutation_snapshot', side_effect=snapshot),
                   mock.patch.object(peer, 'build_peer_command', return_value=command)):
                 result = peer.run_request(request, root, raw_output_path=root / 'peer.raw.json')

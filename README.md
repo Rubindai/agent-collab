@@ -51,7 +51,7 @@ The explicit-only Fable rule is stricter than this general precedence order: `cl
 - Codex CLI 0.163.0 or newer
 - Claude Code 2.1.295 or newer
 - Python 3.10 or newer
-- Git for Git-aware workspace snapshots; non-Git directories use filesystem snapshots
+- Git for workspace detection and Git-aware snapshots; non-Git directories use filesystem snapshots
 - Linux or macOS with POSIX process groups and file locking. Windows peer launch is rejected before run artifacts are created because equivalent supervision is not implemented.
 
 These minimums cover the current Codex helper-default controls and Claude's forced helper-model selection. `start` checks the required peer CLI version before creating a run directory. Older CLIs are rejected; no alternate flags or commands are attempted.
@@ -248,6 +248,8 @@ Full capability is the configured default launch posture for deep investigation 
 - Codex peers use `danger-full-access` with approval set to `never`.
 - Claude peers use `bypassPermissions`; `--tools default` exposes every current built-in tool. `bypassPermissions` skips the permission layer and does not protect against prompt injection or unintended actions. Provider and organization policy can still refuse this mode.
 - Native helpers retain the full tool and permission context of the host in full mode. Agent Collab adds no helper `tools` or `disallowedTools` frontmatter restriction; the peer launch separately applies research, zero-helper, and conversation-fork controls, while provider, organization, session, and tool-specific policies still apply. Configured MCP tools are not restricted by Claude's `--tools` built-in-tool selector.
+
+For a non-Git workspace, the Codex peer launcher passes `--skip-git-repo-check` after the filesystem snapshot identifies that workspace type. Codex keeps its repository check for Git workspaces. This bypasses only Codex's Git prerequisite; the selected sandbox and approval settings still apply. [OpenAI non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode#git-repository-required)
 
 Capability is not permission to edit. `edit_allowed` defaults to `false` independently of the launch permission mode. The host may pass `--edit-allowed` only when the user explicitly delegates repository changes. In full-capability mode the no-edit instruction is advisory and mutation detection is detective, not a preventive filesystem boundary. Baseline snapshot JSON must fit the finite 16 MiB reader limit; an oversized baseline fails before peer launch and releases startup ownership. Interrupted cancellation reuses its immutable snapshot-bound diagnostic, preserving the original capture point. From the resolved repository root, the host records changes visible between its before/after snapshots—including tracked, untracked, most ignored, and selected Git-control surfaces—even if the peer crashes or is cancelled. Filesystem traversal records symlink identity instead of following symlinked directories. Known high-volume generated or dependency directories are excluded; `.next` is excluded only from generated/untracked/ignored scanning, while tracked `.next` files remain covered by Git index, status, and diff evidence. Transient changes reverted before a snapshot are not observable, so the diagnostic cannot prove attribution or complete immutability.
 

@@ -844,8 +844,11 @@ def build_peer_command(
     schema_path: Path,
     output_path: Path,
     env: dict[str, str],
+    workspace_mode: str | None,
 ) -> PeerCommand:
     del env
+    if workspace_mode not in {"git", "filesystem"}:
+        raise ValueError(f"unsupported workspace snapshot mode: {workspace_mode}")
     safe_mode = request["safe_mode"]
     if request["peer"] == "claude":
         policy_failure = SAFETY.claude_helper_policy_failure(request["peer_model"], request["peer_effort"])
@@ -933,6 +936,11 @@ def build_peer_command(
         "--model",
         request["peer_model"],
     ]
+    # The baseline snapshot already established whether this workspace has
+    # Git metadata. Bypass Codex's Git-repository check only for filesystem
+    # workspaces; keep the CLI check for Git workspaces.
+    if workspace_mode == "filesystem":
+        args.append("--skip-git-repo-check")
     for config in request["codex_config"]:
         args.extend(["-c", config])
     args.extend(
@@ -1573,7 +1581,15 @@ def invoke_peer(
             STRICT_JSON.ensure_private_directory(CLAUDE_TELEMETRY.pending_directory(effort_path))
         prompt = build_prompt(request, repo_root, schema_path)
         try:
-            command = build_peer_command(request, prompt, repo_root, schema_path, output_path, effective_env)
+            command = build_peer_command(
+                request,
+                prompt,
+                repo_root,
+                schema_path,
+                output_path,
+                effective_env,
+                before_snapshot.get("mode"),
+            )
             peer_timeout = remaining_peer_seconds()
         except TimeoutError as exc:
             return with_mutation_check(failure("timeout", str(exc), request))

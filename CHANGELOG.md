@@ -2,6 +2,7 @@
 
 ## 3.0.0 — Unreleased
 
+- Launch Codex peers in non-Git folders by skipping Codex's Git-repository check only when the workspace snapshot identifies a filesystem workspace.
 - Treat plain-language "use agent collab" as an explicit request for the real opposite-product peer workflow while retaining implicit discovery.
 - Fix availability-probe interruption cleanup, launch-time attestation expiry, snapshot index self-mutation, strict artifact types, symlink rejection, and preservation of normalization warnings. Harden prefixed Fable admission, Agent counters, conflicting Claude evidence, and effort escaping.
 - Reject every conflicting Codex model/effort observation, even when matching telemetry also appears. Require bounded actual-run Claude Stop-hook effort evidence; later matching observations cannot erase a mismatch.

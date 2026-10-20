@@ -744,7 +744,7 @@ class PeerV2Tests(TestCase):
 
     def test_claude_command_exact_defaults_and_full_capability(self):
         peer = load_peer()
-        command = peer.build_peer_command(request(), "prompt", REPO_ROOT, PEER_SCHEMA, Path("/tmp/out"), {})
+        command = peer.build_peer_command(request(), "prompt", REPO_ROOT, PEER_SCHEMA, Path("/tmp/out"), {}, "git")
         args = command.args
         self.assertEqual(args[:2], ["claude", "-p"])
         self.assertEqual(args[args.index("--model") + 1], "claude-opus-5-5")
@@ -764,18 +764,19 @@ class PeerV2Tests(TestCase):
             PEER_SCHEMA,
             Path("/tmp/out"),
             {},
+            "git",
         ).args
         self.assertEqual(opted_in[opted_in.index("--max-turns") + 1], "50")
 
     def test_claude_fable_safe_offline_and_custom_tools(self):
         peer = load_peer()
         fable = peer.build_peer_command(
-            request(peer_model="claude-fable-5"), "p", REPO_ROOT, PEER_SCHEMA, Path("/tmp/out"), {}
+            request(peer_model="claude-fable-5"), "p", REPO_ROOT, PEER_SCHEMA, Path("/tmp/out"), {}, "git"
         ).args
         self.assertEqual(fable[fable.index("--model") + 1], "claude-fable-5")
         safe = peer.build_peer_command(
             request(safe_mode=True, online_research=False, claude_tools="Read,Grep,WebSearch"),
-            "p", REPO_ROOT, PEER_SCHEMA, Path("/tmp/out"), {}
+            "p", REPO_ROOT, PEER_SCHEMA, Path("/tmp/out"), {}, "git"
         ).args
         self.assertEqual(safe[safe.index("--permission-mode") + 1], "plan")
         self.assertEqual(safe[safe.index("--tools") + 1], "Read,Grep")
@@ -784,7 +785,7 @@ class PeerV2Tests(TestCase):
     def test_codex_command_has_current_global_flag_shape(self):
         peer = load_peer()
         req = request(peer="codex", host="claude", origin="claude")
-        args = peer.build_peer_command(req, "p", REPO_ROOT, PEER_SCHEMA, Path("/tmp/out"), {}).args
+        args = peer.build_peer_command(req, "p", REPO_ROOT, PEER_SCHEMA, Path("/tmp/out"), {}, "git").args
         self.assertEqual(args[:6], ["codex", "--ask-for-approval", "never", "exec", "--strict-config", "--ephemeral"])
         self.assertEqual(args[args.index("--model") + 1], "gpt-6-astra")
         self.assertEqual(args[args.index("--sandbox") + 1], "danger-full-access")
@@ -793,6 +794,20 @@ class PeerV2Tests(TestCase):
         self.assertIn("--json", args)
         self.assertEqual(args[-1], "-")
         self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", args)
+        self.assertNotIn("--skip-git-repo-check", args)
+
+    def test_codex_non_git_workspace_skips_only_git_check(self):
+        peer = load_peer()
+        req = request(peer="codex", host="claude", origin="claude")
+        with tempfile.TemporaryDirectory() as tmp:
+            args = peer.build_peer_command(
+                req, "p", Path(tmp), PEER_SCHEMA, Path(tmp) / "out", {}, "filesystem"
+            ).args
+        self.assertEqual(args.count("--skip-git-repo-check"), 1)
+        self.assertIn("--strict-config", args)
+        self.assertEqual(args[args.index("--sandbox") + 1], "danger-full-access")
+        with self.assertRaisesRegex(ValueError, "unsupported workspace snapshot mode"):
+            peer.build_peer_command(req, "p", REPO_ROOT, PEER_SCHEMA, Path("/tmp/out"), {}, "unknown")
 
     def test_codex_helper_defaults_follow_exact_per_run_selection(self):
         peer = load_peer()
@@ -800,7 +815,7 @@ class PeerV2Tests(TestCase):
             with self.subTest(model=model, effort=effort):
                 req = request(peer="codex", host="claude", origin="claude",
                               peer_model=model, peer_effort=effort, codex_config=["foo=true"])
-                args = peer.build_peer_command(req, "p", REPO_ROOT, PEER_SCHEMA, Path("/tmp/out"), {}).args
+                args = peer.build_peer_command(req, "p", REPO_ROOT, PEER_SCHEMA, Path("/tmp/out"), {}, "git").args
                 for key, value in (("agents.default_subagent_model", model),
                                    ("agents.default_subagent_reasoning_effort", effort)):
                     setting = f"{key}={json.dumps(value)}"
@@ -815,7 +830,7 @@ class PeerV2Tests(TestCase):
             peer="codex", host="claude", origin="claude", safe_mode=True, online_research=False,
             codex_config=["foo=true"],
         )
-        args = peer.build_peer_command(req, "p", REPO_ROOT, PEER_SCHEMA, Path("/tmp/out"), {}).args
+        args = peer.build_peer_command(req, "p", REPO_ROOT, PEER_SCHEMA, Path("/tmp/out"), {}, "git").args
         self.assertEqual(args[args.index("--sandbox") + 1], "read-only")
         self.assertIn('web_search="disabled"', args)
         self.assertGreater(args.index('model_reasoning_effort="xhigh"'), args.index("foo=true"))
@@ -828,7 +843,7 @@ class PeerV2Tests(TestCase):
             "AGENT_COLLAB_SAFE_MODE": "1",
             "AGENT_COLLAB_WEB_RESEARCH": "disabled",
         }
-        args = peer.build_peer_command(request(), "p", REPO_ROOT, PEER_SCHEMA, Path("/tmp/out"), env).args
+        args = peer.build_peer_command(request(), "p", REPO_ROOT, PEER_SCHEMA, Path("/tmp/out"), env, "git").args
         self.assertEqual(args[args.index("--model") + 1], "claude-opus-5-5")
         self.assertEqual(args[args.index("--permission-mode") + 1], "bypassPermissions")
 
@@ -840,7 +855,7 @@ class PeerV2Tests(TestCase):
             availability.CLAUDE_EFFORT_CHOICES,
             {"low", "medium", "high", "xhigh", "max", "ultracode"},
         )
-        args = peer.build_peer_command(request(peer_effort="xhigh"), "p", REPO_ROOT, PEER_SCHEMA, Path("/tmp/out"), {}).args
+        args = peer.build_peer_command(request(peer_effort="xhigh"), "p", REPO_ROOT, PEER_SCHEMA, Path("/tmp/out"), {}, "git").args
         self.assertEqual(args[args.index("--effort") + 1], "xhigh")
         settings = json.loads(args[args.index("--settings") + 1])
         self.assertEqual(settings["availableModels"], ["claude-opus-5-5"])
@@ -856,7 +871,7 @@ class PeerV2Tests(TestCase):
         peer.validate_request(request(peer_effort="ultracode"))
         with self.assertRaisesRegex(ValueError, "cannot enforce its helper bound"):
             peer.build_peer_command(
-                request(peer_effort="ultracode"), "p", REPO_ROOT, PEER_SCHEMA, Path("/tmp/out"), {}
+                request(peer_effort="ultracode"), "p", REPO_ROOT, PEER_SCHEMA, Path("/tmp/out"), {}, "git"
             )
         self.assertTrue(settings["disableWorkflows"])
         self.assertFalse(settings["ultracode"])
@@ -864,7 +879,7 @@ class PeerV2Tests(TestCase):
 
         no_agents = peer.build_peer_command(
             request(local_subagents_allowed=False, max_local_subagents=0),
-            "p", REPO_ROOT, PEER_SCHEMA, Path("/tmp/out"), {},
+            "p", REPO_ROOT, PEER_SCHEMA, Path("/tmp/out"), {}, "git",
         ).args
         self.assertIn("Agent", no_agents[no_agents.index("--disallowedTools") + 1].split(","))
 
@@ -914,7 +929,7 @@ class PeerV2Tests(TestCase):
                 })
                 with (
                     tempfile.TemporaryDirectory() as tmp,
-                    mock.patch.object(peer, "git_mutation_snapshot", return_value={"same": True}),
+                    mock.patch.object(peer, "git_mutation_snapshot", return_value={"mode": "git", "same": True}),
                     mock.patch.object(peer.shutil, "which", return_value="/usr/bin/claude"),
                     mock.patch.object(peer.SAFETY, "sandbox_preflight") as sandbox_preflight,
                     mock.patch.object(peer, "run_peer_command", side_effect=fake_run),
@@ -960,7 +975,7 @@ class PeerV2Tests(TestCase):
         completed = SimpleNamespace(returncode=0, stdout=json.dumps(envelope), stderr="")
         with (
             tempfile.TemporaryDirectory() as tmp_name,
-            mock.patch.object(peer, "git_mutation_snapshot", return_value={"same": True}),
+            mock.patch.object(peer, "git_mutation_snapshot", return_value={"mode": "git", "same": True}),
             mock.patch.object(peer.shutil, "which", return_value="/usr/bin/claude"),
             mock.patch.object(peer, "run_peer_command", side_effect=claude_result_runner(completed)),
         ):
@@ -1013,7 +1028,7 @@ class PeerV2Tests(TestCase):
         success = SimpleNamespace(returncode=0, stdout=json.dumps(valid_report()), stderr="")
         with (
             tempfile.TemporaryDirectory() as tmp,
-            mock.patch.object(peer, "git_mutation_snapshot", return_value={"same": True}),
+            mock.patch.object(peer, "git_mutation_snapshot", return_value={"mode": "git", "same": True}),
             mock.patch.object(peer.shutil, "which", return_value="/usr/bin/codex"),
             mock.patch.object(peer, "run_peer_command", return_value=success),
         ):
@@ -1037,7 +1052,7 @@ class PeerV2Tests(TestCase):
 
         with (
             tempfile.TemporaryDirectory() as tmp,
-            mock.patch.object(peer, "git_mutation_snapshot", return_value={"same": True}),
+            mock.patch.object(peer, "git_mutation_snapshot", return_value={"mode": "git", "same": True}),
             mock.patch.object(peer.shutil, "which", return_value="/usr/bin/codex"),
             mock.patch.object(peer, "run_peer_command", side_effect=fake_run),
         ):
@@ -1136,7 +1151,7 @@ class PeerV2Tests(TestCase):
         peer = load_peer()
         with (
             tempfile.TemporaryDirectory() as tmp_name,
-            mock.patch.object(peer, "git_mutation_snapshot", return_value={"same": True}),
+            mock.patch.object(peer, "git_mutation_snapshot", return_value={"mode": "git", "same": True}),
             mock.patch.object(peer.shutil, "which", return_value="/usr/bin/claude"),
             mock.patch.object(
                 peer,
@@ -1164,7 +1179,7 @@ class PeerV2Tests(TestCase):
                     mock.patch.object(
                         peer,
                         "git_mutation_snapshot",
-                        side_effect=[{"digest": "before"}, {"digest": "after"}],
+                        side_effect=[{"mode": "git", "digest": "before"}, {"mode": "git", "digest": "after"}],
                     ),
                     mock.patch.object(peer, "mutation_error_details", return_value={"source": "peer_snapshot"}),
                     mock.patch.object(peer.shutil, "which", return_value="/usr/bin/claude"),
@@ -1428,7 +1443,7 @@ class PeerV2Tests(TestCase):
         }
         with (
             tempfile.TemporaryDirectory() as tmp,
-            mock.patch.object(peer, "git_mutation_snapshot", return_value={"same": True}),
+            mock.patch.object(peer, "git_mutation_snapshot", return_value={"mode": "git", "same": True}),
             mock.patch.object(peer.shutil, "which", return_value="/usr/bin/claude"),
             mock.patch.object(
                 peer,
@@ -1445,13 +1460,14 @@ class PeerV2Tests(TestCase):
         codex_report = valid_report(origin="claude", host="claude", peer="codex")
 
         def fake_codex_run(args, **kwargs):
+            self.assertIn("--skip-git-repo-check", args)
             output = Path(args[args.index("--output-last-message") + 1])
             output.write_text(json.dumps({"structured_output": codex_report}))
             return SimpleNamespace(returncode=0, stdout="", stderr="")
 
         with (
             tempfile.TemporaryDirectory() as tmp,
-            mock.patch.object(peer, "git_mutation_snapshot", return_value={"same": True}),
+            mock.patch.object(peer, "git_mutation_snapshot", return_value={"mode": "filesystem", "same": True}),
             mock.patch.object(peer.shutil, "which", return_value="/usr/bin/codex"),
             mock.patch.object(peer, "run_peer_command", side_effect=fake_codex_run),
         ):
@@ -1464,7 +1480,7 @@ class PeerV2Tests(TestCase):
         self.assertEqual(nested["error"]["kind"], "nested_invocation_refused")
         with (
             tempfile.TemporaryDirectory() as tmp,
-            mock.patch.object(peer, "git_mutation_snapshot", return_value={"same": True}),
+            mock.patch.object(peer, "git_mutation_snapshot", return_value={"mode": "git", "same": True}),
             mock.patch.object(peer.shutil, "which", return_value=None),
         ):
             missing = peer.run_request(request(), Path(tmp), env={"PATH": ""})
@@ -1476,7 +1492,7 @@ class PeerV2Tests(TestCase):
         completed = SimpleNamespace(returncode=1, stdout=json.dumps(envelope), stderr="api error")
         with (
             tempfile.TemporaryDirectory() as tmp,
-            mock.patch.object(peer, "git_mutation_snapshot", return_value={"same": True}),
+            mock.patch.object(peer, "git_mutation_snapshot", return_value={"mode": "git", "same": True}),
             mock.patch.object(peer.shutil, "which", return_value="/usr/bin/claude"),
             mock.patch.object(peer, "run_peer_command", side_effect=claude_result_runner(completed)),
         ):
@@ -1511,7 +1527,7 @@ class PeerV2Tests(TestCase):
         completed = SimpleNamespace(returncode=0, stdout=json.dumps(envelope), stderr="")
         with (
             tempfile.TemporaryDirectory() as tmp,
-            mock.patch.object(peer, "git_mutation_snapshot", return_value={"same": True}),
+            mock.patch.object(peer, "git_mutation_snapshot", return_value={"mode": "git", "same": True}),
             mock.patch.object(peer.shutil, "which", return_value="/usr/bin/claude"),
             mock.patch.object(peer, "run_peer_command", side_effect=claude_result_runner(completed)),
         ):
