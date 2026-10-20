@@ -2,9 +2,9 @@
 
 Agent Collab is a peer-first, challenge-first collaboration plugin for Codex and Claude Code. It launches the opposite product with a neutral brief, keeps the host analysis independent, then validates and combines the evidence.
 
-Version 3.0.0 strengthens exact-selection evidence, helper bounds, and workflow closure while retaining strict schema 2.0 settings and artifacts. This is an unreleased local candidate with breaking artifact requirements. There is no compatibility layer for 1.x settings or run artifacts: the removed profile and persisted Claude turn-cap fields are rejected rather than translated.
+Version 4.0.0 adds platform-aware workspace modes. Linux full-capability runs default to a disposable copy-on-write workspace; fresh macOS settings default to direct mode with bounded snapshots. The new required `workspace_mode` setting is a breaking change to persisted settings, so recreate existing settings before upgrading. Strict schema 2.0 remains in force, and 1.x settings and run artifacts still have no compatibility layer.
 
-**Last comprehensive evaluation: 2026-10-18.** All README sections, repository instructions, package contents, and runtime controls were reassessed against current official documentation and local evidence. The evaluation covers correctness and documented behavior; it does not establish optimal review quality, latency, or cost. See [Evaluation evidence](#evaluation-evidence) for scope and outstanding checks. The 3.0.0 candidate is newer than the published 2.1.0 baseline and has not been tagged or published.
+**Last comprehensive evaluation: 2026-10-18.** All README sections, repository instructions, package contents, and runtime controls were reassessed against current official documentation and local evidence. The evaluation covers correctness and documented behavior; it does not establish optimal review quality, latency, or cost. See [Evaluation evidence](#evaluation-evidence) for scope and outstanding checks. Version 3.0.0 appeared on GitHub `main` without a release tag; formal tags begin with `v4.0.0`.
 
 ## Defaults
 
@@ -17,7 +17,7 @@ These are the project defaults requested for Agent Collab. Existing persisted se
 
 The user can select a model and reasoning or effort level in natural language. The host translates an explicit selection into the per-run flags `--peer-model` and `--peer-effort`, then requires a fresh availability attestation for that exact pair before launch.
 
-Claude peer effort may be `low`, `medium`, `high`, `xhigh`, or `max`, subject to exact availability. Claude Code also recognizes `ultracode`, an orchestration mode with effective provider effort `xhigh`. Agent Collab 3.0.0 rejects an explicit `ultracode` run with `helper_policy_unavailable` before creating run artifacts: a live test showed that Workflow agents bypass the finite Agent-call counter, and the documented Workflow agent budget does not implement this per-run bound. The runtime disables and denies Workflow for ordinary peers. It never substitutes `xhigh` for an explicit `ultracode` request. `check-availability` still reports provider support separately from this execution-policy restriction. [Claude workflows](https://code.claude.com/docs/en/workflows#behavior-and-limits)
+Claude peer effort may be `low`, `medium`, `high`, `xhigh`, or `max`, subject to exact availability. Claude Code also recognizes `ultracode`, an orchestration mode with effective provider effort `xhigh`. Agent Collab rejects an explicit `ultracode` run with `helper_policy_unavailable` before creating run artifacts: a live test showed that Workflow agents bypass the finite Agent-call counter, and the documented Workflow agent budget does not implement this per-run bound. The runtime disables and denies Workflow for ordinary peers. It never substitutes `xhigh` for an explicit `ultracode` request. `check-availability` still reports provider support separately from this execution-policy restriction. [Claude workflows](https://code.claude.com/docs/en/workflows#behavior-and-limits)
 
 Codex effort support is not a hardcoded Agent Collab list. Immediately before launch, the runtime refreshes `codex debug models` and accepts only an effort advertised for the exact requested model. The refreshed catalog is authoritative; no static effort list determines Codex availability. Actual-run Codex selection events are checked when emitted, and every observed conflict is rejected. If those events are absent, the evidence is the fresh catalog plus explicit launch arguments, not an independently observed provider selection.
 
@@ -89,6 +89,8 @@ codex plugin marketplace add Rubindai/agent-collab --ref main
 codex plugin add agent-collab@agent-collab
 ```
 
+To pin an exact release instead of tracking `main`, replace `--ref main` with `--ref v4.0.0` (or another published version tag). A pinned marketplace stays on that tag until you select a newer one.
+
 The ChatGPT desktop app also discovers a repo marketplace when the repository is open. Restart the app after changing the marketplace or plugin.
 
 ### Claude Code
@@ -105,6 +107,8 @@ From GitHub, replace the marketplace-add line with:
 ```bash
 claude plugin marketplace add Rubindai/agent-collab --scope user
 ```
+
+To pin an exact release, add the marketplace as `Rubindai/agent-collab#v4.0.0` (or another published version tag) with `--scope user`. A pinned marketplace stays on that tag until you select a newer one.
 
 No direct skill installer is provided. Marketplace installation is the supported path for both hosts.
 
@@ -463,6 +467,14 @@ claude plugin validate plugins/agent-collab --strict
 ```
 
 Before publication, parse every release JSON file strictly and test isolated marketplace installation on both hosts. Claude installation must pass `--scope user` explicitly.
+
+### Tagged releases
+
+GitHub `main` is an installable marketplace source. Any push that changes `plugins/agent-collab/` must carry a new Semantic Versioning release; do not publish different package contents under the same manifest version. Use a major bump for incompatible settings or runtime contracts, a minor bump for backward-compatible functionality, and a patch bump for compatible fixes. The 3.0.0 source was on `main` without a tag or GitHub Release. Formal annotated tags start at `v4.0.0`; do not backfill `v3.0.0` without release evidence.
+
+For each release, update `VERSION`, both plugin manifests, and the root `CHANGELOG.md`, then synchronize the package and run the [Verify](#verify) checks. Commit the verified release state on `main` before creating a new annotated `v<version>` tag on that exact commit. Confirm that the remote branch has not changed, push the branch and tag, and verify both remote refs point to the intended commit. Publish a GitHub Release from the existing tag, with notes drawn from the matching root changelog entry. Never move or reuse a release tag. A version tag identifies an exact package; marketplace sources that track `main` still follow the branch, while sources pinned to a tag remain fixed until users choose a newer tag. [Semantic Versioning](https://semver.org/spec/v2.0.0.html), [Codex Git refs](https://developers.openai.com/plugins/build/plugins), [Claude marketplace versions and refs](https://code.claude.com/docs/en/plugins/host-marketplace), [GitHub releases](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository)
+
+Use the same version and commit for the tag, manifests, changelog entry, and GitHub Release. `gh release create` must use `--verify-tag` so it cannot silently create a tag at another commit. Check the release URL and tag target after publication. The root changelog is the maintained history; GitHub Release notes are a copy of that version's entry, not a separate source of truth. [GitHub CLI release creation](https://cli.github.com/manual/gh_release_create)
 
 ### Evaluation evidence
 

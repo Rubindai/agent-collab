@@ -1,10 +1,13 @@
 # Changelog
 
-## 3.0.0 — Unreleased
+## 4.0.0 — 2026-10-21
 
 - Add a Linux system-package setup script for disposable workspaces, with a read-only dependency check and Debian/Ubuntu and Fedora installation paths.
 - **Breaking:** default full-capability peer runs on Linux to a disposable copy-on-write repository and HOME workspace. Preflight FUSE OverlayFS and bubblewrap before run creation; fail closed if unavailable. Permit temporary validation writes and discard them after the run. Fresh macOS settings default to direct mode with bounded persisted snapshots, which detect included changes but do not prevent them; explicit settings remain authoritative. Durable delegated peer edits require direct mode. Isolated runs use a lightweight boundary receipt instead of hashing large ignored trees. Add strict `workspace_mode` settings and request fields; existing v2 settings must be recreated.
 - Keep large workspace baselines below the artifact reader limit by streaming Git index and patch digests and retaining bounded path samples with complete manifest digests; report when changed paths fall outside the sample.
+
+## 3.0.0 — Untagged GitHub candidate
+
 - Launch Codex peers in non-Git folders by skipping Codex's Git-repository check only when the workspace snapshot identifies a filesystem workspace.
 - Treat plain-language "use agent collab" as an explicit request for the real opposite-product peer workflow while retaining implicit discovery.
 - Fix availability-probe interruption cleanup, launch-time attestation expiry, snapshot index self-mutation, strict artifact types, symlink rejection, and preservation of normalization warnings. Harden prefixed Fable admission, Agent counters, conflicting Claude evidence, and effort escaping.

@@ -3153,13 +3153,13 @@ class PackageTests(TestCase):
 
     def test_release_versions_match(self):
         version = (REPO_ROOT / "VERSION").read_text().strip()
-        self.assertEqual(version, "3.0.0")
+        self.assertEqual(version, "4.0.0")
         for manifest in (
             CODEX_PLUGIN_ROOT / ".codex-plugin" / "plugin.json",
             CLAUDE_PLUGIN_ROOT / ".claude-plugin" / "plugin.json",
         ):
             self.assertEqual(json.loads(manifest.read_text())["version"], version)
-        self.assertIn("## 3.0.0", (REPO_ROOT / "CHANGELOG.md").read_text())
+        self.assertIn(f"## {version}", (REPO_ROOT / "CHANGELOG.md").read_text())
 
     def test_marketplaces_are_native_and_do_not_duplicate_version(self):
         codex = json.loads((REPO_ROOT / ".agents/plugins/marketplace.json").read_text())
