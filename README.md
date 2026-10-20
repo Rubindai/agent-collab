@@ -59,6 +59,18 @@ These minimums cover the current Codex helper-default controls and Claude's forc
 
 ## Install
 
+### Linux isolation dependencies
+
+Linux full-capability runs use a disposable workspace and need Bubblewrap, FUSE OverlayFS, and a FUSE unmount tool. From a repository checkout, check for the required commands or install the distribution packages:
+
+```bash
+scripts/install-linux-isolation-deps.sh --check
+scripts/install-linux-isolation-deps.sh --install
+python tools/agent-collab/scripts/host.py doctor
+```
+
+The script installs `bubblewrap`, `fuse-overlayfs`, and `fuse3` with `apt-get` on Debian/Ubuntu or `dnf` on Fedora. It uses `sudo` when needed and skips package installation when the commands are already available. With isolated workspace mode selected, `doctor` verifies that FUSE and user namespaces work on this host; having the commands installed alone is insufficient. On other Linux distributions, install those packages with the distribution's package manager, then run `doctor`. The script does not install the Agent Collab plugin; use the host marketplace steps below.
+
 ### Codex
 
 This repository exposes a repo marketplace at `.agents/plugins/marketplace.json` and the dual-host plugin at `plugins/agent-collab`.

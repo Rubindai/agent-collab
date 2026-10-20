@@ -2,6 +2,7 @@
 
 ## 3.0.0 — Unreleased
 
+- Add a Linux system-package setup script for disposable workspaces, with a read-only dependency check and Debian/Ubuntu and Fedora installation paths.
 - **Breaking:** default full-capability peer runs on Linux to a disposable copy-on-write repository and HOME workspace. Preflight FUSE OverlayFS and bubblewrap before run creation; fail closed if unavailable. Permit temporary validation writes and discard them after the run. Fresh macOS settings default to direct mode with bounded persisted snapshots, which detect included changes but do not prevent them; explicit settings remain authoritative. Durable delegated peer edits require direct mode. Isolated runs use a lightweight boundary receipt instead of hashing large ignored trees. Add strict `workspace_mode` settings and request fields; existing v2 settings must be recreated.
 - Keep large workspace baselines below the artifact reader limit by streaming Git index and patch digests and retaining bounded path samples with complete manifest digests; report when changed paths fall outside the sample.
 - Launch Codex peers in non-Git folders by skipping Codex's Git-repository check only when the workspace snapshot identifies a filesystem workspace.
