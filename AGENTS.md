@@ -5,6 +5,7 @@ Agent Collab launches an independent opposite-product peer, then the host verifi
 ## Working scope and completion
 
 - Complete requested, authorized repository work through package synchronization and required checks. Use stated assumptions for nonblocking ambiguity; report concrete blockers and remaining work when nothing can advance.
+- Make local commits at meaningful checkpoints during repository work. Commit each coherent, verified change set after its applicable checks pass; stage only the files for that change, preserve unrelated work, and use a descriptive commit message. Do not wait until the end of a substantial task to commit all completed work. Push only when requested.
 - Read context relevant to the change. Use `README.md` for setup and configuration, `tools/agent-collab/references/peer-only.md` for peer prompts, and `tools/agent-collab/references/synthesize.md` for report and closure contracts.
 - Keep reports concise: describe the resulting behavior, checks actually run, and unresolved limitations. Do not repeat successful checks unless changes, failures, or new evidence justify it.
 
