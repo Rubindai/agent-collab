@@ -39,18 +39,44 @@ TEST_ENV_PREFIXES = ("AGENT_COLLAB_", "CLAUDE_AGENT_COLLAB_", "CODEX_AGENT_COLLA
 _SAVED_TEST_ENV = {}
 
 
+# Keys redirected or removed so tests never touch real user state: guard
+# locks for non-Git temp roots, settings, and inherited plugin variables.
+HERMETIC_ENV_KEYS = ("XDG_STATE_HOME", "XDG_CONFIG_HOME", "CLAUDE_PLUGIN_DATA")
+_HERMETIC_STATE = {}
+
+
 def setUpModule():
     _SAVED_TEST_ENV.clear()
     for key in list(os.environ):
-        if key.startswith(TEST_ENV_PREFIXES):
+        if key.startswith(TEST_ENV_PREFIXES) or key in HERMETIC_ENV_KEYS:
             _SAVED_TEST_ENV[key] = os.environ.pop(key)
+    _HERMETIC_STATE["root"] = tempfile.TemporaryDirectory(prefix="agent-collab-tests-")
+    root = Path(_HERMETIC_STATE["root"].name)
+    os.environ["XDG_STATE_HOME"] = str(root / "state")
+    os.environ["XDG_CONFIG_HOME"] = str(root / "config")
 
 
 def tearDownModule():
     for key in list(os.environ):
-        if key.startswith(TEST_ENV_PREFIXES):
+        if key.startswith(TEST_ENV_PREFIXES) or key in HERMETIC_ENV_KEYS:
             os.environ.pop(key)
     os.environ.update(_SAVED_TEST_ENV)
+    hermetic = _HERMETIC_STATE.pop("root", None)
+    if hermetic is not None:
+        hermetic.cleanup()
+
+
+def process_state(pid):
+    """Return a process's state letter, or None once it no longer exists (Linux or macOS)."""
+    stat_path = Path(f"/proc/{pid}/stat")
+    if Path("/proc/self/stat").exists():
+        try:
+            return stat_path.read_text(encoding="utf-8").rsplit(")", 1)[1].strip()[:1]
+        except FileNotFoundError:
+            return None
+    completed = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True)
+    state = completed.stdout.strip()
+    return state[:1] if completed.returncode == 0 and state else None
 
 
 def load_module(path, name):
@@ -1261,14 +1287,9 @@ class PeerV2Tests(TestCase):
                 )
             child_pid = int(child_pid_path.read_text(encoding="utf-8"))
             deadline = time.monotonic() + 2
-            while Path(f"/proc/{child_pid}").exists() and time.monotonic() < deadline:
-                stat_text = Path(f"/proc/{child_pid}/stat").read_text(encoding="utf-8")
-                if stat_text.rsplit(")", 1)[1].strip().startswith("Z"):
-                    break
+            while process_state(child_pid) not in {None, "Z"} and time.monotonic() < deadline:
                 time.sleep(0.02)
-            if Path(f"/proc/{child_pid}/stat").exists():
-                stat_text = Path(f"/proc/{child_pid}/stat").read_text(encoding="utf-8")
-                self.assertTrue(stat_text.rsplit(")", 1)[1].strip().startswith("Z"))
+            self.assertIn(process_state(child_pid), {None, "Z"})
 
     def test_peer_timeout_is_a_structured_runtime_result(self):
         peer = load_peer()
@@ -1359,9 +1380,7 @@ class PeerV2Tests(TestCase):
                         check=False,
                     )
                 child_pid = int(child_pid_path.read_text(encoding="utf-8"))
-                if Path(f"/proc/{child_pid}/stat").exists():
-                    stat_text = Path(f"/proc/{child_pid}/stat").read_text(encoding="utf-8")
-                    self.assertTrue(stat_text.rsplit(")", 1)[1].strip().startswith("Z"))
+                self.assertIn(process_state(child_pid), {None, "Z"})
             finally:
                 if child_pid is not None:
                     try:
@@ -3187,7 +3206,8 @@ class PackageTests(TestCase):
 
     def test_release_versions_match(self):
         version = (REPO_ROOT / "VERSION").read_text().strip()
-        self.assertEqual(version, "4.0.0")
+        self.assertRegex(version, r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
+        self.assertIn(f"## {version} ", (REPO_ROOT / "CHANGELOG.md").read_text())
         for manifest in (
             CODEX_PLUGIN_ROOT / ".codex-plugin" / "plugin.json",
             CLAUDE_PLUGIN_ROOT / ".claude-plugin" / "plugin.json",

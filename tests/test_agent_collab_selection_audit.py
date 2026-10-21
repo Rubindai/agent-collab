@@ -1,4 +1,5 @@
 import json
+import sys
 import fcntl
 import stat
 import tempfile
@@ -6,6 +7,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import TestCase, mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import test_agent_collab_runtime as fixtures
 

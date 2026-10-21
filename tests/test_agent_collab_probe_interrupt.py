@@ -10,6 +10,8 @@ import time
 import unittest
 from unittest import mock
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 import test_agent_collab_runtime as fixtures
 
 setUpModule = fixtures.setUpModule

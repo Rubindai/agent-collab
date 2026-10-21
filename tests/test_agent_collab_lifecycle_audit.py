@@ -1,9 +1,12 @@
 import io
+import sys
 import tempfile
 from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import TestCase, mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import test_agent_collab_runtime as fixtures
 
