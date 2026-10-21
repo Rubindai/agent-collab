@@ -255,6 +255,25 @@ def _linux_process_group_members(pgid: int) -> list[tuple[int, str]]:
     return members
 
 
+def _ps_process_group_members(pgid: int) -> list[tuple[int, str]]:
+    completed = subprocess.run(
+        ["ps", "-A", "-o", "pid=", "-o", "pgid=", "-o", "stat="],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=5,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(f"ps exited with status {completed.returncode}")
+    members: list[tuple[int, str]] = []
+    for line in completed.stdout.splitlines():
+        fields = line.split()
+        if len(fields) >= 3 and fields[1] == str(pgid):
+            members.append((int(fields[0]), fields[2]))
+    return members
+
+
 def process_group_alive(pgid: int) -> bool:
     """Return whether a process group still has a non-zombie member."""
 
@@ -265,12 +284,31 @@ def process_group_alive(pgid: int) -> bool:
     if sys.platform.startswith("linux"):
         return any(state != "Z" for _, state in _linux_process_group_members(pgid))
     try:
+        # A kill probe cannot tell a zombie-only group from a live one on
+        # macOS, which answers EPERM for both.
+        return any(not state.startswith("Z") for _, state in _ps_process_group_members(pgid))
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+        pass
+    try:
         os.killpg(pgid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
     return True
+
+
+def _signal_denied(pgid: int, exc: PermissionError) -> dict[str, Any] | None:
+    """Return the failure for EPERM from killpg, or None to keep waiting.
+
+    Linux reports EPERM only when no member could be signaled. macOS also
+    reports it when the group holds an unreaped zombie while still signaling
+    the live members, so there the liveness check decides.
+    """
+
+    if not sys.platform.startswith("linux"):
+        return None
+    return {"outcome": "permission_denied", "quiescent": False, "pgid": pgid, "details": str(exc)}
 
 
 def terminate_process_group(
@@ -297,12 +335,9 @@ def terminate_process_group(
     except ProcessLookupError:
         return {"outcome": "not_running", "quiescent": True, "pgid": pgid}
     except PermissionError as exc:
-        return {
-            "outcome": "permission_denied",
-            "quiescent": False,
-            "pgid": pgid,
-            "details": str(exc),
-        }
+        denied = _signal_denied(pgid, exc)
+        if denied is not None:
+            return denied
 
     deadline = time.monotonic() + term_timeout_seconds
     while process_group_alive(pgid) and time.monotonic() < deadline:
@@ -315,12 +350,9 @@ def terminate_process_group(
     except ProcessLookupError:
         return {"outcome": "terminated", "quiescent": True, "pgid": pgid}
     except PermissionError as exc:
-        return {
-            "outcome": "permission_denied",
-            "quiescent": False,
-            "pgid": pgid,
-            "details": str(exc),
-        }
+        denied = _signal_denied(pgid, exc)
+        if denied is not None:
+            return denied
 
     deadline = time.monotonic() + kill_timeout_seconds
     while process_group_alive(pgid) and time.monotonic() < deadline:

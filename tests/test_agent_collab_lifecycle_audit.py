@@ -48,7 +48,9 @@ class LifecycleAuditTests(TestCase):
                     "schema_version": "2.0", "mode": "git", "repo_root": str(root),
                     "digest": "a" * 64, "sections": {"diff": "x" * host.MAX_JSON_ARTIFACT_BYTES},
                 }),
-                mock.patch.object(host.subprocess, "Popen") as launch,
+                # Patch the launch itself: macOS reads process identity with ps
+                # through subprocess.
+                mock.patch.object(host.SAFETY, "popen_group") as launch,
                 self.assertRaisesRegex(ValueError, "byte limit"),
             ):
                 host.start(args)

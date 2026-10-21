@@ -1,5 +1,9 @@
 # Changelog
 
+## 5.0.1 — 2026-10-21
+
+- Fix macOS process-group supervision. macOS answers EPERM to `killpg` while a group holds an unreaped zombie, so cleanup reported `permission_denied`, waited out its grace period, and left runs non-quiescent. Group liveness now comes from a `ps` scan that ignores zombies, and EPERM falls through to that check; Linux keeps its existing EPERM handling. First found by the macOS CI job, which had not run before.
+
 ## 5.0.0 — 2026-10-21
 
 - **Breaking:** reject `codex_config` entries in, or parent tables of, every Codex namespace that selects the model, provider endpoint, auth, catalog, approval/reviewer, sandbox, tools, memory, or helpers (for example `openai_base_url`, `model_catalog_json`, `approvals_reviewer`, `tools.*`, `sandbox_workspace_write.*`). Settings that contain them must be edited before upgrading.

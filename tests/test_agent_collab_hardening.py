@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import TestCase, mock
@@ -633,3 +634,42 @@ class NormalizationSourceTests(TestCase):
             with mock.patch.object(host, "process_identity_matches", return_value=False):
                 summary = host.summarize_run(run_dir)
         self.assertEqual(summary["normalization_source"], "none")
+
+
+class BsdProcessGroupTests(TestCase):
+    def test_zombie_only_group_is_quiescent_despite_eperm(self):
+        # macOS answers EPERM to killpg while a group holds an unreaped
+        # zombie; the ps scan must still prove the group quiescent.
+        safety = fixtures.load_peer().SAFETY
+        child = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+        try:
+            deadline = time.monotonic() + 10
+            while fixtures.process_state(child.pid) not in {"Z", None} and time.monotonic() < deadline:
+                time.sleep(0.05)
+            with mock.patch.object(safety.sys, "platform", "darwin"):
+                self.assertFalse(safety.process_group_alive(child.pid))
+                with mock.patch.object(safety.os, "killpg", side_effect=PermissionError(1, "Operation not permitted")):
+                    result = safety.terminate_process_group(child.pid)
+            self.assertTrue(result["quiescent"], result)
+        finally:
+            child.wait()
+
+    def test_signals_delivered_with_eperm_still_end_the_group(self):
+        safety = fixtures.load_peer().SAFETY
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
+        real_killpg = os.killpg
+
+        def deliver_then_eperm(pgid, signum):
+            real_killpg(pgid, signum)
+            raise PermissionError(1, "Operation not permitted")
+
+        try:
+            with mock.patch.object(safety.sys, "platform", "darwin"):
+                self.assertTrue(safety.process_group_alive(child.pid))
+                with mock.patch.object(safety.os, "killpg", side_effect=deliver_then_eperm):
+                    result = safety.terminate_process_group(child.pid)
+            self.assertTrue(result["quiescent"], result)
+            self.assertEqual(result["outcome"], "terminated")
+        finally:
+            child.kill()
+            child.wait()

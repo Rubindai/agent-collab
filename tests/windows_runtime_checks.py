@@ -81,7 +81,9 @@ class JobSupervisionChecks(unittest.TestCase):
         result = SAFETY.terminate_process_group(root.pid)
         self.assertTrue(result["quiescent"], result)
         self.assertEqual(result["outcome"], "killed")
-        self.assertFalse(SAFETY.pid_alive(grandchild))
+        # The job's active count drops as each member starts exiting; its
+        # process object is signaled a moment later.
+        self.assertTrue(wait_until(lambda: not SAFETY.pid_alive(grandchild), 5))
         root.wait(timeout=5)
         self.assertFalse(SAFETY.process_group_alive(root.pid))
 
