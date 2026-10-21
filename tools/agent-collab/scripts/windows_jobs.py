@@ -31,6 +31,7 @@ PROCESS_TERMINATE = 0x0001
 PROCESS_DUP_HANDLE = 0x0040
 PROCESS_SET_QUOTA = 0x0100
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+SYNCHRONIZE = 0x00100000
 THREAD_SUSPEND_RESUME = 0x0002
 TH32CS_SNAPTHREAD = 0x00000004
 DUPLICATE_SAME_ACCESS = 0x0002
@@ -38,6 +39,8 @@ ERROR_FILE_NOT_FOUND = 2
 ERROR_INVALID_PARAMETER = 87
 ERROR_ALREADY_EXISTS = 183
 STILL_ACTIVE = 259
+WAIT_TIMEOUT = 0x102
+WAIT_FAILED = 0xFFFFFFFF
 INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
 
@@ -133,6 +136,7 @@ _GetProcessTimes = _function(
     "GetProcessTimes", wintypes.BOOL, wintypes.HANDLE, *([ctypes.POINTER(wintypes.FILETIME)] * 4)
 )
 _GetExitCodeProcess = _function("GetExitCodeProcess", wintypes.BOOL, wintypes.HANDLE, wintypes.LPDWORD)
+_WaitForSingleObject = _function("WaitForSingleObject", wintypes.DWORD, wintypes.HANDLE, wintypes.DWORD)
 _IsProcessInJob = _function(
     "IsProcessInJob", wintypes.BOOL, wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)
 )
@@ -174,8 +178,26 @@ def _open_process(pid: int, access: int) -> Any:
     return handle
 
 
-def _running(process: Any) -> bool:
-    # A process that exits with code 259 reads as running, which fails closed.
+def _open_for_status(pid: int) -> tuple[Any, bool]:
+    """Open pid for liveness checks; the flag says whether it can be waited on.
+
+    Limited query access is granted for most processes of other users, so a
+    reused PID still reads as a different process instead of unknown.
+    """
+
+    try:
+        return _open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE), True
+    except PermissionError:
+        return _open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION), False
+
+
+def _running(process: Any, waitable: bool) -> bool:
+    if waitable:
+        state = _WaitForSingleObject(process, 0)
+        if state == WAIT_FAILED:
+            raise _last_error("WaitForSingleObject")
+        return state == WAIT_TIMEOUT
+    # Without SYNCHRONIZE, exit code 259 reads as running, which fails closed.
     code = wintypes.DWORD()
     if not _GetExitCodeProcess(process, ctypes.byref(code)):
         raise _last_error("GetExitCodeProcess")
@@ -185,13 +207,11 @@ def _running(process: Any) -> bool:
 def process_start_time(pid: int) -> str:
     """Return a live process's creation time in 100 ns units since 1601."""
 
-    # Limited query access is granted for most processes of other users, so
-    # a reused PID still reads as a different process instead of unknown.
-    process = _open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION)
+    process, waitable = _open_for_status(pid)
     try:
         # An open handle keeps an exited process's record readable; exited is
         # not a match.
-        if not _running(process):
+        if not _running(process, waitable):
             raise ProcessLookupError(f"process {pid} has exited")
         times = [wintypes.FILETIME() for _ in range(4)]
         if not _GetProcessTimes(process, *(ctypes.byref(item) for item in times)):
@@ -205,13 +225,13 @@ def pid_alive(pid: int) -> bool:
     """Return whether pid is live; unreadable evidence counts as live."""
 
     try:
-        process = _open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION)
+        process, waitable = _open_for_status(pid)
     except ProcessLookupError:
         return False
     except OSError:
         return True
     try:
-        return _running(process)
+        return _running(process, waitable)
     except OSError:
         return True
     finally:

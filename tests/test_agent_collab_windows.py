@@ -151,13 +151,17 @@ class WindowsProcessGroupTests(TestCase):
                 safety.popen_group(["x"], detached=True)
 
             popen.side_effect = None
-            with (
-                mock.patch.object(jobs, "adopt", side_effect=OSError("assign failed")),
-                self.assertRaisesRegex(OSError, "assign failed"),
-            ):
-                safety.popen_group(["x"])
-            process.kill.assert_called_once_with()
-            process.wait.assert_called_once_with()
+            for step in ("adopt", "resume"):
+                process.kill.reset_mock()
+                process.wait.reset_mock()
+                with (
+                    self.subTest(step=step),
+                    mock.patch.object(jobs, step, side_effect=OSError(f"{step} failed")),
+                    self.assertRaisesRegex(OSError, f"{step} failed"),
+                ):
+                    safety.popen_group(["x"])
+                process.kill.assert_called_once_with()
+                process.wait.assert_called_once_with()
 
     def test_windows_gate_passes_one_inheritable_handle(self):
         safety = fixtures.load_peer().SAFETY
@@ -177,9 +181,9 @@ class WindowsProcessGroupTests(TestCase):
         ):
             kwargs = {}
             command = safety.gated_command(["codex.exe", "exec"], 5, kwargs)
-            self.assertEqual(command[:3], [sys.executable, "-I", "-c"])
-            self.assertEqual(command[3], safety.WINDOWS_GATE_CODE)
-            self.assertEqual(command[4:], ["1005", "codex.exe", "exec"])
+            self.assertEqual(command[:4], [sys.executable, "-I", "-S", "-c"])
+            self.assertEqual(command[4], safety.WINDOWS_GATE_CODE)
+            self.assertEqual(command[5:], ["1005", "codex.exe", "exec"])
             self.assertEqual(kwargs["startupinfo"].lpAttributeList["handle_list"], [1005])
             self.assertNotIn("pass_fds", kwargs)
             self.assertEqual(inherited, [(1005, True)])
@@ -203,13 +207,49 @@ class WindowsProcessGroupTests(TestCase):
 class CrossPlatformIdentityTests(TestCase):
     def test_another_platforms_identity_is_unknown_not_dead(self):
         safety = fixtures.load_peer().SAFETY
-        windows_identity = {"kind": "windows_process", "pid": 4, "pgid": 4,
-                            "boot_id": "not_available", "start_time": "1"}
-        self.assertEqual(safety.process_identity_state(windows_identity), "unknown")
-        posix_identity = safety.process_identity(os.getpid())
+        local = safety.process_identity(os.getpid())
+        self.assertEqual(local["kind"], safety.local_identity_kind())
+        self.assertEqual(safety.process_identity_state(local), "matching")
+        for kind in sorted(safety.PROCESS_IDENTITY_KINDS - {local["kind"]}):
+            with self.subTest(kind=kind):
+                foreign = {**local, "kind": kind}
+                self.assertTrue(safety.identity_is_foreign(foreign))
+                self.assertEqual(safety.process_identity_state(foreign), "unknown")
         with windows(safety):
-            self.assertEqual(safety.process_identity_state(posix_identity), "unknown")
-        self.assertEqual(safety.process_identity_state(posix_identity), "matching")
+            self.assertEqual(safety.process_identity_state(local), "unknown")
+
+    def test_host_refuses_to_manage_a_run_started_on_another_platform(self):
+        host = fixtures.load_host()
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            request = fixtures.request()
+            data = fixtures.valid_peer_process(run_dir, Path(tmp), Path(tmp) / "guard.json")
+            host.validate_peer_process(data, request, run_dir)
+            kind = next(iter(host.SAFETY.PROCESS_IDENTITY_KINDS - {host.SAFETY.local_identity_kind()}))
+            data["process_identity"] = {**data["process_identity"], "kind": kind}
+            with self.assertRaisesRegex(host.ArtifactValidationError, "started on another platform"):
+                host.validate_peer_process(data, request, run_dir)
+
+    def test_unknown_identities_never_release_the_guard(self):
+        host = fixtures.load_host()
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            request = fixtures.request()
+            process_info = {"pid": 4242, "pgid": 4242, "process_identity": {"kind": "linux_proc"}}
+            provider = {"status": "running", "cleanup_outcome": None, "pgid": 4243,
+                        "process_identity": {"kind": "linux_proc"}}
+            with (
+                mock.patch.object(host, "load_provider_process", return_value=provider),
+                mock.patch.object(host.SAFETY, "process_identity_state", return_value="unknown"),
+                mock.patch.object(host.SAFETY, "process_group_alive", return_value=False),
+                mock.patch.object(host.SAFETY, "terminate_process_group") as terminate,
+            ):
+                cleanup = host.terminate_tracked_process_tree(process_info, run_dir, request)
+                with self.assertRaisesRegex(host.ArtifactValidationError, "cannot be verified"):
+                    host.require_process_tree_quiescent(process_info, run_dir, request)
+            terminate.assert_not_called()
+            self.assertFalse(cleanup["quiescent"])
 
     def test_windows_trampoline_keeps_ntstatus_exit_codes(self):
         code = fixtures.load_peer().SAFETY.WINDOWS_GATE_CODE
@@ -217,26 +257,72 @@ class CrossPlatformIdentityTests(TestCase):
 
 
 class SnapshotReaderTests(TestCase):
-    def test_timeout_stops_git_helpers_that_hold_the_pipe(self):
+    def fake_git(self, tmp, body):
+        bin_dir = Path(tmp) / "bin"
+        bin_dir.mkdir()
+        fake = bin_dir / "git"
+        fake.write_text("#!/bin/sh\n" + body)
+        fake.chmod(0o755)
+        return mock.patch.dict(os.environ, {"PATH": os.pathsep.join([str(bin_dir), os.environ.get("PATH", "")])})
+
+    def test_posix_git_stays_in_the_callers_process_group(self):
+        # Cancelling the wrapper's group must also stop a snapshot in progress.
         snapshot = fixtures.load_snapshot()
         with tempfile.TemporaryDirectory() as tmp:
-            bin_dir = Path(tmp) / "bin"
-            bin_dir.mkdir()
+            marker = Path(tmp) / "pgid"
+            with self.fake_git(tmp, f"ps -o pgid= -p $$ > '{marker}'\n"):
+                snapshot._git_output_digest(Path(tmp), ["diff"], time.monotonic() + 10)
+                self.assertEqual(snapshot._run_git(Path(tmp), ["status"], time.monotonic() + 10).returncode, 0)
+            self.assertEqual(int(marker.read_text()), os.getpgrp())
+
+    def test_timeout_returns_promptly_while_a_helper_holds_the_pipe(self):
+        snapshot = fixtures.load_snapshot()
+        with tempfile.TemporaryDirectory() as tmp:
             marker = Path(tmp) / "helper.pid"
-            fake_git = bin_dir / "git"
-            fake_git.write_text(
-                "#!/bin/sh\n"
-                f"sleep 30 & echo $! > '{marker}'\n"
-                "sleep 30\n"
-            )
-            fake_git.chmod(0o755)
-            path = os.pathsep.join([str(bin_dir), os.environ.get("PATH", "")])
-            started = time.monotonic()
-            with mock.patch.dict(os.environ, {"PATH": path}), self.assertRaises(TimeoutError):
-                snapshot._git_output_digest(Path(tmp), ["diff"], time.monotonic() + 1)
-            self.assertLess(time.monotonic() - started, 5)
-            helper = int(marker.read_text())
-            self.assertIsNone(fixtures.process_state(helper))
+            with self.fake_git(tmp, f"sleep 30 & echo $! > '{marker}'\nsleep 30\n"):
+                for run in (snapshot._git_output_digest, snapshot._run_git):
+                    with self.subTest(run=run.__name__):
+                        started = time.monotonic()
+                        with self.assertRaises(TimeoutError):
+                            run(Path(tmp), ["diff"], time.monotonic() + 1)
+                        self.assertLess(time.monotonic() - started, 4)
+                        try:
+                            os.kill(int(marker.read_text()), 9)
+                        except (ProcessLookupError, ValueError):
+                            pass
+
+    def test_an_expired_deadline_stays_a_timeout(self):
+        snapshot = fixtures.load_snapshot()
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "file.txt").write_text("content")
+            expired = time.monotonic() - 1
+            with self.assertRaises(TimeoutError):
+                snapshot._run_git(Path(tmp), ["status"], expired)
+            with self.assertRaises(TimeoutError):
+                snapshot._path_signature(Path(tmp) / "file.txt", expired)
+            with mock.patch.object(snapshot, "_hash_file", side_effect=TimeoutError("deadline")):
+                with self.assertRaises(TimeoutError):
+                    snapshot._filesystem_entries(Path(tmp), None, time.monotonic() + 10)
+
+
+class WindowsStdioTests(TestCase):
+    def test_entry_points_use_utf8_with_lf_output_and_universal_input(self):
+        strict_json = fixtures.load_peer().STRICT_JSON
+        streams = {name: mock.Mock() for name in ("stdin", "stdout", "stderr")}
+        with windows(strict_json), mock.patch.multiple(strict_json.sys, **streams):
+            strict_json.use_utf8_stdio()
+        streams["stdin"].reconfigure.assert_called_once_with(encoding="utf-8", errors="strict")
+        streams["stdout"].reconfigure.assert_called_once_with(encoding="utf-8", errors="strict", newline="\n")
+        streams["stderr"].reconfigure.assert_called_once_with(
+            encoding="utf-8", errors="backslashreplace", newline="\n"
+        )
+
+    def test_every_entry_point_sets_up_stdio(self):
+        root = fixtures.RUNTIME_ROOT / "scripts"
+        for name in ("host.py", "peer.py", "claude_telemetry.py", "safety.py"):
+            with self.subTest(name=name):
+                main = (root / name).read_text().split("\ndef main(", 1)[1].split("\n\n\n", 1)[0]
+                self.assertIn("use_utf8_stdio()", main)
 
 
 class WindowsLaunchPolicyTests(TestCase):

@@ -359,8 +359,14 @@ def valid_host_synthesis(run_id="agent-collab-test", run_dir=None):
 
 
 def valid_process_identity(pid=43210, pgid=43210):
+    # Identities from another platform are rejected, so use this host's kind.
+    local_kind = (
+        "linux_proc"
+        if sys.platform.startswith("linux") and Path("/proc/sys/kernel/random/boot_id").is_file()
+        else "posix_ps"
+    )
     return {
-        "kind": "linux_proc",
+        "kind": local_kind,
         "pid": pid,
         "pgid": pgid,
         "boot_id": "test-boot-id",

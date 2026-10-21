@@ -164,6 +164,22 @@ def process_identity(pid: int) -> dict[str, Any]:
     }
 
 
+def local_identity_kind() -> str:
+    """Return the identity kind process_identity produces on this host."""
+
+    if os.name == "nt":
+        return "windows_process"
+    if sys.platform.startswith("linux") and Path("/proc/sys/kernel/random/boot_id").is_file():
+        return "linux_proc"
+    return "posix_ps"
+
+
+def identity_is_foreign(value: Mapping[str, Any]) -> bool:
+    """Return whether another platform recorded this identity, so its PID means nothing here."""
+
+    return value["kind"] != local_identity_kind()
+
+
 def validate_process_identity(value: Any) -> None:
     if not isinstance(value, dict) or set(value) != PROCESS_IDENTITY_KEYS:
         raise ValueError(f"process identity must contain exactly {sorted(PROCESS_IDENTITY_KEYS)}")
@@ -183,9 +199,8 @@ def process_identity_state(expected: Any) -> str:
         validate_process_identity(expected)
     except ValueError:
         return "unknown"
-    if (expected["kind"] == "windows_process") != (os.name == "nt"):
-        # Another platform recorded this identity (for example native Windows
-        # and WSL sharing a worktree); its PID means nothing here.
+    if identity_is_foreign(expected):
+        # For example native Windows and WSL sharing a worktree.
         return "unknown"
     try:
         observed = process_identity(expected["pid"])
@@ -387,9 +402,9 @@ def gated_command(args: list[str], read_fd: int, popen_kwargs: dict[str, Any]) -
 
     token = pass_gate(read_fd, popen_kwargs)
     code = WINDOWS_GATE_CODE if os.name == "nt" else POSIX_GATE_CODE
-    # Isolated mode keeps the working directory and site hooks from shadowing
-    # the stdlib modules the trampoline imports.
-    return [sys.executable, "-I", "-c", code, str(token), *args]
+    # The trampoline needs only the stdlib: ignore the working directory,
+    # Python environment variables, and site hooks.
+    return [sys.executable, "-I", "-S", "-c", code, str(token), *args]
 
 
 def resolve_cli(name: str, path: str | None = None) -> str:
@@ -789,6 +804,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _load_sibling("strict_json").use_utf8_stdio()
     args = build_parser().parse_args(argv)
     if args.command == "claude-agent-guard":
         return _run_claude_agent_guard(args.counter, args.limit)

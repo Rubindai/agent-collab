@@ -145,8 +145,12 @@ def capture(path: Path, run_id: str, expected_effort: str, raw: str) -> bool:
             STRICT_JSON.fsync_directory(directory)
             return valid
         finally:
-            # Windows may release a closed handle's lock late.
-            STRICT_JSON.unlock(lock.fileno())
+            # Windows may release a closed handle's lock late; closing still
+            # releases it if unlocking fails.
+            try:
+                STRICT_JSON.unlock(lock.fileno())
+            except OSError:
+                pass
 
 
 def main() -> int:

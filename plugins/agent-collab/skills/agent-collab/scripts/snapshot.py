@@ -6,6 +6,7 @@ import importlib.util
 import os
 import subprocess
 import sys
+import select
 import tempfile
 import threading
 import time
@@ -161,23 +162,68 @@ def _printable(value: str) -> str:
     return value.encode("utf-8", "surrogateescape").decode("utf-8", "backslashreplace")
 
 
+def _start_git(args: list[str], **kwargs: Any) -> subprocess.Popen[Any]:
+    """Start git inside the caller's supervision.
+
+    POSIX keeps git in the caller's process group, so cancelling the wrapper
+    also stops it. Windows gives git a job nested in the caller's job, so a
+    timeout can stop the Git helpers that share its pipes, and terminating the
+    wrapper's job still stops them.
+    """
+
+    if os.name == "nt":
+        return SAFETY.popen_group([*GIT_BASE_COMMAND, *args], **kwargs)
+    return subprocess.Popen([*GIT_BASE_COMMAND, *args], **kwargs)
+
+
+def _stop_git(process: subprocess.Popen[Any]) -> None:
+    if os.name == "nt":
+        SAFETY.terminate_process_group(process.pid, term_timeout_seconds=0, kill_timeout_seconds=2)
+    else:
+        process.kill()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 def _run_git(repo_root: Path, args: list[str], deadline: float) -> subprocess.CompletedProcess[str]:
     try:
-        return subprocess.run(
-            [*GIT_BASE_COMMAND, *args],
+        timeout = _remaining_seconds(deadline)
+        process = _start_git(
+            args,
             cwd=repo_root,
             env=_git_env(),
             encoding="utf-8",
             errors="surrogateescape",
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=_remaining_seconds(deadline),
-            check=False,
         )
-    except subprocess.TimeoutExpired as exc:
-        raise TimeoutError(f"git {' '.join(args)} exceeded the workspace snapshot deadline") from exc
-    except (OSError, UnicodeError) as exc:
+    except TimeoutError:
+        raise
+    except OSError as exc:
         raise RuntimeError(f"could not execute git {' '.join(args)}: {exc}") from exc
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        _stop_git(process)
+        if os.name == "nt":
+            # communicate()'s reader threads finish once git's job is gone.
+            try:
+                process.communicate(timeout=1)
+            except (subprocess.TimeoutExpired, OSError, ValueError):
+                pass
+        else:
+            # Like subprocess.run, do not drain pipes a surviving helper may
+            # hold open.
+            for stream in (process.stdout, process.stderr):
+                if stream is not None:
+                    stream.close()
+        raise TimeoutError(f"git {' '.join(args)} exceeded the workspace snapshot deadline") from exc
+    except BaseException:
+        _stop_git(process)
+        raise
+    return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
 
 
 def is_git_workspace(repo_root: Path, deadline: float) -> bool:
@@ -204,24 +250,13 @@ def _git_output_digest(repo_root: Path, args: list[str], deadline: float) -> str
     """Hash potentially large Git output without retaining a patch or index listing."""
     try:
         with tempfile.TemporaryFile(mode="w+b") as errors:
-            # Git's own group lets a timeout stop helpers that share the pipe.
-            process = SAFETY.popen_group(
-                [*GIT_BASE_COMMAND, *args],
-                cwd=repo_root,
-                env=_git_env(),
-                stdout=subprocess.PIPE,
-                stderr=errors,
-            )
+            process = _start_git(args, cwd=repo_root, env=_git_env(), stdout=subprocess.PIPE, stderr=errors)
             assert process.stdout is not None
             stdout = process.stdout
             digest = hashlib.sha256()
             size = 0
             read_errors: list[BaseException] = []
             reader: threading.Thread | None = None
-
-            def stop_group() -> None:
-                SAFETY.terminate_process_group(process.pid, term_timeout_seconds=0, kill_timeout_seconds=2)
-                process.wait()
 
             def drain() -> None:
                 nonlocal size
@@ -233,25 +268,38 @@ def _git_output_digest(repo_root: Path, args: list[str], deadline: float) -> str
                     read_errors.append(exc)
 
             try:
-                # A reader thread bounds the pipe read portably; select()
-                # accepts only sockets on Windows.
-                reader = threading.Thread(target=drain, daemon=True)
-                reader.start()
-                reader.join(_remaining_seconds(deadline))
-                if reader.is_alive():
-                    raise TimeoutError(f"git {' '.join(args)} exceeded the workspace snapshot deadline")
-                if read_errors:
-                    raise read_errors[0]
+                if os.name == "nt":
+                    # select() accepts only sockets on Windows, so read on a
+                    # thread; stopping git's job ends the read.
+                    thread = threading.Thread(target=drain, daemon=True)
+                    thread.start()
+                    reader = thread
+                    reader.join(_remaining_seconds(deadline))
+                    if reader.is_alive():
+                        raise TimeoutError(f"git {' '.join(args)} exceeded the workspace snapshot deadline")
+                    if read_errors:
+                        raise read_errors[0]
+                else:
+                    while True:
+                        ready, _, _ = select.select([stdout], [], [], _remaining_seconds(deadline))
+                        if not ready:
+                            raise TimeoutError(f"git {' '.join(args)} exceeded the workspace snapshot deadline")
+                        chunk = stdout.read1(1024 * 1024)
+                        if not chunk:
+                            break
+                        digest.update(chunk)
+                        size += len(chunk)
                 returncode = process.wait(timeout=_remaining_seconds(deadline))
             except (TimeoutError, subprocess.TimeoutExpired):
-                stop_group()
+                _stop_git(process)
                 raise TimeoutError(f"git {' '.join(args)} exceeded the workspace snapshot deadline")
             except BaseException:
-                stop_group()
+                if process.poll() is None:
+                    _stop_git(process)
                 raise
             finally:
                 # A blocked read holds the reader's lock; close only after the
-                # stopped group has let it finish.
+                # stopped job has let it finish.
                 if reader is not None:
                     reader.join(1)
                 if reader is None or not reader.is_alive():
@@ -346,6 +394,8 @@ def _path_signature(path: Path, deadline: float) -> str:
             return f"dir mode={stat.st_mode & 0o777:o}"
         stat = path.stat(follow_symlinks=False)
         return f"other mode={stat.st_mode & 0o777:o}"
+    except TimeoutError:
+        raise
     except OSError as exc:
         raise RuntimeError(f"could not snapshot {path}: {exc}") from exc
 
@@ -507,6 +557,8 @@ def _filesystem_entries(
         current = stack.pop()
         try:
             children = sorted(os.scandir(current), key=lambda entry: entry.name)
+        except TimeoutError:
+            raise
         except OSError as exc:
             if current != repo_root:
                 rel = current.relative_to(repo_root).as_posix()
@@ -535,6 +587,9 @@ def _filesystem_entries(
                 else:
                     stat = child.stat(follow_symlinks=False)
                     entries[rel] = f"other mode={stat.st_mode & 0o777:o}"
+            except TimeoutError:
+                # TimeoutError is an OSError; an expired deadline is not a file error.
+                raise
             except OSError as exc:
                 entries[rel] = f"error error={type(exc).__name__}"
     return dict(sorted(entries.items()))

@@ -12,6 +12,7 @@ import tempfile
 import textwrap
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "tools" / "agent-collab" / "scripts"
@@ -155,14 +156,27 @@ class JobSupervisionChecks(unittest.TestCase):
                 grandchild = int(root.stdout.readline())
                 result = safety.terminate_process_group(root.pid)
                 root.wait(timeout=10)
-                print(json.dumps({{"quiescent": result["quiescent"], "grandchild_alive": safety.pid_alive(grandchild)}}))
+                print(json.dumps({{
+                    "redirector": sys._base_executable != sys.executable,
+                    "quiescent": result["quiescent"],
+                    "grandchild_alive": safety.pid_alive(grandchild),
+                }}))
             """
             completed = subprocess.run(
                 [str(venv_python), "-c", textwrap.dedent(script)], capture_output=True, text=True, timeout=60
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
+            # The venv python.exe is a redirector that starts the real
+            # interpreter as its child; suspended creation keeps both inside.
             self.assertEqual(json.loads(completed.stdout.splitlines()[-1]),
-                             {"quiescent": True, "grandchild_alive": False})
+                             {"redirector": True, "quiescent": True, "grandchild_alive": False})
+
+    def test_a_live_root_without_a_visible_job_is_not_quiescent(self):
+        root = self.start_root("import time; time.sleep(120)")
+        with unittest.mock.patch.object(JOBS, "_open_job", return_value=None):
+            result = SAFETY.terminate_process_group(root.pid)
+        self.assertEqual(result["outcome"], "job_not_visible")
+        self.assertFalse(result["quiescent"])
 
     def test_ntstatus_exit_codes_survive_the_trampoline(self):
         read_fd, write_fd = os.pipe()

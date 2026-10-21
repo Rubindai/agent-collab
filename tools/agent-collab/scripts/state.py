@@ -235,7 +235,11 @@ def state_lock(run_root: Path):
         try:
             yield
         finally:
-            STRICT_JSON.unlock(lock.fileno())
+            # Closing still releases the lock if unlocking fails.
+            try:
+                STRICT_JSON.unlock(lock.fileno())
+            except OSError:
+                pass
 
 
 def load_state(run_root: Path) -> dict[str, Any]:

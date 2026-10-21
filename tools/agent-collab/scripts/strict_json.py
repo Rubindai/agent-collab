@@ -101,7 +101,10 @@ def use_utf8_stdio() -> None:
 
     if os.name != "nt":
         return
-    for stream, errors in ((sys.stdin, "strict"), (sys.stdout, "strict"), (sys.stderr, "backslashreplace")):
+    if sys.stdin is not None and hasattr(sys.stdin, "reconfigure"):
+        # Input keeps universal newlines.
+        sys.stdin.reconfigure(encoding="utf-8", errors="strict")
+    for stream, errors in ((sys.stdout, "strict"), (sys.stderr, "backslashreplace")):
         if stream is not None and hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors=errors, newline="\n")
 

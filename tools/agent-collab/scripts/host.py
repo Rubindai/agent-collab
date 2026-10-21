@@ -1471,6 +1471,13 @@ def validate_peer_process(data: dict[str, Any], request: dict[str, Any], run_dir
         raise ArtifactValidationError(f"peer-process process_identity is invalid: {exc}") from exc
     if data["process_identity"]["pid"] != data["pid"] or data["process_identity"]["pgid"] != data["pgid"]:
         raise ArtifactValidationError("peer-process identity pid/pgid must match peer-process pid/pgid")
+    if SAFETY.identity_is_foreign(data["process_identity"]):
+        # Its process groups cannot be observed here, so no quiescence proof
+        # can release its guard.
+        raise ArtifactValidationError(
+            f"run was started on another platform ({data['process_identity']['kind']}); "
+            "finish, complete, or cancel it from that platform"
+        )
     if not isinstance(data["started_at"], str) or parse_utc_timestamp(data["started_at"]) is None:
         raise ArtifactValidationError("peer-process started_at must be an ISO-8601 timestamp")
     if not isinstance(data["started_at_epoch"], (int, float)) or isinstance(data["started_at_epoch"], bool):
@@ -1582,7 +1589,12 @@ def require_process_tree_quiescent(
     provider = load_provider_process(run_dir, request)
     isolation_path = run_dir / "isolation-state.json"
     if not wrapper_quiescence_proven:
-        if process_identity_matches(process_info) and process_alive(int(process_info["pid"])):
+        wrapper_state = SAFETY.process_identity_state(process_info.get("process_identity"))
+        if wrapper_state == "unknown":
+            # An empty-group answer cannot prove quiescence for a root whose
+            # identity is unreadable.
+            raise ArtifactValidationError("peer wrapper liveness cannot be verified")
+        if wrapper_state == "matching" and process_alive(int(process_info["pid"])):
             raise ArtifactValidationError("peer wrapper is still running")
         if request["workspace_mode"] == "isolated" and provider["status"] in {"pending", "quiescent"}:
             if provider["status"] != "pending" and not isolation_path.exists():
@@ -3616,6 +3628,13 @@ def terminate_tracked_process_tree(
         }
     elif (
         provider["process_identity"] is not None
+        and SAFETY.process_identity_state(provider["process_identity"]) == "unknown"
+    ):
+        # An empty-group answer cannot prove quiescence for a root whose
+        # identity is unreadable.
+        provider_cleanup = {"outcome": "identity_unknown", "quiescent": False}
+    elif (
+        provider["process_identity"] is not None
         and SAFETY.process_identity_matches(provider["process_identity"])
     ):
         provider_pgid = int(provider["pgid"])
@@ -3665,8 +3684,11 @@ def terminate_tracked_process_tree(
                 "quiescent": False,
             }
     wrapper_pgid = int(process_info["pgid"])
-    if process_identity_matches(process_info):
+    wrapper_state = SAFETY.process_identity_state(process_info.get("process_identity"))
+    if wrapper_state == "matching":
         wrapper_cleanup = SAFETY.terminate_process_group(wrapper_pgid)
+    elif wrapper_state == "unknown":
+        wrapper_cleanup = {"outcome": "identity_unknown", "quiescent": False}
     else:
         wrapper_cleanup = {
             "outcome": "identity_mismatch",
