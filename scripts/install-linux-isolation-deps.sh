@@ -57,6 +57,15 @@ if check_commands; then
   exit 0
 fi
 
+# Install only what is missing: an existing fuse2 fusermount already satisfies
+# cleanup, and installing fuse3 beside it can conflict on older releases.
+packages=()
+command -v bwrap >/dev/null 2>&1 || packages+=(bubblewrap)
+command -v fuse-overlayfs >/dev/null 2>&1 || packages+=(fuse-overlayfs)
+if ! command -v fusermount3 >/dev/null 2>&1 && ! command -v fusermount >/dev/null 2>&1; then
+  packages+=(fuse3)
+fi
+
 if [[ ! -r /etc/os-release ]]; then
   echo "Cannot identify this Linux distribution. Install bubblewrap, fuse-overlayfs, and fuse3 with its package manager." >&2
   exit 2
@@ -95,15 +104,16 @@ if (( EUID != 0 )); then
   elevate=(sudo)
 fi
 
+# ${elevate[@]+...} keeps an empty array valid under `set -u` on bash < 4.4.
 case "$manager" in
   apt-get)
-    "${elevate[@]}" apt-get update
-    "${elevate[@]}" apt-get install --no-install-recommends -y bubblewrap fuse-overlayfs fuse3
+    ${elevate[@]+"${elevate[@]}"} apt-get update
+    ${elevate[@]+"${elevate[@]}"} apt-get install --no-install-recommends -y "${packages[@]}"
     ;;
   dnf)
-    "${elevate[@]}" dnf install -y bubblewrap fuse-overlayfs fuse3
+    ${elevate[@]+"${elevate[@]}"} dnf install -y "${packages[@]}"
     ;;
 esac
 
 check_commands
-echo "Run 'python tools/agent-collab/scripts/host.py doctor' to verify FUSE and user namespaces."
+echo "Run 'python3 tools/agent-collab/scripts/host.py doctor' to verify FUSE and user namespaces."

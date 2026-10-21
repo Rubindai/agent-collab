@@ -420,7 +420,10 @@ class SnapshotCoverageTests(TestCase):
     def test_non_utf8_filenames_serialize_in_git_and_filesystem_modes(self):
         strict_json = fixtures.load_host().STRICT_JSON
         name = os.fsdecode(b"bad-\xff.txt")
-        (self.repo / name).write_text("x")
+        try:
+            (self.repo / name).write_text("x")
+        except OSError:
+            self.skipTest("this filesystem rejects non-UTF-8 names (for example APFS)")
         git_data = self.snapshot.mutation_snapshot(self.repo)
         strict_json.dumps(git_data).encode("utf-8")
         self.assertEqual(git_data["sections"]["untracked_count"], 1)
@@ -570,3 +573,45 @@ class WrapperBaselineTests(TestCase):
             (run_dir / "before.snapshot.json").write_text(json.dumps({**baseline, "mode": "isolated"}))
             self.assertIsNone(peer.host_baseline_snapshot(env, repo))
             self.assertIsNone(peer.host_baseline_snapshot({}, repo))
+
+
+class IsolationDependencyScriptTests(TestCase):
+    SCRIPT = fixtures.REPO_ROOT / "scripts" / "install-linux-isolation-deps.sh"
+
+    def run_script(self, present, *args):
+        if sys.platform != "linux" or not Path("/etc/os-release").exists():
+            self.skipTest("the installer only runs on Linux distributions with os-release")
+        with tempfile.TemporaryDirectory() as tmp:
+            stubs = Path(tmp) / "bin"
+            stubs.mkdir()
+            log = Path(tmp) / "calls.log"
+            for name in ("uname", "dirname", "cat"):
+                real = subprocess.run(["sh", "-c", f"command -v {name}"], capture_output=True, text=True).stdout.strip()
+                if real:
+                    (stubs / name).symlink_to(real)
+            for name in present:
+                (stubs / name).write_text("#!/bin/sh\nexit 0\n")
+            for name in ("sudo", "apt-get", "dnf"):
+                (stubs / name).write_text(f"#!/bin/sh\necho {name} \"$@\" >> {log}\n" + ('exec "$@"\n' if name == "sudo" else ""))
+            for item in stubs.iterdir():
+                if not item.is_symlink():
+                    item.chmod(0o755)
+            completed = subprocess.run(
+                ["/bin/bash", str(self.SCRIPT), *args], capture_output=True, text=True,
+                env={"PATH": str(stubs), "HOME": tmp},
+            )
+            return completed, (log.read_text() if log.exists() else "")
+
+    def test_check_reports_missing_commands_without_installing(self):
+        completed, calls = self.run_script(["bwrap"], "--check")
+        self.assertEqual(completed.returncode, 1)
+        self.assertIn("fuse-overlayfs: missing", completed.stderr)
+        self.assertEqual(calls, "")
+
+    def test_install_requests_only_missing_packages(self):
+        completed, calls = self.run_script(["bwrap", "fusermount"], "--install")
+        install_lines = [line for line in calls.splitlines() if " install " in f" {line} "]
+        self.assertTrue(install_lines, completed.stderr + calls)
+        self.assertTrue(all(line.endswith("fuse-overlayfs") for line in install_lines), install_lines)
+        self.assertNotIn("fuse3", calls)
+        self.assertNotIn("bubblewrap", calls)

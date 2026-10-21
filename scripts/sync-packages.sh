@@ -128,7 +128,13 @@ do
   fi
 done
 
-python - "$repo_root" <<'PY'
+python_bin="${PYTHON:-python3}"
+if ! command -v "$python_bin" >/dev/null 2>&1; then
+  echo "Python 3 is required; set PYTHON or install python3" >&2
+  exit 1
+fi
+
+"$python_bin" - "$repo_root" <<'PY'
 import json
 import pathlib
 import sys
@@ -136,22 +142,43 @@ import sys
 root = pathlib.Path(sys.argv[1])
 expected_source = "./plugins/agent-collab"
 
-with (root / ".agents/plugins/marketplace.json").open(encoding="utf-8") as handle:
-    codex_marketplace = json.load(handle)
-with (root / ".claude-plugin/marketplace.json").open(encoding="utf-8") as handle:
-    claude_marketplace = json.load(handle)
 
-codex_entry = next(
-    (entry for entry in codex_marketplace.get("plugins", []) if entry.get("name") == "agent-collab"),
-    None,
-)
-claude_entry = next(
-    (entry for entry in claude_marketplace.get("plugins", []) if entry.get("name") == "agent-collab"),
-    None,
-)
-codex_source = (codex_entry or {}).get("source", {}).get("path")
-claude_source = (claude_entry or {}).get("source")
-if codex_source != expected_source or claude_source != expected_source:
+def strict_object(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise SystemExit(f"duplicate JSON key {key!r}")
+        value[key] = item
+    return value
+
+
+def reject_constant(token):
+    raise SystemExit(f"non-finite JSON number {token}")
+
+
+def load(relative):
+    try:
+        text = (root / relative).read_text(encoding="utf-8")
+        return json.loads(text, object_pairs_hook=strict_object, parse_constant=reject_constant)
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise SystemExit(f"{relative} is not strict JSON: {exc}")
+
+
+def plugin_entry(marketplace, relative):
+    plugins = marketplace.get("plugins") if isinstance(marketplace, dict) else None
+    if not isinstance(plugins, list):
+        raise SystemExit(f"{relative} must contain a plugins array")
+    matches = [entry for entry in plugins if isinstance(entry, dict) and entry.get("name") == "agent-collab"]
+    if len(matches) != 1:
+        raise SystemExit(f"{relative} must list agent-collab exactly once")
+    return matches[0]
+
+
+codex_entry = plugin_entry(load(".agents/plugins/marketplace.json"), ".agents/plugins/marketplace.json")
+claude_entry = plugin_entry(load(".claude-plugin/marketplace.json"), ".claude-plugin/marketplace.json")
+codex_source = codex_entry.get("source")
+codex_path = codex_source.get("path") if isinstance(codex_source, dict) else None
+if codex_path != expected_source or claude_entry.get("source") != expected_source:
     raise SystemExit("both marketplaces must point to ./plugins/agent-collab")
 
 version = (root / "VERSION").read_text(encoding="utf-8").strip()
@@ -159,15 +186,19 @@ for relative_manifest in (
     "plugins/agent-collab/.codex-plugin/plugin.json",
     "plugins/agent-collab/.claude-plugin/plugin.json",
 ):
-    with (root / relative_manifest).open(encoding="utf-8") as handle:
-        manifest = json.load(handle)
-    if manifest.get("name") != "agent-collab" or manifest.get("version") != version:
+    manifest = load(relative_manifest)
+    if not isinstance(manifest, dict) or manifest.get("name") != "agent-collab" or manifest.get("version") != version:
         raise SystemExit(f"manifest name/version does not match agent-collab {version}: {relative_manifest}")
 PY
 
 staging_dir="$(mktemp -d "${TMPDIR:-/tmp}/agent-collab-sync.XXXXXX")"
+new_skill_dir=""
+new_agents_dir=""
 cleanup() {
   rm -rf "$staging_dir"
+  [[ -n "$new_skill_dir" ]] && rm -rf "$new_skill_dir"
+  [[ -n "$new_agents_dir" ]] && rm -rf "$new_agents_dir"
+  return 0
 }
 trap cleanup EXIT
 
@@ -184,34 +215,34 @@ find "$staging_dir" -type d -name __pycache__ -prune -exec rm -rf {} +
 find "$staging_dir" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
 
 if [[ "$check" -eq 0 ]]; then
-  # This directory is generated entirely from the canonical source tree. Drop
-  # any stale pre-1.0 or otherwise unclassified payload before copying.
-  while IFS= read -r -d '' packaged_entry; do
-    packaged_name="${packaged_entry##*/}"
-    case "$packaged_name" in
-      SKILL.md|agents|scripts|references|schemas)
-        ;;
-      *)
-        rm -rf -- "$packaged_entry"
-        ;;
-    esac
-  done < <(find "$skill_dir" -mindepth 1 -maxdepth 1 -print0)
+  # Build the complete generated trees next to their destinations, then swap
+  # them in with renames so an interrupted sync never leaves a partial package.
+  # Anything unclassified in the old package is dropped with it.
+  skills_parent="$(dirname "$skill_dir")"
+  find "$skills_parent" -mindepth 1 -maxdepth 1 -name '.agent-collab.*' -exec rm -rf {} +
+  find "$plugin_root" -mindepth 1 -maxdepth 1 -name '.agents.*' -exec rm -rf {} +
+  new_skill_dir="$(mktemp -d "$skills_parent/.agent-collab.sync.XXXXXX")"
+  new_agents_dir="$(mktemp -d "$plugin_root/.agents.sync.XXXXXX")"
+  chmod 0755 "$new_skill_dir" "$new_agents_dir"
   for filename in "${shared_files[@]}"; do
-    rm -f "$skill_dir/$filename"
-    cp -a "$staging_dir/$filename" "$skill_dir/$filename"
+    cp -a "$staging_dir/$filename" "$new_skill_dir/$filename"
   done
   for dirname in "${shared_directories[@]}"; do
-    rm -rf "$skill_dir/$dirname"
-    cp -a "$staging_dir/$dirname" "$skill_dir/$dirname"
+    cp -a "$staging_dir/$dirname" "$new_skill_dir/$dirname"
   done
-  rm -rf "$plugin_root/agents"
-  cp -a "$staging_dir/claude-agents" "$plugin_root/agents"
-  rm -rf "$skill_dir/agents"
-  cp -a "$staging_dir/codex-agents" "$skill_dir/agents"
-  rm -rf \
-    "$skill_dir/tools" \
-    "$skill_dir/runs" \
-    "$skill_dir/settings.local.json"
+  cp -a "$staging_dir/codex-agents" "$new_skill_dir/agents"
+  cp -a "$staging_dir/claude-agents/." "$new_agents_dir/"
+  old_skill_dir="$skills_parent/.agent-collab.old.$$"
+  old_agents_dir="$plugin_root/.agents.old.$$"
+  mv "$skill_dir" "$old_skill_dir"
+  mv "$new_skill_dir" "$skill_dir"
+  new_skill_dir=""
+  if [[ -e "$plugin_root/agents" ]]; then
+    mv "$plugin_root/agents" "$old_agents_dir"
+  fi
+  mv "$new_agents_dir" "$plugin_root/agents"
+  new_agents_dir=""
+  rm -rf "$old_skill_dir" "$old_agents_dir"
 fi
 
 while IFS= read -r -d '' packaged_entry; do
@@ -226,26 +257,48 @@ while IFS= read -r -d '' packaged_entry; do
   esac
 done < <(find "$skill_dir" -mindepth 1 -maxdepth 1 -print0)
 
-for filename in "${shared_files[@]}"; do
-  if ! cmp -s "$staging_dir/$filename" "$skill_dir/$filename"; then
-    echo "packaged $filename is not synchronized with tools/agent-collab/$filename" >&2
-    exit 1
-  fi
-done
-for dirname in "${shared_directories[@]}"; do
-  if ! diff -qr "$staging_dir/$dirname" "$skill_dir/$dirname" >/dev/null; then
-    echo "packaged $dirname is not synchronized with tools/agent-collab/$dirname" >&2
-    exit 1
-  fi
-done
-if ! diff -qr "$staging_dir/claude-agents" "$plugin_root/agents" >/dev/null; then
-  echo "packaged Claude agents are not synchronized with tools/agent-collab/agents/claude" >&2
-  exit 1
-fi
-if ! diff -qr "$staging_dir/codex-agents" "$skill_dir/agents" >/dev/null; then
-  echo "packaged Codex agent metadata is not synchronized with tools/agent-collab/agents/codex" >&2
-  exit 1
-fi
+# Compare bytes, symlink targets, and permission bits; diff -r ignores modes.
+"$python_bin" - "$staging_dir" "$skill_dir" "$plugin_root" "${shared_files[@]}" -- "${shared_directories[@]}" <<'PY'
+import os
+import pathlib
+import stat
+import sys
+
+staging, skill, plugin = (pathlib.Path(item) for item in sys.argv[1:4])
+separator = sys.argv.index("--")
+files, directories = sys.argv[4:separator], sys.argv[separator + 1:]
+
+
+def signature(path):
+    info = path.lstat()
+    if stat.S_ISLNK(info.st_mode):
+        return ("link", os.readlink(path))
+    mode = stat.S_IMODE(info.st_mode)
+    if stat.S_ISDIR(info.st_mode):
+        return ("dir", mode)
+    return ("file", mode, path.read_bytes())
+
+
+def tree(root):
+    if not root.exists():
+        return None
+    return {str(item.relative_to(root)): signature(item) for item in sorted(root.rglob("*"))}
+
+
+pairs = [(staging / name, skill / name, f"packaged {name}") for name in files]
+pairs += [(staging / name, skill / name, f"packaged {name}") for name in directories]
+pairs += [
+    (staging / "claude-agents", plugin / "agents", "packaged Claude agents"),
+    (staging / "codex-agents", skill / "agents", "packaged Codex agent metadata"),
+]
+for source, packaged, label in pairs:
+    same = (
+        signature(source) == signature(packaged) if source.is_file() and packaged.is_file()
+        else tree(source) == tree(packaged)
+    )
+    if not same:
+        raise SystemExit(f"{label} is not synchronized with tools/agent-collab (content or file mode differs)")
+PY
 
 if [[ -e "$skill_dir/runs" || -e "$skill_dir/settings.local.json" ]]; then
   echo "packaged skill must not contain runtime state: $skill_dir" >&2
