@@ -38,14 +38,16 @@ class ProbeInterruptionTests(unittest.TestCase):
         self.popen_patch.stop()
         for sig, original in self.handlers.items():
             self.assertEqual(signal.getsignal(sig), original)
-        for process in self.processes:
+        # Iterate a copy: on macOS the liveness check itself starts ps through
+        # the recorded Popen.
+        for process in list(self.processes):
             if availability.SAFETY.process_group_alive(process.pid):
                 availability.SAFETY.terminate_process_group(process.pid)
             process.wait(timeout=1)
 
     def assert_cleaned(self):
         self.assertTrue(self.processes)
-        for process in self.processes:
+        for process in list(self.processes):
             self.assertIsNotNone(process.returncode, 'Popen leader was not reaped')
             self.assertFalse(availability.SAFETY.process_group_alive(process.pid))
             with self.assertRaises(ChildProcessError):
