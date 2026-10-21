@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import select
+import shutil
 import tempfile
 import threading
 import time
@@ -226,7 +227,19 @@ def _run_git(repo_root: Path, args: list[str], deadline: float) -> subprocess.Co
     return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
 
 
+def has_git_metadata(path: Path) -> bool:
+    """Return whether path or one of its parents holds Git metadata."""
+
+    return any((candidate / ".git").exists() for candidate in (path, *path.parents))
+
+
 def is_git_workspace(repo_root: Path, deadline: float) -> bool:
+    if shutil.which("git", path=_git_env().get("PATH")) is None:
+        # Git is needed only for Git repositories; any other folder uses a
+        # filesystem snapshot.
+        if has_git_metadata(repo_root):
+            raise RuntimeError("git is required to snapshot a Git repository, but it is not on PATH")
+        return False
     completed = _run_git(repo_root, ["rev-parse", "--is-inside-work-tree"], deadline)
     if completed.returncode == 0:
         return completed.stdout.strip() == "true"

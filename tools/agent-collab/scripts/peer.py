@@ -1553,12 +1553,11 @@ def invoke_peer(
             effective_env, raw_output_path, normalization_output_path
         )
         if request["workspace_mode"] == "isolated":
-            git_probe = subprocess.run(
-                ["git", "-C", str(repo_root), "rev-parse", "--is-inside-work-tree"],
-                capture_output=True, text=True, timeout=10,
+            inside_git = load_snapshot_runtime().is_git_workspace(
+                repo_root, min(absolute_deadline, time.monotonic() + 10)
             )
             before_snapshot = {
-                "mode": "git" if git_probe.returncode == 0 else "filesystem",
+                "mode": "git" if inside_git else "filesystem",
                 "digest": "disposable_overlay",
             }
         else:

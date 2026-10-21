@@ -4304,7 +4304,11 @@ def doctor(args: argparse.Namespace) -> int:
             "ok": is_supported_platform(),
             "value": {"os_name": os.name, "platform": sys.platform, "supported": ["Linux", "macOS", "Windows"]},
         },
-        "git": {"ok": shutil.which("git") is not None, "value": shutil.which("git")},
+        # Git is needed only inside a Git repository.
+        "git": {
+            "ok": shutil.which("git") is not None or not load_snapshot_runtime().has_git_metadata(repo_root),
+            "value": shutil.which("git"),
+        },
         "workspace_isolation": {
             "ok": isolation_check["status"] in {"available", "not_required"},
             "value": {"mode": doctor_workspace_mode, **isolation_check},

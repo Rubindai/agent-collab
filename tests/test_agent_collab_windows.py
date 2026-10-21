@@ -305,6 +305,23 @@ class SnapshotReaderTests(TestCase):
                     snapshot._filesystem_entries(Path(tmp), None, time.monotonic() + 10)
 
 
+class GitOptionalTests(TestCase):
+    def test_folders_outside_git_need_no_git_installed(self):
+        snapshot = fixtures.load_snapshot()
+        with tempfile.TemporaryDirectory() as tmp:
+            empty_bin = Path(tmp) / "bin"
+            empty_bin.mkdir()
+            folder = Path(tmp) / "project"
+            folder.mkdir()
+            (folder / "notes.txt").write_text("hello")
+            with mock.patch.dict(os.environ, {"PATH": str(empty_bin)}):
+                result = snapshot.mutation_snapshot(folder, deadline=time.monotonic() + 30)
+                self.assertEqual(result["mode"], "filesystem")
+                (Path(tmp) / ".git").mkdir()
+                with self.assertRaisesRegex(RuntimeError, "git is required"):
+                    snapshot.mutation_snapshot(folder, deadline=time.monotonic() + 30)
+
+
 class WindowsStdioTests(TestCase):
     def test_entry_points_use_utf8_with_lf_output_and_universal_input(self):
         strict_json = fixtures.load_peer().STRICT_JSON
