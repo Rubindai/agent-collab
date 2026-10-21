@@ -4353,7 +4353,7 @@ def doctor(args: argparse.Namespace) -> int:
         "current_contract": {
             "ok": True,
             "value": {
-                "codex": ["--ask-for-approval never", "exec --strict-config", "--output-schema", "--output-last-message"],
+                "codex": ["exec --strict-config", '-c approval_policy="never"', "--output-schema", "--output-last-message"],
                 "claude": [
                     "--permission-mode",
                     "--tools",

@@ -41,7 +41,7 @@
           "type": "array",
           "items": {
             "type": "string",
-            "pattern": "^(?!(?:agents|features|approval_policy|model|model_reasoning_effort|sandbox_mode|web_search)(?:\\.|=))[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*="
+            "pattern": "^(?!(?:agents|approval_policy|approvals_reviewer|apps_mcp_product_sku|auto_review|chatgpt_base_url|cli_auth_credentials_store|daybreak|default_permissions|experimental_realtime_webrtc_call_base_url|experimental_realtime_ws_base_url|experimental_realtime_ws_model|features|forced_chatgpt_workspace_id|forced_login_method|memories|model|model_catalog_json|model_provider|model_providers|model_reasoning_effort|openai_base_url|oss_provider|permissions|plan_mode_reasoning_effort|profile|profiles|responses_api_metadata|review_model|sandbox_mode|sandbox_workspace_write|service_tier|tools|web_search)(?:\\.|=))[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*="
           }
         },
         "claude_model": {
@@ -49,7 +49,7 @@
           "minLength": 1,
           "pattern": "\\S",
           "not": {
-            "pattern": "^\\s*(?:[Ff][Aa][Bb][Ll][Ee]|[Cc][Ll][Aa][Uu][Dd][Ee]-[Ff][Aa][Bb][Ll][Ee]-.*)\\s*$"
+            "pattern": "(?:^|[^A-Za-z0-9])[Ff][Aa][Bb][Ll][Ee](?:$|[^A-Za-z0-9])"
           }
         },
         "claude_effort": {"type": "string", "minLength": 1, "pattern": "\\S"},

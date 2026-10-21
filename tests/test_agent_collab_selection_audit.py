@@ -74,19 +74,20 @@ class SelectionAuditTests(TestCase):
         self.assertEqual(result['error']['kind'], 'effort_unverified')
         self.assertIn('capture failed', result['error']['message'])
 
-    def test_every_conflicting_codex_selection_is_rejected_in_either_order(self):
+    def test_codex_reroute_is_rejected_regardless_of_surrounding_events(self):
         peer = fixtures.load_peer()
-        exact = {"type": "session/configured", "model": "gpt-6-astra", "reasoningEffort": "xhigh"}
-        for change in ({"reasoningEffort": "low"}, {"model": "other-model"}):
-            other = {**exact, **change}
-            for events in ((exact, other), (other, exact)):
-                with self.subTest(change=change, events=events):
-                    result = peer.codex_selection_mismatch_details(
-                        "\n".join(map(json.dumps, events)), "gpt-6-astra", "xhigh"
-                    )
-                    self.assertIsNotNone(result)
+        message = {"type": "item.completed", "item": {"id": "item_1", "type": "agent_message", "text": "done"}}
+        reroute = {"type": "item.completed", "item": {
+            "id": "item_2", "type": "error",
+            "message": "model rerouted: gpt-6-astra -> gpt-6-mini (HighRiskCyberActivity)",
+        }}
+        for events in ((message, reroute), (reroute, message)):
+            with self.subTest(events=events):
+                self.assertIsNotNone(peer.codex_selection_mismatch_details(
+                    "\n".join(map(json.dumps, events)), "gpt-6-astra", "xhigh"
+                ))
         self.assertIsNone(peer.codex_selection_mismatch_details(
-            "\n".join(map(json.dumps, (exact, exact))), "gpt-6-astra", "xhigh"
+            "\n".join(map(json.dumps, (message, message))), "gpt-6-astra", "xhigh"
         ))
 
     def test_actual_claude_run_requires_valid_stop_evidence(self):

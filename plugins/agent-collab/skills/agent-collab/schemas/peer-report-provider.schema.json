@@ -20,7 +20,7 @@
   ],
   "properties": {
     "schema_version": {"const": "2.0"},
-    "run_id": {"type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9._-]+$"},
+    "run_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
     "origin": {"enum": ["claude", "codex"]},
     "host": {"enum": ["claude", "codex"]},
     "peer": {"enum": ["claude", "codex"]},

@@ -164,6 +164,8 @@ class SafetyTests(unittest.TestCase):
             [
                 "agents.enabled=true",
                 "agents.max_concurrent_threads_per_session=8",
+                "features.multi_agent_v2.max_concurrent_threads_per_session=9",
+                "features.multi_agent_v2.expose_spawn_agent_model_overrides=false",
                 'agents.default_subagent_model="gpt-6-astra"',
                 'agents.default_subagent_reasoning_effort="xhigh"',
             ],
@@ -175,7 +177,7 @@ class SafetyTests(unittest.TestCase):
                 model="gpt-6-astra",
                 effort="xhigh",
             ),
-            ["agents.enabled=false"],
+            ["agents.enabled=false", "features.multi_agent_v2=false"],
         )
         self.assertEqual(
             safety.helper_enforcement(

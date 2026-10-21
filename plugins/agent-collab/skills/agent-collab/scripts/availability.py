@@ -756,10 +756,14 @@ def claude_availability(
         probe_env["AGENT_COLLAB_EFFORT_CAPTURE"] = str(effort_capture_path)
 
         def capture_command(env_key: str) -> str:
+            # Private, no-follow creation keeps the receipt 0600 regardless of umask.
             capture_code = (
-                "import os,pathlib,sys;"
-                f"pathlib.Path(os.environ[{env_key!r}]).write_text("
-                "sys.stdin.read(),encoding='utf-8')"
+                "import os,sys;"
+                f"fd=os.open(os.environ[{env_key!r}],"
+                "os.O_WRONLY|os.O_CREAT|os.O_TRUNC|getattr(os,'O_NOFOLLOW',0),0o600);"
+                "os.fchmod(fd,0o600);"
+                "os.write(fd,sys.stdin.buffer.read());"
+                "os.close(fd)"
             )
             return f"{shlex.quote(sys.executable)} -c {shlex.quote(capture_code)}"
 

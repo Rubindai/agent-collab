@@ -200,3 +200,148 @@ class IsolationBoundaryTests(TestCase):
             self.assertEqual((scratch_tmp / "peer-output.json").read_text(), "out")
             self.assertFalse(scratch.exists())
             self.assertEqual(json.loads((run / "isolation-state.json").read_text())["status"], "cleaned")
+
+
+def _schema(name):
+    return json.loads((fixtures.RUNTIME_ROOT / "schemas" / name).read_text())
+
+
+def _all_claim_status_enums(node):
+    found = []
+    if isinstance(node, dict):
+        props = node.get("properties", {})
+        if {"claim", "status", "evidence"} <= set(props) and "enum" in props["status"]:
+            found.append(set(props["status"]["enum"]))
+        for value in node.values():
+            found += _all_claim_status_enums(value)
+    elif isinstance(node, list):
+        for value in node:
+            found += _all_claim_status_enums(value)
+    return found
+
+
+class SchemaRuntimeParityTests(TestCase):
+    def test_codex_config_schema_pattern_matches_owned_keys(self):
+        safety = fixtures.load_host().SAFETY
+        owned = sorted(safety.AGENT_COLLAB_OWNED_CODEX_CONFIG_KEYS)
+        expected = "^(?!(?:" + "|".join(owned) + ")(?:\\.|=))[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*="
+        settings = _schema("settings.schema.json")
+        request = _schema("host-request.schema.json")
+        patterns = [
+            settings["properties"]["settings"]["properties"]["codex_config"]["items"]["pattern"],
+            request["properties"]["codex_config"]["items"]["pattern"],
+        ]
+        self.assertEqual(patterns, [expected, expected])
+
+    def test_schemas_and_runtime_agree_on_sample_values(self):
+        import jsonschema
+
+        host = fixtures.load_host()
+        settings_props = _schema("settings.schema.json")["properties"]["settings"]["properties"]
+        request_props = _schema("host-request.schema.json")["properties"]
+
+        def schema_accepts(schema, value):
+            try:
+                jsonschema.validate(value, schema)
+            except jsonschema.ValidationError:
+                return False
+            return True
+
+        def runtime_accepts(function, *args):
+            try:
+                function(*args)
+            except ValueError:
+                return False
+            return True
+
+        for model in ("claude-opus-5-5", "claude-fable-5", "fable", "us.anthropic.claude-fable-5-v1:0",
+                      "anthropic/claude-fable-5", "claude-fables-5", "afable"):
+            with self.subTest(model=model):
+                self.assertEqual(
+                    schema_accepts(settings_props["claude_model"], model),
+                    not host.is_fable_model(model),
+                )
+        for tools in ("default", "DEFAULT", "Default", "Read,Grep", "default,Bash", "Read Default"):
+            with self.subTest(tools=tools):
+                runtime = runtime_accepts(host.validate_claude_tools, tools, "test")
+                self.assertEqual(schema_accepts(settings_props["claude_tools"], tools), runtime)
+                self.assertEqual(schema_accepts(request_props["claude_tools"], tools), runtime)
+        for entry in ("foo=true", "mcp_servers.x.enabled=false", "model_provider=\"x\"", "profiles.a.model=\"m\"",
+                      "openai_base_url=\"u\"", "tools.web_search.context_size=\"low\"", "agents=\"x\""):
+            with self.subTest(entry=entry):
+                runtime = runtime_accepts(host.normalize_codex_config, [entry], "test")
+                self.assertEqual(schema_accepts(settings_props["codex_config"]["items"], entry), runtime)
+
+    def test_claim_status_and_mode_enums_match_runtime_constants(self):
+        host = fixtures.load_host()
+        peer = fixtures.load_peer()
+        state = fixtures.load_state()
+        for name in ("host-first-pass.schema.json", "helper-reports.schema.json", "host-synthesis.schema.json",
+                     "adjudicator-report.schema.json", "claim-matrix.schema.json", "peer-report.schema.json"):
+            with self.subTest(schema=name):
+                enums = _all_claim_status_enums(_schema(name))
+                self.assertTrue(enums)
+                for enum in enums:
+                    self.assertEqual(enum, set(host.CLAIM_STATUSES))
+                    self.assertEqual(enum, set(peer.CLAIM_STATUSES))
+        self.assertEqual(set(host.MODES), set(peer.MODES))
+        self.assertEqual(set(host.MODES), set(state.MODES))
+        self.assertEqual(set(_schema("host-request.schema.json")["properties"]["mode"]["enum"]), set(host.MODES))
+        self.assertEqual(host.ORIGINS, peer.ORIGINS)
+        self.assertEqual(host.ORIGINS, state.ORIGINS)
+        self.assertEqual(
+            set(_schema("adjudicator-report.schema.json")["properties"]["recommended_verdict"]["enum"]),
+            set(host.RECOMMENDED_VERDICTS),
+        )
+
+
+class AvailabilityCaptureTests(TestCase):
+    def test_probe_stop_capture_is_private_under_a_permissive_umask(self):
+        availability = fixtures.load_availability()
+        captured = {}
+
+        def runner(command, **kwargs):
+            settings = json.loads(command[command.index("--settings") + 1])
+            hook = settings["hooks"]["Stop"][0]["hooks"][0]["command"]
+            env = kwargs["env"]
+            previous = os.umask(0o022)
+            try:
+                subprocess.run(hook, shell=True, input=json.dumps({"hook_event_name": "Stop", "effort": {"level": "xhigh"}}),
+                               text=True, env=env, check=True)
+            finally:
+                os.umask(previous)
+            path = Path(env["AGENT_COLLAB_EFFORT_CAPTURE"])
+            captured["mode"] = path.stat().st_mode & 0o777
+            return subprocess.CompletedProcess(command, 0, json.dumps({
+                "type": "result", "result": "AVAILABLE", "modelUsage": {"claude-opus-5-5": {}},
+            }), "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = availability.claude_availability(
+                "claude-opus-5-5", "xhigh", "2.1.305", Path(tmp), 30, runner=runner, env=dict(os.environ),
+            )
+        self.assertEqual(captured.get("mode"), 0o600)
+        self.assertEqual(result["status"], "available", result)
+
+
+class ProviderSchemaTests(TestCase):
+    def test_provider_schema_uses_only_the_documented_strict_subset(self):
+        # OpenAI strict structured outputs document only pattern/format for
+        # strings; Claude accepts the same portable subset.
+        allowed = {"$schema", "$id", "title", "description", "type", "properties", "required",
+                   "additionalProperties", "items", "enum", "const", "anyOf", "pattern", "format",
+                   "minItems", "maxItems"}
+
+        def walk(node, path="root"):
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    if path.endswith(".properties"):
+                        walk(value, f"{path}.{key}")
+                        continue
+                    self.assertIn(key, allowed, f"{path}.{key}")
+                    walk(value, f"{path}.{key}")
+            elif isinstance(node, list):
+                for index, value in enumerate(node):
+                    walk(value, f"{path}[{index}]")
+
+        walk(_schema("peer-report-provider.schema.json"))

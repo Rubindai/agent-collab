@@ -21,23 +21,44 @@ MAX_LOCAL_SUBAGENTS = 64
 MAX_AGENT_TIMEOUT_SECONDS = 86_400
 SANDBOX_PREFLIGHT_TIMEOUT_SECONDS = 10
 PROCESS_IDENTITY_KEYS = {"kind", "pid", "pgid", "boot_id", "start_time"}
+# Top-level Codex 0.163.0 config namespaces that select the model, provider,
+# endpoint, auth, catalog, approval/reviewer, sandbox, research, memory, or
+# helper behavior. Owning them keeps user -c entries from detaching the launch
+# from its attestation; every nested key is owned with its namespace.
 AGENT_COLLAB_OWNED_CODEX_CONFIG_KEYS = {
     "agents",
-    "agents.enabled",
-    "agents.job_max_runtime_seconds",
-    "agents.max_concurrent_threads_per_session",
-    "agents.max_depth",
-    "agents.max_threads",
     "approval_policy",
+    "approvals_reviewer",
+    "apps_mcp_product_sku",
+    "auto_review",
+    "chatgpt_base_url",
+    "cli_auth_credentials_store",
+    "daybreak",
+    "default_permissions",
+    "experimental_realtime_webrtc_call_base_url",
+    "experimental_realtime_ws_base_url",
+    "experimental_realtime_ws_model",
     "features",
-    "features.multi_agent",
+    "forced_chatgpt_workspace_id",
+    "forced_login_method",
+    "memories",
     "model",
+    "model_catalog_json",
     "model_provider",
     "model_providers",
     "model_reasoning_effort",
+    "openai_base_url",
+    "oss_provider",
+    "permissions",
+    "plan_mode_reasoning_effort",
     "profile",
     "profiles",
+    "responses_api_metadata",
+    "review_model",
     "sandbox_mode",
+    "sandbox_workspace_write",
+    "service_tier",
+    "tools",
     "web_search",
 }
 CANONICAL_CODEX_CONFIG_KEY = re.compile(
@@ -377,14 +398,36 @@ def codex_fanout_overrides(
     if not isinstance(model, str) or not model.strip() or not isinstance(effort, str) or not effort.strip():
         raise ValueError("Codex helper model and effort must be non-empty strings")
     enabled = local_subagents_allowed and max_local_subagents > 0
-    overrides = [f"agents.enabled={'true' if enabled else 'false'}"]
-    if enabled:
-        overrides.extend([
-            f"agents.max_concurrent_threads_per_session={max_local_subagents}",
-            f"agents.default_subagent_model={json.dumps(model)}",
-            f"agents.default_subagent_reasoning_effort={json.dumps(effort)}",
-        ])
-    return overrides
+    if not enabled:
+        # An enabled multi_agent_v2 feature outranks agents.enabled=false.
+        return ["agents.enabled=false", "features.multi_agent_v2=false"]
+    return [
+        "agents.enabled=true",
+        f"agents.max_concurrent_threads_per_session={max_local_subagents}",
+        # V2 counts the root thread and reads its own table before the agents
+        # value, so a user config.toml table could otherwise widen the cap.
+        f"features.multi_agent_v2.max_concurrent_threads_per_session={max_local_subagents + 1}",
+        "features.multi_agent_v2.expose_spawn_agent_model_overrides=false",
+        f"agents.default_subagent_model={json.dumps(model)}",
+        f"agents.default_subagent_reasoning_effort={json.dumps(effort)}",
+    ]
+
+
+def codex_launch_policy_overrides() -> list[str]:
+    """Pin exec approval and provider memory independently of user config.
+
+    The root --ask-for-approval flag configures only the interactive CLI; exec
+    keeps its headless Never default only while the reviewer is the user.
+    Provider memory would leak conclusions from earlier sessions into an
+    independent peer.
+    """
+
+    return [
+        'approval_policy="never"',
+        'approvals_reviewer="user"',
+        "features.memories=false",
+        "features.memory_tool=false",
+    ]
 
 
 def helper_enforcement(
@@ -440,7 +483,7 @@ def validate_codex_config_overrides(values: list[str]) -> None:
                 "(letters, numbers, '_', and '-' only)"
             )
         if any(
-            key == owned or key.startswith(f"{owned}.")
+            key == owned or key.startswith(f"{owned}.") or owned.startswith(f"{key}.")
             for owned in AGENT_COLLAB_OWNED_CODEX_CONFIG_KEYS
         ):
             raise ValueError(

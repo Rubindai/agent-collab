@@ -785,6 +785,20 @@ class PeerV2Tests(TestCase):
             "agents.enabled",
             "agents.max_concurrent_threads_per_session",
             "features",
+            "features.multi_agent_v2.enabled",
+            "approvals_reviewer",
+            "auto_review.policy",
+            "openai_base_url",
+            "chatgpt_base_url",
+            "model_catalog_json",
+            "oss_provider",
+            "service_tier",
+            "sandbox_workspace_write.network_access",
+            "permissions.default.network",
+            "default_permissions",
+            "tools.web_search.context_size",
+            "tools",
+            "memories.use_memories",
         ):
             with self.subTest(owned_key=owned_key), self.assertRaisesRegex(
                 peer.RequestValidationError, "Agent Collab-owned key"
@@ -890,7 +904,12 @@ class PeerV2Tests(TestCase):
         peer = load_peer()
         req = request(peer="codex", host="claude", origin="claude")
         args = peer.build_peer_command(req, "p", REPO_ROOT, PEER_SCHEMA, Path("/tmp/out"), {}, "git").args
-        self.assertEqual(args[:6], ["codex", "--ask-for-approval", "never", "exec", "--strict-config", "--ephemeral"])
+        self.assertEqual(args[:4], ["codex", "exec", "--strict-config", "--ephemeral"])
+        self.assertNotIn("--ask-for-approval", args)
+        for pinned in ('approval_policy="never"', 'approvals_reviewer="user"',
+                       "features.memories=false", "features.memory_tool=false"):
+            self.assertEqual(args.count(pinned), 1)
+            self.assertEqual(args[args.index(pinned) - 1], "-c")
         self.assertEqual(args[args.index("--model") + 1], "gpt-6-astra")
         self.assertEqual(args[args.index("--sandbox") + 1], "danger-full-access")
         self.assertIn('model_reasoning_effort="xhigh"', args)
@@ -1447,22 +1466,37 @@ class PeerV2Tests(TestCase):
             )
         )
 
-    def test_codex_jsonl_detects_observable_model_reroute_and_effort_downgrade(self):
+    def test_codex_jsonl_detects_exec_model_reroute_error_items(self):
         peer = load_peer()
-        reroute = json.dumps({
-            "type": "model/rerouted", "fromModel": "gpt-5.6-sol", "toModel": "gpt-5.6-safe",
-        })
-        mismatch = peer.codex_selection_mismatch_details(reroute, "gpt-5.6-sol", "max")
+
+        def reroute(source, target, reason="HighRiskCyberActivity"):
+            return json.dumps({"type": "item.completed", "item": {
+                "id": "item_3", "type": "error",
+                "message": f"model rerouted: {source} -> {target} ({reason})",
+            }})
+
+        real_events = "\n".join(json.dumps(event) for event in (
+            {"type": "thread.started", "thread_id": "t"},
+            {"type": "turn.started"},
+            {"type": "item.completed", "item": {"id": "item_0", "type": "agent_message", "text": "ok"}},
+            {"type": "item.completed", "item": {"id": "item_1", "type": "error", "message": "local warning"}},
+            {"type": "turn.completed", "usage": {}},
+        ))
+        self.assertIsNone(peer.codex_selection_mismatch_details(real_events, "gpt-6-astra", "xhigh"))
+        mismatch = peer.codex_selection_mismatch_details(
+            real_events + "\n" + reroute("gpt-6-astra", "gpt-6-mini"), "gpt-6-astra", "xhigh"
+        )
+        self.assertEqual(mismatch["observed_models"], ["gpt-6-mini"])
         self.assertIn("model reroute", mismatch["reason"])
-        exact_reroute = json.dumps({
-            "type": "model/rerouted", "fromModel": "codex-auto-review", "toModel": "gpt-5.6-sol",
-        })
-        self.assertIsNone(peer.codex_selection_mismatch_details(exact_reroute, "gpt-5.6-sol", "max"))
-        downgraded = json.dumps({
-            "type": "session/configured", "model": "gpt-5.6-sol", "reasoningEffort": "high",
-        })
-        mismatch = peer.codex_selection_mismatch_details(downgraded, "gpt-5.6-sol", "max")
-        self.assertEqual(mismatch["observed_efforts"], ["high"])
+        self.assertIsNone(peer.codex_selection_mismatch_details(
+            reroute("codex-auto-review", "gpt-6-astra"), "gpt-6-astra", "xhigh"
+        ))
+        malformed = json.dumps({"type": "item.completed", "item": {
+            "id": "item_4", "type": "error", "message": "model rerouted: unparseable",
+        }})
+        self.assertEqual(
+            peer.codex_selection_mismatch_details(malformed, "gpt-6-astra", "xhigh")["observed_models"], []
+        )
 
     def test_model_entitlement_errors_are_classified_without_fallback(self):
         peer = load_peer()
