@@ -659,10 +659,12 @@ def validate_request(
         if not isinstance(request[key], str) or not request[key].strip():
             raise RequestValidationError(f"{key} must be a non-empty string")
     claude_tool_tokens = [
-        item.strip().casefold()
+        item.strip()
         for item in request["claude_tools"].replace(",", " ").split()
         if item.strip()
     ]
+    if any(item.casefold() == "default" and item != "default" for item in claude_tool_tokens):
+        raise RequestValidationError("claude_tools sentinel must be the lowercase literal 'default'")
     if "default" in claude_tool_tokens and claude_tool_tokens != ["default"]:
         raise RequestValidationError("claude_tools sentinel 'default' must be used alone")
     attestation = request["availability_attestation"]
@@ -852,6 +854,12 @@ def claude_helper_environment(request: dict[str, Any]) -> dict[str, str]:
         "CLAUDE_CODE_FORK_SUBAGENT": "0",
         "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "1",
         "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0",
+        "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+        # Print mode otherwise drops background helper results after ten idle
+        # minutes; the absolute peer deadline remains the liveness bound.
+        "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS": str(
+            max(1, int(float(request["peer_timeout_seconds"]) * 1000))
+        ),
         "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING": "0",
         "CLAUDE_CODE_DISABLE_THINKING": "0",
         "MAX_THINKING_TOKENS": "",
@@ -1657,7 +1665,9 @@ def invoke_peer(
             workspace = isolation.Workspace(repo_root, run_dir, absolute_deadline) if isolation else nullcontext()
             with workspace as active_workspace:
                 provider_args = (
-                    active_workspace.command(command.args, tmp)
+                    active_workspace.command(
+                        command.args, tmp, isolation.credential_passthrough(request["peer"], peer_env)
+                    )
                     if isolation else command.args
                 )
                 completed = run_peer_command(

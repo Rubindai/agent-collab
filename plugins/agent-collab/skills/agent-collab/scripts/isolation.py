@@ -2,8 +2,10 @@
 """Disposable Linux copy-on-write filesystem for a full-capability peer.
 
 The provider sees overlay views of HOME and the repository at their original
-paths. Only the Agent Collab run directory is writable on the host. This is a
-filesystem boundary, not a network or external-service sandbox.
+paths, plus a private per-run temporary directory for its outputs. Host-owned
+run artifacts are not bound writable. This only discards writes made through
+those paths: sockets, devices, networking, and external services (for example
+a Docker daemon or the systemd user manager) can still change the host.
 """
 from __future__ import annotations
 
@@ -85,12 +87,14 @@ def _write_state(path: Path, value: dict[str, Any]) -> None:
     # State is only written by the wrapper, in its private run directory.
     if path.is_symlink():
         raise IsolationUnavailable("isolation state destination is a symlink")
-    temporary = path.with_name(path.name + ".tmp")
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    # A unique name keeps a temporary file left by an interrupted write from
+    # blocking every later state transition.
+    fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temporary = Path(temporary_name)
     try:
         os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(value, handle, sort_keys=True)
+            json.dump(value, handle, sort_keys=True, allow_nan=False)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
@@ -148,6 +152,29 @@ def cleanup_state(path: Path) -> None:
         _write_state(path, {**data, "status": "cleaned"})
 
 
+def credential_passthrough(peer: str, env: dict[str, str]) -> list[Path]:
+    """Return the provider credential file to keep writable on the host.
+
+    Providers rotate refresh tokens. A refresh written only into the discarded
+    HOME overlay would leave the host holding an already-used refresh token, so
+    the real credential file is bound through. Codex rewrites auth.json in
+    place; Claude falls back to an in-place write when a rename onto a bind
+    mount fails with EBUSY, so either order of host and peer refresh keeps the
+    host's stored credential valid.
+    """
+
+    home = Path(env.get("HOME") or Path.home()).expanduser()
+    if peer == "codex":
+        candidate = Path(env.get("CODEX_HOME") or home / ".codex").expanduser() / "auth.json"
+    elif peer == "claude":
+        candidate = Path(env.get("CLAUDE_CONFIG_DIR") or home / ".claude").expanduser() / ".credentials.json"
+    else:
+        raise IsolationUnavailable(f"unsupported peer for credential passthrough: {peer}")
+    if candidate.is_symlink() or not candidate.is_file():
+        return []
+    return [candidate.resolve()]
+
+
 class Workspace:
     def __init__(self, repo_root: Path, run_dir: Path, deadline: float | None = None):
         self.repo_root = repo_root.resolve()
@@ -185,9 +212,15 @@ class Workspace:
             self.__exit__(None, None, None)
             raise
 
-    def command(self, provider: list[str], temporary: Path) -> list[str]:
+    def command(
+        self, provider: list[str], temporary: Path, passthrough: list[Path] | None = None,
+    ) -> list[str]:
         if len(self.mounts) != 2:
             raise IsolationUnavailable("workspace mounts are incomplete")
+        # Later binds override the HOME and repository overlays at their paths.
+        credential_binds: list[str] = []
+        for path in passthrough or []:
+            credential_binds += ["--bind", str(path), str(path)]
         return [
             "bwrap", "--die-with-parent", "--unshare-pid", "--ro-bind", "/", "/",
             "--dev", "/dev", "--proc", "/proc",
@@ -195,19 +228,24 @@ class Workspace:
             "--bind", str(temporary), str(temporary),
             "--bind", str(self.mounts[0]), str(self.home),
             "--bind", str(self.mounts[1]), str(self.repo_root),
-            "--bind", str(self.run_dir), str(self.run_dir),
+            *credential_binds,
             "--chdir", str(self.repo_root), "--", *provider,
         ]
 
     def __exit__(self, _kind: Any, _value: Any, _traceback: Any) -> None:
+        # Clean up from the wrapper's own in-memory mount list, never from a
+        # state file that could have been rewritten after it was recorded.
         try:
-            if self.state_path.exists():
-                cleanup_state(self.state_path)
-            else:
-                for mount in reversed(self.mounts):
-                    _unmount(mount)
-                if self.scratch is not None:
-                    shutil.rmtree(self.scratch)
+            for mount in reversed(self.mounts):
+                _unmount(mount)
+            if self.scratch is not None and self.scratch.exists():
+                shutil.rmtree(self.scratch)
+            if self.scratch is not None and self.state_path.exists():
+                _write_state(self.state_path, {
+                    "schema_version": "2.0", "scratch": str(self.scratch),
+                    "mounts": [str(self.scratch / name / "merged") for name in ("home", "repo")],
+                    "status": "cleaned",
+                })
         finally:
             for process in self.processes:
                 if process.poll() is None:

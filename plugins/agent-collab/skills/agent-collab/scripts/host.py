@@ -179,8 +179,8 @@ def repo_storage_id(repo_root: Path) -> str:
 def default_state_root() -> Path:
     if os.environ.get("AGENT_COLLAB_STATE_HOME"):
         return Path(os.environ["AGENT_COLLAB_STATE_HOME"]).expanduser()
-    if os.environ.get("CLAUDE_PLUGIN_DATA"):
-        return Path(os.environ["CLAUDE_PLUGIN_DATA"]).expanduser()
+    # CLAUDE_PLUGIN_DATA is never exported to Bash-tool commands, so an inherited
+    # value always belongs to another plugin; it must not select this state root.
 
     codex_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).expanduser()
     try:
@@ -537,9 +537,25 @@ def parse_bool(value: Any) -> bool:
         normalized = value.strip().lower()
         if normalized in {"1", "true", "yes", "on"}:
             return True
-        if normalized in {"0", "false", "no", "off", ""}:
+        if normalized in {"0", "false", "no", "off"}:
             return False
     raise ValueError(f"expected boolean value, got {value!r}")
+
+
+def parse_non_negative_int(value: Any, label: str) -> int:
+    """Accept JSON integers or ASCII decimal strings only; never booleans or Unicode digits."""
+
+    if isinstance(value, bool):
+        raise ValueError(f"{label} must be a non-negative integer")
+    if isinstance(value, int):
+        number = value
+    elif isinstance(value, str) and re.fullmatch(r"[0-9]+", value.strip(), flags=re.ASCII):
+        number = int(value.strip())
+    else:
+        raise ValueError(f"{label} must be a non-negative integer")
+    if number < 0:
+        raise ValueError(f"{label} must be a non-negative integer")
+    return number
 
 
 def normalize_timeout(value: Any) -> float | int:
@@ -594,7 +610,9 @@ def validate_claude_tools(value: Any, source: str) -> str:
     text = str(value).strip()
     if not text:
         raise ValueError(f"{source} claude_tools must be a non-empty string")
-    tokens = [item.casefold() for item in re.split(r"[\s,]+", text) if item]
+    tokens = [item for item in re.split(r"[\s,]+", text) if item]
+    if any(item.casefold() == "default" and item != "default" for item in tokens):
+        raise ValueError(f"{source} claude_tools sentinel must be the lowercase literal 'default'")
     if "default" in tokens and tokens != ["default"]:
         raise ValueError(f"{source} claude_tools sentinel 'default' must be used alone")
     return text
@@ -614,17 +632,14 @@ def normalize_settings(raw_settings: dict[str, Any], source: str) -> dict[str, A
         }:
             normalized[key] = parse_bool(value)
         elif key == "max_local_subagents":
-            number = int(value)
+            number = parse_non_negative_int(value, f"{source} max_local_subagents")
             if not 0 <= number <= SAFETY.MAX_LOCAL_SUBAGENTS:
                 raise ValueError(
                     f"{source} max_local_subagents must be between 0 and {SAFETY.MAX_LOCAL_SUBAGENTS}"
                 )
             normalized[key] = number
         elif key == "history_retained_runs":
-            number = int(value)
-            if number < 0:
-                raise ValueError(f"{source} history_retained_runs must be non-negative")
-            normalized[key] = number
+            normalized[key] = parse_non_negative_int(value, f"{source} history_retained_runs")
         elif key in {"codex_effort", "claude_effort"}:
             text = str(value).strip()
             if not text:
@@ -1525,6 +1540,11 @@ def validate_peer_process(data: dict[str, Any], request: dict[str, Any], run_dir
         or not MIN_PEER_WAIT_SECONDS <= float(timeout) <= SAFETY.MAX_AGENT_TIMEOUT_SECONDS
     ):
         raise ArtifactValidationError("peer-process peer_timeout_seconds must be a finite bounded number")
+    if float(timeout) != float(request["peer_timeout_seconds"]):
+        raise ArtifactValidationError("peer-process peer_timeout_seconds does not match host request")
+    started_at = parse_utc_timestamp(data["started_at"])
+    if abs(started_at - float(data["started_at_epoch"])) > 2:
+        raise ArtifactValidationError("peer-process started_at and started_at_epoch disagree")
     for key in (
         "repo_root",
         "peer_cli_version",
@@ -1675,6 +1695,33 @@ def ensure_run_dir(path: Path, run_root: Path, *, allow_external: bool = False) 
     raise SystemExit(f"invalid Agent Collab run directory: {resolved} must be {scope}")
 
 
+def guarded_run_dir(repo_root: Path, run_id: str) -> Path | None:
+    """Find the active run by ID through the worktree guard, even when another host owns its run root."""
+
+    if not is_safe_run_id(run_id):
+        return None
+    try:
+        _, active = read_workspace_guard(repo_root)
+    except (OSError, ValueError, RuntimeError, SystemExit):
+        return None
+    if active is None or active.get("run_id") != run_id:
+        return None
+    candidate = Path(str(active["run_dir"])).expanduser()
+    if not candidate.is_dir():
+        return None
+    return ensure_run_dir(candidate, candidate.parent, allow_external=True)
+
+
+def resolve_run_context(args: argparse.Namespace) -> tuple[Path, Path, Path]:
+    """Resolve repo root, owning run root, and run directory once for a run command."""
+
+    repo_root = (args.repo_root or default_repo_root()).resolve()
+    default_root = (args.run_root or default_run_root(repo_root)).resolve()
+    run_dir = resolve_run_reference(repo_root, args.run, default_root)
+    # Runs are direct children of the run root whose state index tracks them.
+    return repo_root, run_dir.parent, run_dir
+
+
 def resolve_run_reference(repo_root: Path, reference: str | None, run_root: Path | None = None) -> Path:
     root = (run_root or default_run_root(repo_root)).resolve()
     if reference:
@@ -1689,6 +1736,9 @@ def resolve_run_reference(repo_root: Path, reference: str | None, run_root: Path
         candidate = root / reference
         if candidate.exists():
             return ensure_run_dir(candidate, root)
+        guarded = guarded_run_dir(repo_root, reference)
+        if guarded is not None:
+            return guarded
         raise SystemExit(f"unknown Agent Collab run: {reference}")
 
     state = load_state_runtime()
@@ -2583,6 +2633,27 @@ def claims_with_source(report: dict[str, Any], source: str) -> list[dict[str, An
     ]
 
 
+def peer_findings_as_claims(report: dict[str, Any]) -> list[dict[str, Any]]:
+    """Expose peer findings as unverified matrix rows so synthesis cannot omit them."""
+
+    rows = []
+    for finding in report.get("findings", []):
+        if not isinstance(finding, dict):
+            continue
+        files = "; ".join(str(item) for item in finding.get("files", []))
+        evidence = f"{finding.get('details', '')} Files: {files or 'none'}. Recommendation: {finding.get('recommendation', '')}"
+        rows.append({
+            "claim": (
+                f"[finding {finding.get('severity')}/{finding.get('confidence')} confidence] "
+                f"{finding.get('title', '')}"
+            ),
+            "status": "plausible_unverified",
+            "evidence": evidence.strip(),
+            "source": "peer",
+        })
+    return rows
+
+
 def load_helper_evidence(
     run_dir: Path, request: dict[str, Any]
 ) -> tuple[list[dict[str, Any]], str | None]:
@@ -2651,6 +2722,7 @@ def build_claim_matrix(
         "claims": (
             claims_with_source(host_report, "host")
             + claims_with_source(peer_report, "peer")
+            + peer_findings_as_claims(peer_report)
             + (helper_claims or [])
             + claims_with_source(adjudicator_report or {}, "adjudicator")
         ),
@@ -2795,9 +2867,7 @@ def valid_terminal_peer_report(
 
 
 def finish(args: argparse.Namespace) -> int:
-    repo_root_for_state = (args.repo_root or default_repo_root()).resolve()
-    run_root = (args.run_root or default_run_root(repo_root_for_state)).resolve()
-    run_dir = resolve_run_reference(repo_root_for_state, args.run, run_root)
+    _, run_root, run_dir = resolve_run_context(args)
     state = load_state_runtime()
     request = require_run_request(run_dir)
     host_first_pass = run_dir / "host-first-pass.json"
@@ -3135,17 +3205,13 @@ def validate_completion_artifacts(
 
 
 def complete(args: argparse.Namespace) -> int:
-    repo_root = (args.repo_root or default_repo_root()).resolve()
-    run_root = (args.run_root or default_run_root(repo_root)).resolve()
-    run_dir = resolve_run_reference(repo_root, args.run, run_root)
-    with run_operation_lock(run_dir):
-        return _complete_locked(args)
+    context = resolve_run_context(args)
+    with run_operation_lock(context[2]):
+        return _complete_locked(args, context)
 
 
-def _complete_locked(args: argparse.Namespace) -> int:
-    repo_root_for_state = (args.repo_root or default_repo_root()).resolve()
-    run_root = (args.run_root or default_run_root(repo_root_for_state)).resolve()
-    run_dir = resolve_run_reference(repo_root_for_state, args.run, run_root)
+def _complete_locked(args: argparse.Namespace, context: tuple[Path, Path, Path]) -> int:
+    _, run_root, run_dir = context
     request = require_run_request(run_dir)
     process_info = load_json(run_dir / "peer-process.json")
     try:
@@ -3645,6 +3711,20 @@ def terminate_tracked_process_tree(
                     "outcome": "provider_not_quiescent_after_wrapper_cleanup",
                     "quiescent": False,
                 }
+    if (
+        request["workspace_mode"] == "isolated"
+        and wrapper_cleanup.get("quiescent")
+        and provider_cleanup.get("quiescent")
+    ):
+        # A killed wrapper may not have finished its own unmount; the idempotent
+        # receipt cleanup must succeed before the guard can be released.
+        try:
+            load_isolation_runtime().cleanup_state(run_dir / "isolation-state.json")
+        except (OSError, ValueError, RuntimeError) as exc:
+            provider_cleanup = {
+                "outcome": f"isolated_workspace_cleanup_failed: {exc}",
+                "quiescent": False,
+            }
     quiescent = bool(
         provider_cleanup.get("quiescent")
         and wrapper_cleanup.get("quiescent")
@@ -3665,17 +3745,13 @@ def process_identity_matches(process_info: dict[str, Any]) -> bool:
 
 
 def cancel(args: argparse.Namespace) -> int:
-    repo_root = (args.repo_root or default_repo_root()).resolve()
-    run_root = (args.run_root or default_run_root(repo_root)).resolve()
-    run_dir = resolve_run_reference(repo_root, args.run, run_root)
-    with run_operation_lock(run_dir):
-        return _cancel_locked(args)
+    context = resolve_run_context(args)
+    with run_operation_lock(context[2]):
+        return _cancel_locked(args, context)
 
 
-def _cancel_locked(args: argparse.Namespace) -> int:
-    repo_root = (args.repo_root or default_repo_root()).resolve()
-    run_root = (args.run_root or default_run_root(repo_root)).resolve()
-    run_dir = resolve_run_reference(repo_root, args.run, run_root)
+def _cancel_locked(args: argparse.Namespace, context: tuple[Path, Path, Path]) -> int:
+    repo_root, run_root, run_dir = context
     process_info = load_json(run_dir / "peer-process.json")
     request = require_run_request(run_dir)
     try:

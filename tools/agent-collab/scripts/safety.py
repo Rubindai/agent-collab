@@ -324,6 +324,9 @@ def claude_agent_guard_settings(
         "crossSessionInbound": "refuse",
         "disableWorkflows": True,
         "ultracode": False,
+        # Prior auto-memory notes would leak earlier conclusions into an
+        # independent peer review.
+        "autoMemoryEnabled": False,
         "disableAllHooks": False,
         "hooks": {
             "PreToolUse": [

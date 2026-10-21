@@ -2937,7 +2937,7 @@ class HostV2Tests(TestCase):
                             run_dir,
                             root,
                             guard,
-                            started_at="2020-01-01T00:00:00Z",
+                            started_at="1970-01-01T00:00:00Z",
                             started_at_epoch=0.0,
                         )
                     )
