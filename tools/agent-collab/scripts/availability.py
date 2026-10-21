@@ -7,7 +7,6 @@ import json
 import os
 import re
 import signal
-import shlex
 import subprocess
 import sys
 import tempfile
@@ -69,16 +68,6 @@ CLAUDE_KNOWN_MODEL_EFFORTS = (
     ("claude-fable-5", ("low", "medium", "high", "xhigh", "max", "ultracode")),
 )
 CLAUDE_AUXILIARY_MODEL_PREFIXES = ("claude-haiku-",)
-PROBE_GATE_CODE = (
-    "import os,sys;"
-    "fd=int(sys.argv[1]);"
-    "token=os.read(fd,1);"
-    "os.close(fd);"
-    "sys.exit(125) if token != b'1' else None;"
-    "os.execvp(sys.argv[2],sys.argv[2:])"
-)
-
-
 def load_strict_json_runtime() -> Any:
     path = Path(__file__).resolve().parent / "strict_json.py"
     spec = importlib.util.spec_from_file_location("agent_collab_strict_json_availability", path)
@@ -126,6 +115,9 @@ def run_bounded_command(args: list[str], **kwargs: Any) -> subprocess.CompletedP
 
     encoding = str(kwargs.get("encoding") or "utf-8")
     errors = str(kwargs.get("errors") or "replace")
+    # The input pipe must not fall back to the Windows ANSI code page.
+    kwargs["encoding"] = encoding
+    kwargs["errors"] = errors
     process: subprocess.Popen[str] | None = None
     identity: dict[str, Any] | None = None
     writer: threading.Thread | None = None
@@ -173,18 +165,14 @@ def run_bounded_command(args: list[str], **kwargs: Any) -> subprocess.CompletedP
         ) as stderr_file:
             stop_reason: str | None = None
             try:
-                popen_args = args
-                if os.name == "posix":
-                    gate_read, gate_write = os.pipe()
-                    os.set_inheritable(gate_read, True)
-                    popen_args = [sys.executable, "-c", PROBE_GATE_CODE, str(gate_read), *args]
-                    kwargs["pass_fds"] = tuple(kwargs.get("pass_fds", ())) + (gate_read,)
+                command = SAFETY.native_command(args, kwargs.get("env"))
+                gate_read, gate_write = os.pipe()
+                popen_args = SAFETY.gated_command(command, gate_read, kwargs)
                 raise_pending_signal()
-                process = subprocess.Popen(
+                process = SAFETY.popen_group(
                     popen_args,
                     stdout=stdout_file,
                     stderr=stderr_file,
-                    start_new_session=True,
                     **kwargs,
                 )
                 identity = SAFETY.process_identity(process.pid)
@@ -219,8 +207,8 @@ def run_bounded_command(args: list[str], **kwargs: Any) -> subprocess.CompletedP
                         except OSError:
                             pass
                 if process is not None:
-                    # start_new_session makes the Popen child's PID its PGID,
-                    # even if exact identity capture failed before gate release.
+                    # A new group's root PID is its PGID, even if exact
+                    # identity capture failed before gate release.
                     pgid = int(identity["pgid"]) if identity is not None else int(process.pid)
                     cleanup = SAFETY.terminate_process_group(pgid)
                     try:
@@ -755,17 +743,18 @@ def claude_availability(
         effort_capture_path = Path(temp_dir) / "stop.json"
         probe_env["AGENT_COLLAB_EFFORT_CAPTURE"] = str(effort_capture_path)
 
-        def capture_command(env_key: str) -> str:
-            # Private, no-follow creation keeps the receipt 0600 regardless of umask.
+        def capture_hook(env_key: str) -> dict[str, Any]:
+            # Private, no-follow creation keeps the receipt 0600 regardless of
+            # umask. Exec form runs without a shell on every platform.
             capture_code = (
                 "import os,sys;"
                 f"fd=os.open(os.environ[{env_key!r}],"
-                "os.O_WRONLY|os.O_CREAT|os.O_TRUNC|getattr(os,'O_NOFOLLOW',0),0o600);"
-                "os.fchmod(fd,0o600);"
+                "os.O_WRONLY|os.O_CREAT|os.O_TRUNC|getattr(os,'O_NOFOLLOW',0)|getattr(os,'O_BINARY',0),0o600);"
+                "os.name=='posix' and os.fchmod(fd,0o600);"
                 "os.write(fd,sys.stdin.buffer.read());"
                 "os.close(fd)"
             )
-            return f"{shlex.quote(sys.executable)} -c {shlex.quote(capture_code)}"
+            return {"type": "command", "command": sys.executable, "args": ["-c", capture_code]}
 
         settings = {
             "availableModels": [model],
@@ -776,9 +765,7 @@ def claude_availability(
             "hooks": {
                 "Stop": [
                     {
-                        "hooks": [
-                            {"type": "command", "command": capture_command("AGENT_COLLAB_EFFORT_CAPTURE")}
-                        ]
+                        "hooks": [capture_hook("AGENT_COLLAB_EFFORT_CAPTURE")]
                     }
                 ],
             },

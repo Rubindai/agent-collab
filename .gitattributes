@@ -1,0 +1,2 @@
+# Keep LF everywhere so Windows checkouts match the packaged bytes.
+* text=auto eol=lf

@@ -27,7 +27,7 @@
           "additionalProperties": false,
           "required": ["kind", "pid", "pgid", "boot_id", "start_time"],
           "properties": {
-            "kind": {"enum": ["linux_proc", "posix_ps"]},
+            "kind": {"enum": ["linux_proc", "posix_ps", "windows_process"]},
             "pid": {"type": "integer", "minimum": 1},
             "pgid": {"type": "integer", "minimum": 1},
             "boot_id": {"type": "string", "minLength": 1},

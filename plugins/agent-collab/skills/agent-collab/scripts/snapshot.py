@@ -4,10 +4,10 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import os
-import select
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -198,19 +198,31 @@ def _git_output_digest(repo_root: Path, args: list[str], deadline: float) -> str
                 stdout=subprocess.PIPE,
                 stderr=errors,
             )
+            assert process.stdout is not None
+            stdout = process.stdout
+            digest = hashlib.sha256()
+            size = 0
+            read_errors: list[BaseException] = []
+
+            def drain() -> None:
+                nonlocal size
+                try:
+                    while chunk := stdout.read1(1024 * 1024):
+                        digest.update(chunk)
+                        size += len(chunk)
+                except BaseException as exc:
+                    read_errors.append(exc)
+
+            # A reader thread bounds the pipe read portably; select() accepts
+            # only sockets on Windows.
+            reader = threading.Thread(target=drain, daemon=True)
+            reader.start()
             try:
-                assert process.stdout is not None
-                digest = hashlib.sha256()
-                size = 0
-                while True:
-                    ready, _, _ = select.select([process.stdout], [], [], _remaining_seconds(deadline))
-                    if not ready:
-                        raise TimeoutError(f"git {' '.join(args)} exceeded the workspace snapshot deadline")
-                    chunk = process.stdout.read1(1024 * 1024)
-                    if not chunk:
-                        break
-                    digest.update(chunk)
-                    size += len(chunk)
+                reader.join(_remaining_seconds(deadline))
+                if reader.is_alive():
+                    raise TimeoutError(f"git {' '.join(args)} exceeded the workspace snapshot deadline")
+                if read_errors:
+                    raise read_errors[0]
                 returncode = process.wait(timeout=_remaining_seconds(deadline))
             except (TimeoutError, subprocess.TimeoutExpired):
                 process.kill()
@@ -222,8 +234,11 @@ def _git_output_digest(repo_root: Path, args: list[str], deadline: float) -> str
                     process.wait()
                 raise
             finally:
-                if process.stdout is not None:
-                    process.stdout.close()
+                # A blocked read holds the reader's lock; close only after the
+                # killed process has let it finish.
+                reader.join(1)
+                if not reader.is_alive():
+                    stdout.close()
             if returncode != 0:
                 errors.seek(0)
                 detail = errors.read(8192).decode("utf-8", "replace").strip()

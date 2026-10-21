@@ -184,9 +184,9 @@ def record_claude_stop(args, effort=None):
         return
     settings = json.loads(args[args.index("--settings") + 1])
     effort = effort or settings["env"]["CLAUDE_CODE_EFFORT_LEVEL"]
-    command = settings["hooks"]["Stop"][0]["hooks"][0]["command"]
+    hook = settings["hooks"]["Stop"][0]["hooks"][0]
     completed = subprocess.run(
-        shlex.split(command), input=json.dumps({"hook_event_name": "Stop", "effort": {"level": effort}}),
+        [hook["command"], *hook["args"]], input=json.dumps({"hook_event_name": "Stop", "effort": {"level": effort}}),
         text=True, capture_output=True,
     )
     if completed.returncode:
@@ -1705,24 +1705,27 @@ class HostV2Tests(TestCase):
         )
         self.assertEqual(host.classify_mode("settings audit", "Audit the runtime"), "review")
 
-    def test_start_fails_early_outside_the_posix_support_boundary(self):
+    def test_start_fails_early_outside_the_supported_platforms(self):
         host = load_host()
         args = host.build_parser().parse_args([
             "start", "--host", "codex", "--target", "diff", "--brief", "review",
         ])
-        for os_name, platform in (("nt", "win32"), ("posix", "freebsd14"), ("posix", "sunos5")):
+        for os_name, platform in (("nt", "cygwin"), ("posix", "freebsd14"), ("posix", "sunos5")):
             with (
                 self.subTest(os_name=os_name, platform=platform),
                 mock.patch.object(host.os, "name", os_name),
                 mock.patch.object(host.sys, "platform", platform),
                 mock.patch.object(host, "load_state_runtime") as state,
-                self.assertRaisesRegex(SystemExit, "requires a POSIX platform"),
+                self.assertRaisesRegex(SystemExit, "requires Linux, macOS, or Windows"),
             ):
                 host.start(args)
             state.assert_not_called()
-        for platform in ("linux", "darwin"):
-            with mock.patch.object(host.os, "name", "posix"), mock.patch.object(host.sys, "platform", platform):
+        for os_name, platform in (("posix", "linux"), ("posix", "darwin"), ("nt", "win32")):
+            with mock.patch.object(host.os, "name", os_name), mock.patch.object(host.sys, "platform", platform):
                 self.assertTrue(host.is_supported_platform())
+        self.assertEqual(host.platform_default_workspace_mode("linux"), "isolated")
+        self.assertEqual(host.platform_default_workspace_mode("darwin"), "direct")
+        self.assertEqual(host.platform_default_workspace_mode("win32"), "direct")
 
     def test_current_defaults_and_removed_settings(self):
         host = load_host()
@@ -3343,14 +3346,14 @@ class PackageTests(TestCase):
         rows = re.findall(r"^\| `([^`]+)` \| `([^`]*)` \|", audit, flags=re.MULTILINE)
         documented_defaults = dict(rows)
         workspace_row = re.search(
-            r"^\| `workspace_mode` \| Linux: `([^`]*)`; macOS: `([^`]*)` \|",
+            r"^\| `workspace_mode` \| Linux: `([^`]*)`; macOS and Windows: `([^`]*)` \|",
             audit,
             flags=re.MULTILINE,
         )
         self.assertIsNotNone(workspace_row)
         self.assertEqual(workspace_row.groups(), ("isolated", "direct"))
         documented_defaults["workspace_mode"] = (
-            workspace_row.group(2) if host.sys.platform == "darwin" else workspace_row.group(1)
+            workspace_row.group(2) if host.sys.platform in {"darwin", "win32"} else workspace_row.group(1)
         )
         expected_defaults = {
             key: (

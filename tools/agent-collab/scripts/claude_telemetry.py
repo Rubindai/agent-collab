@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import os
-import shlex
 import sys
 import tempfile
 import time
@@ -73,11 +72,12 @@ def mismatch_details(receipt: dict[str, Any], run_id: str, expected_effort: str)
     }
 
 
-def capture_command(path: Path, run_id: str, expected_effort: str) -> str:
-    return shlex.join([
-        sys.executable, str(Path(__file__).resolve()), "--output", str(path.resolve()),
+def capture_args(path: Path, run_id: str, expected_effort: str) -> list[str]:
+    """Return the exec-form hook arguments that follow sys.executable."""
+    return [
+        str(Path(__file__).resolve()), "--output", str(path.resolve()),
         "--run-id", run_id, "--expected-effort", expected_effort,
-    ])
+    ]
 
 
 def pending_directory(path: Path) -> Path:
@@ -97,13 +97,12 @@ def pending_capture_details(path: Path) -> dict[str, Any] | None:
 
 def capture(path: Path, run_id: str, expected_effort: str, raw: str) -> bool:
     """Append every observation; a later matching Stop cannot erase a mismatch."""
-    import fcntl
-
     directory = STRICT_JSON.ensure_private_directory(pending_directory(path))
     descriptor, marker_name = tempfile.mkstemp(prefix="stop-", dir=directory)
     marker = Path(marker_name)
     with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        os.fchmod(handle.fileno(), 0o600)
+        if os.name == "posix":
+            os.fchmod(handle.fileno(), 0o600)
         handle.write("capture pending\n")
         handle.flush()
         os.fsync(handle.fileno())
@@ -125,31 +124,29 @@ def capture(path: Path, run_id: str, expected_effort: str, raw: str) -> bool:
         observation["error"] = str(exc)[:512]
     STRICT_JSON.ensure_private_directory(path.parent)
     lock_path = path.with_suffix(".lock")
-    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-    descriptor = os.open(lock_path, flags, 0o600)
-    os.fchmod(descriptor, 0o600)
+    descriptor = STRICT_JSON.open_lock_file(lock_path)
     with os.fdopen(descriptor, "a+") as lock:
         deadline = time.monotonic() + 2
-        while True:
-            try:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("Claude effort receipt lock timed out")
-                time.sleep(0.01)
-        receipt = STRICT_JSON.load(path, max_bytes=MAX_CAPTURE_BYTES)
-        validate_receipt(receipt, run_id, expected_effort)
-        if len(receipt["observations"]) >= MAX_OBSERVATIONS:
-            # Keep a terminal error within the finite artifact limit.
-            receipt["observations"][-1] = {"effort": None, "error": "Claude Stop observation limit exceeded"}
-        else:
-            receipt["observations"].append(observation)
-        STRICT_JSON.write(path, receipt)
-        valid = mismatch_details(receipt, run_id, expected_effort) is None
-        marker.unlink()
-        STRICT_JSON.fsync_directory(directory)
-        return valid
+        while not STRICT_JSON.try_lock(lock.fileno()):
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Claude effort receipt lock timed out")
+            time.sleep(0.01)
+        try:
+            receipt = STRICT_JSON.load(path, max_bytes=MAX_CAPTURE_BYTES)
+            validate_receipt(receipt, run_id, expected_effort)
+            if len(receipt["observations"]) >= MAX_OBSERVATIONS:
+                # Keep a terminal error within the finite artifact limit.
+                receipt["observations"][-1] = {"effort": None, "error": "Claude Stop observation limit exceeded"}
+            else:
+                receipt["observations"].append(observation)
+            STRICT_JSON.write(path, receipt)
+            valid = mismatch_details(receipt, run_id, expected_effort) is None
+            marker.unlink()
+            STRICT_JSON.fsync_directory(directory)
+            return valid
+        finally:
+            # Windows may release a closed handle's lock late.
+            STRICT_JSON.unlock(lock.fileno())
 
 
 def main() -> int:

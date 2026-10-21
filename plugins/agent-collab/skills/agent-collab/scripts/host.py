@@ -19,12 +19,6 @@ from pathlib import Path
 from typing import Any
 
 
-if os.name == "posix":
-    import fcntl
-elif os.name == "nt":
-    import msvcrt
-
-
 sys.dont_write_bytecode = True
 
 ORIGINS = {"claude", "codex"}
@@ -42,7 +36,7 @@ DEFAULT_HISTORY_RETAINED_RUNS = 50
 
 def platform_default_workspace_mode(platform_name: str) -> str:
     """Use the supported disposable backend only where it exists."""
-    return "direct" if platform_name == "darwin" else "isolated"
+    return "direct" if platform_name in {"darwin", "win32"} else "isolated"
 
 
 SETTING_DEFAULTS: dict[str, Any] = {
@@ -241,7 +235,9 @@ def run_git_probe(args: list[str], cwd: Path | None = None) -> subprocess.Comple
             ["git", *args],
             cwd=cwd,
             env=env,
-            text=True,
+            # Git prints UTF-8 paths; surrogateescape round-trips other POSIX bytes.
+            encoding="utf-8",
+            errors="surrogateescape",
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=GIT_PROBE_TIMEOUT_SECONDS,
@@ -269,13 +265,17 @@ def parse_cli_version(text: str) -> tuple[int, int, int] | None:
 
 def require_peer_cli_version(peer: str) -> str:
     minimum = MIN_CLI_VERSIONS[peer]
-    executable = shutil.which(peer)
-    if executable is None:
-        raise SystemExit(f"required peer CLI not found on PATH: {peer}")
+    try:
+        executable = SAFETY.resolve_cli(peer)
+    except FileNotFoundError as exc:
+        raise SystemExit(str(exc)) from exc
     try:
         completed = subprocess.run(
-            [peer, "--version"],
+            # Windows pins the native executable; POSIX keeps exec's lookup.
+            [executable if os.name == "nt" else peer, "--version"],
             text=True,
+            encoding="utf-8",
+            errors="replace",
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=10,
@@ -465,6 +465,9 @@ def classify_mode(target: str, brief: str) -> str:
 
 
 def is_supported_platform() -> bool:
+    if os.name == "nt":
+        # Job Objects stand in for process groups (windows_jobs.py).
+        return sys.platform == "win32"
     return (
         os.name == "posix"
         and (sys.platform.startswith("linux") or sys.platform == "darwin")
@@ -475,8 +478,8 @@ def is_supported_platform() -> bool:
 def require_supported_platform() -> None:
     if not is_supported_platform():
         raise SystemExit(
-            "Agent Collab runtime process supervision requires a POSIX platform "
-            f"running Linux or macOS; unsupported host: {sys.platform} ({os.name})"
+            "Agent Collab runtime process supervision requires Linux, macOS, or Windows; "
+            f"unsupported host: {sys.platform} ({os.name})"
         )
 
 
@@ -506,7 +509,7 @@ def write_json_once(path: Path, data: dict[str, Any]) -> bool:
     STRICT_JSON.ensure_private_directory(path.parent)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.{os.urandom(6).hex()}.tmp")
     payload = (STRICT_JSON.dumps(data) + "\n").encode("utf-8")
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | STRICT_JSON.BINARY_FLAG, 0o600)
     try:
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(payload)
@@ -1136,13 +1139,7 @@ def validate_cancel_result(report: dict[str, Any], request: dict[str, Any], run_
 
 
 def process_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+    return SAFETY.pid_alive(pid)
 
 
 def json_number(value: float | None) -> float | int | None:
@@ -1243,28 +1240,21 @@ def run_operation_lock(run_dir: Path):
     require_supported_platform()
     STRICT_JSON.ensure_private_directory(run_dir)
     lock_path = run_dir / ".workflow.lock"
-    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
-    flags |= getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(lock_path, flags, 0o600)
-    os.fchmod(descriptor, 0o600)
+    descriptor = STRICT_JSON.open_lock_file(lock_path)
     acquired = False
     deadline = time.monotonic() + RUN_OPERATION_LOCK_TIMEOUT_SECONDS
     try:
-        while True:
-            try:
-                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                acquired = True
-                break
-            except BlockingIOError as exc:
-                if time.monotonic() >= deadline:
-                    raise RuntimeError(
-                        f"timed out acquiring Agent Collab run operation lock: {lock_path}"
-                    ) from exc
-                time.sleep(RUN_OPERATION_LOCK_POLL_SECONDS)
+        while not STRICT_JSON.try_lock(descriptor):
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"timed out acquiring Agent Collab run operation lock: {lock_path}"
+                )
+            time.sleep(RUN_OPERATION_LOCK_POLL_SECONDS)
+        acquired = True
         yield
     finally:
         if acquired:
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            STRICT_JSON.unlock(descriptor)
         os.close(descriptor)
 
 
@@ -1274,46 +1264,22 @@ def workspace_guard_transaction(repo_root: Path):
 
     lock_path = workspace_guard_lock_path(repo_root)
     STRICT_JSON.ensure_private_directory(lock_path.parent)
-    flags = os.O_RDWR | os.O_CREAT
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    descriptor = os.open(lock_path, flags, 0o600)
-    if os.name == "posix":
-        os.fchmod(descriptor, 0o600)
+    descriptor = STRICT_JSON.open_lock_file(lock_path)
     acquired = False
     deadline = time.monotonic() + WORKSPACE_GUARD_LOCK_TIMEOUT_SECONDS
     try:
-        if os.name == "nt" and os.fstat(descriptor).st_size == 0:
-            os.write(descriptor, b"\0")
-            os.fsync(descriptor)
-        while True:
-            try:
-                if os.name == "posix":
-                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                elif os.name == "nt":
-                    os.lseek(descriptor, 0, os.SEEK_SET)
-                    msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
-                else:
-                    raise RuntimeError(
-                        f"workspace guard locking is unsupported on platform {os.name!r}"
-                    )
-                acquired = True
-                break
-            except (BlockingIOError, OSError):
-                if time.monotonic() >= deadline:
-                    raise RuntimeError(
-                        f"timed out acquiring Agent Collab workspace guard lock: {lock_path}"
-                    )
-                time.sleep(WORKSPACE_GUARD_LOCK_POLL_SECONDS)
+        while not STRICT_JSON.try_lock(descriptor):
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"timed out acquiring Agent Collab workspace guard lock: {lock_path}"
+                )
+            time.sleep(WORKSPACE_GUARD_LOCK_POLL_SECONDS)
+        acquired = True
         yield
     finally:
         if acquired:
             try:
-                if os.name == "posix":
-                    fcntl.flock(descriptor, fcntl.LOCK_UN)
-                elif os.name == "nt":
-                    os.lseek(descriptor, 0, os.SEEK_SET)
-                    msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+                STRICT_JSON.unlock(descriptor)
             except OSError:
                 pass
         os.close(descriptor)
@@ -2129,8 +2095,9 @@ def start(args: argparse.Namespace) -> int:
         env["AGENT_COLLAB_RUN_DIR"] = str(run_dir)
         started_at_epoch = time.time()
         startup_gate_read, startup_gate_write = os.pipe()
-        os.set_inheritable(startup_gate_read, True)
-        process = subprocess.Popen(
+        popen_options: dict[str, Any] = {}
+        startup_gate_token = SAFETY.pass_gate(startup_gate_read, popen_options)
+        process = SAFETY.popen_group(
             [
                 sys.executable,
                 str(runtime_dir() / "peer.py"),
@@ -2142,16 +2109,17 @@ def start(args: argparse.Namespace) -> int:
                 "--normalization-output",
                 str(run_dir / "peer-normalization.json"),
                 "--startup-gate-fd",
-                str(startup_gate_read),
+                str(startup_gate_token),
             ],
+            detached=True,
             cwd=repo_root,
             stdin=subprocess.DEVNULL,
             stdout=peer_stdout,
             stderr=peer_stderr,
             env=env,
             text=True,
-            start_new_session=True,
-            pass_fds=(startup_gate_read,),
+            encoding="utf-8",
+            **popen_options,
         )
         try:
             peer_identity = SAFETY.process_identity(process.pid)
@@ -4173,8 +4141,10 @@ def setup(args: argparse.Namespace) -> int:
 def run_command_capture(command: list[str], timeout: float = 20) -> dict[str, Any]:
     try:
         completed = subprocess.run(
-            command,
+            SAFETY.native_command(command),
             text=True,
+            encoding="utf-8",
+            errors="replace",
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=timeout,
@@ -4227,8 +4197,16 @@ def doctor(args: argparse.Namespace) -> int:
     peer_runtime = load_peer_runtime()
     resolved = resolve_settings(repo_root)
     settings = resolved["settings"]
-    codex_path = shutil.which("codex")
-    claude_path = shutil.which("claude")
+    cli_paths: dict[str, str | None] = {}
+    cli_errors: dict[str, str] = {}
+    for name in ("codex", "claude"):
+        try:
+            cli_paths[name] = SAFETY.resolve_cli(name)
+        except FileNotFoundError as exc:
+            cli_paths[name] = None
+            cli_errors[name] = str(exc)
+    codex_path = cli_paths["codex"]
+    claude_path = cli_paths["claude"]
     codex_auth = run_command_capture(["codex", "login", "status"], timeout=10) if codex_path else {}
     claude_auth = parse_json_command(["claude", "auth", "status", "--json"], timeout=10) if claude_path else {}
     claude_report = claude_auth.get("json") if isinstance(claude_auth, dict) else None
@@ -4274,7 +4252,7 @@ def doctor(args: argparse.Namespace) -> int:
         result = run_command_capture([name, "--version"], timeout=10) if path else {}
         raw = f"{result.get('stdout', '')}\n{result.get('stderr', '')}".strip()
         parsed = parse_cli_version(raw)
-        return {
+        check = {
             "ok": path is not None and parsed is not None and parsed >= minimum,
             "value": {
                 "path": path,
@@ -4282,6 +4260,9 @@ def doctor(args: argparse.Namespace) -> int:
                 "minimum": ".".join(str(part) for part in minimum),
             },
         }
+        if name in cli_errors:
+            check["error"] = cli_errors[name]
+        return check
 
     doctor_workspace_mode = "direct" if settings["safe_mode"] else settings["workspace_mode"]
     isolation_check = (
@@ -4296,7 +4277,7 @@ def doctor(args: argparse.Namespace) -> int:
         "python": {"ok": sys.version_info >= (3, 10), "value": sys.version.split()[0]},
         "platform": {
             "ok": is_supported_platform(),
-            "value": {"os_name": os.name, "platform": sys.platform, "supported": ["Linux", "macOS"]},
+            "value": {"os_name": os.name, "platform": sys.platform, "supported": ["Linux", "macOS", "Windows"]},
         },
         "git": {"ok": shutil.which("git") is not None, "value": shutil.which("git")},
         "workspace_isolation": {

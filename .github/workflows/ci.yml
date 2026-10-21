@@ -30,3 +30,28 @@ jobs:
         env:
           PYTHON: python
         run: scripts/release-check.sh --ci
+
+  # The discovery suite asserts POSIX modes and process groups; Windows runs
+  # its own checks of Job Object supervision, gates, locks, and resolution.
+  windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.13"]
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Compile runtime
+        run: python -m py_compile tools/agent-collab/scripts/*.py
+      - name: Package synchronization
+        env:
+          PYTHON: python
+        run: scripts/sync-packages.sh --check
+      - name: Windows runtime checks
+        run: python tests/windows_runtime_checks.py -v

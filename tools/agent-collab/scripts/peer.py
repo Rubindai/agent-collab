@@ -99,16 +99,6 @@ MAX_PEER_OUTPUT_BYTES = 16 * 1024 * 1024
 # snapshot (at most 300 s) before the wrapper launches the provider. The window
 # covers that snapshot plus margin; it is checked again at provider launch.
 MAX_AVAILABILITY_ATTESTATION_AGE_SECONDS = 600
-PROVIDER_GATE_CODE = """import os, sys
-gate_fd = int(sys.argv[1])
-try:
-    token = os.read(gate_fd, 1)
-finally:
-    os.close(gate_fd)
-if token != b"1":
-    raise SystemExit(125)
-os.execvpe(sys.argv[2], sys.argv[2:], os.environ)
-"""
 WEB_TOOLS = ("WebSearch", "WebFetch")
 CLAUDE_EFFORT_ENV_OVERRIDES = (
     "CLAUDE_CODE_EFFORT_LEVEL",
@@ -293,19 +283,10 @@ def run_peer_command(args: list[str], **kwargs: Any) -> subprocess.CompletedProc
             for signum in forwarded_signals:
                 previous_handlers[signum] = signal.getsignal(signum)
                 signal.signal(signum, forward_signal)
-        popen_args = args
-        if os.name == "posix":
-            provider_gate_read, provider_gate_write = os.pipe()
-            os.set_inheritable(provider_gate_read, True)
-            popen_args = [
-                sys.executable,
-                "-c",
-                PROVIDER_GATE_CODE,
-                str(provider_gate_read),
-                *args,
-            ]
-            kwargs["pass_fds"] = tuple(kwargs.get("pass_fds", ())) + (provider_gate_read,)
-        process = subprocess.Popen(popen_args, start_new_session=True, **kwargs)
+        command = SAFETY.native_command(args, kwargs.get("env"))
+        provider_gate_read, provider_gate_write = os.pipe()
+        popen_args = SAFETY.gated_command(command, provider_gate_read, kwargs)
+        process = SAFETY.popen_group(popen_args, **kwargs)
         active["process"] = process
         identity = SAFETY.process_identity(process.pid)
         active["identity"] = identity
@@ -598,7 +579,8 @@ def default_repo_root() -> Path:
         completed = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
             env=env,
-            text=True,
+            encoding="utf-8",
+            errors="surrogateescape",
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=30,
@@ -903,7 +885,8 @@ def build_peer_command(
         claude_settings["env"] = claude_helper_environment(request)
         claude_settings["hooks"]["Stop"] = [{"hooks": [{
             "type": "command",
-            "command": CLAUDE_TELEMETRY.capture_command(
+            "command": sys.executable,
+            "args": CLAUDE_TELEMETRY.capture_args(
                 output_path.with_name("claude-effort.json"), request["run_id"],
                 load_availability_runtime().effective_claude_effort(request["peer_effort"]),
             ),
@@ -1307,14 +1290,25 @@ def mutation_error_details(before: dict[str, Any], after: dict[str, Any], peer_r
 def make_host_cli_guard(tmp: Path, host: str) -> Path:
     bin_dir = tmp / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
+    message = f"{host} is the Agent Collab host; peer runs may not call the host CLI."
     wrapper = bin_dir / host
     wrapper.write_text(
         "#!/usr/bin/env bash\n"
-        f'echo "{host} is the Agent Collab host; peer runs may not call the host CLI." >&2\n'
+        f'echo "{message}" >&2\n'
         "exit 64\n",
         encoding="utf-8",
+        newline="\n",
     )
     wrapper.chmod(0o755)
+    if os.name == "nt":
+        # PowerShell and cmd.exe resolve a bare name through PATHEXT, so this
+        # shim shadows the host's native executable later on PATH. Git Bash
+        # uses the extensionless script above.
+        (bin_dir / f"{host}.cmd").write_text(
+            f"@echo {message} 1>&2\r\n@exit /b 64\r\n",
+            encoding="utf-8",
+            newline="",
+        )
     return bin_dir
 
 
@@ -1548,7 +1542,7 @@ def invoke_peer(
         if sandbox["status"] == "sandbox_unavailable":
             return failure(
                 "sandbox_unavailable",
-                "Linux safe-mode isolation is unavailable; the peer was not launched.",
+                "Codex safe-mode sandboxing is unavailable; the peer was not launched.",
                 request,
                 sandbox,
             )
@@ -1657,8 +1651,10 @@ def invoke_peer(
         except ValueError as exc:
             return with_mutation_check(failure("invalid_configuration", str(exc), request))
         executable = command.args[0]
-        if shutil.which(executable, path=effective_env.get("PATH")) is None:
-            return with_mutation_check(failure("missing_cli", f"Required peer CLI not found on PATH: {executable}", request))
+        try:
+            SAFETY.resolve_cli(executable, effective_env.get("PATH"))
+        except FileNotFoundError as exc:
+            return with_mutation_check(failure("missing_cli", str(exc), request))
 
         peer_env = dict(effective_env)
         if request["peer"] == "claude":
@@ -1694,6 +1690,7 @@ def invoke_peer(
                     env=peer_env,
                     input=command.stdin,
                     text=True,
+                    encoding="utf-8",
                     errors="replace",
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
@@ -2005,15 +2002,18 @@ def main(argv: list[str] | None = None) -> int:
         _write_provider_pending(tracker_path, request["run_id"])
         gate_open = True
         if args.startup_gate_fd is not None:
+            gate_fd = None
             try:
-                gate_open = os.read(args.startup_gate_fd, 1) == b"1"
+                gate_fd = SAFETY.receive_gate(args.startup_gate_fd)
+                gate_open = os.read(gate_fd, 1) == b"1"
             except OSError:
                 gate_open = False
             finally:
-                try:
-                    os.close(args.startup_gate_fd)
-                except OSError:
-                    pass
+                if gate_fd is not None:
+                    try:
+                        os.close(gate_fd)
+                    except OSError:
+                        pass
         if not gate_open:
             result = failure(
                 "startup_aborted",

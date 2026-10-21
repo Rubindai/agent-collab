@@ -302,11 +302,12 @@ class AvailabilityCaptureTests(TestCase):
 
         def runner(command, **kwargs):
             settings = json.loads(command[command.index("--settings") + 1])
-            hook = settings["hooks"]["Stop"][0]["hooks"][0]["command"]
+            hook = settings["hooks"]["Stop"][0]["hooks"][0]
             env = kwargs["env"]
             previous = os.umask(0o022)
             try:
-                subprocess.run(hook, shell=True, input=json.dumps({"hook_event_name": "Stop", "effort": {"level": "xhigh"}}),
+                subprocess.run([hook["command"], *hook["args"]],
+                               input=json.dumps({"hook_event_name": "Stop", "effort": {"level": "xhigh"}}),
                                text=True, env=env, check=True)
             finally:
                 os.umask(previous)

@@ -11,11 +11,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - non-Unix fallback
-    fcntl = None
-
 
 STATE_SCHEMA_VERSION = "2.0"
 MAX_JOBS = 50
@@ -226,34 +221,21 @@ def validate_state_payload(parsed: Any) -> dict[str, Any]:
 
 @contextmanager
 def state_lock(run_root: Path):
-    if fcntl is None:
-        raise RuntimeError("Agent Collab state locking requires a POSIX fcntl runtime")
     run_root.mkdir(parents=True, exist_ok=True, mode=0o700)
     if os.name == "posix":
         os.chmod(run_root, 0o700)
     path = lock_file(run_root)
-    flags = os.O_RDWR | os.O_CREAT
-    flags |= getattr(os, "O_CLOEXEC", 0)
-    flags |= getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags, 0o600)
-    if os.name == "posix":
-        os.fchmod(descriptor, 0o600)
+    descriptor = STRICT_JSON.open_lock_file(path)
     with os.fdopen(descriptor, "a+", encoding="utf-8") as lock:
         deadline = time.monotonic() + STATE_LOCK_TIMEOUT_SECONDS
-        while True:
-            try:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError as exc:
-                if time.monotonic() >= deadline:
-                    raise TimeoutError(
-                        f"timed out acquiring Agent Collab state lock: {path}"
-                    ) from exc
-                time.sleep(STATE_LOCK_POLL_SECONDS)
+        while not STRICT_JSON.try_lock(lock.fileno()):
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"timed out acquiring Agent Collab state lock: {path}")
+            time.sleep(STATE_LOCK_POLL_SECONDS)
         try:
             yield
         finally:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            STRICT_JSON.unlock(lock.fileno())
 
 
 def load_state(run_root: Path) -> dict[str, Any]:

@@ -6,6 +6,7 @@ import math
 import os
 import stat
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Iterable, TextIO
 
@@ -16,6 +17,10 @@ class StrictJSONError(ValueError):
 
 PRIVATE_DIRECTORY_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
+# Windows opens descriptors in text mode unless asked otherwise, which would
+# rewrite LF as CRLF and stop reads at a Ctrl-Z byte.
+BINARY_FLAG = getattr(os, "O_BINARY", 0)
+REPLACE_RETRY_SECONDS = 2.0
 
 
 def ensure_private_directory(path: Path) -> Path:
@@ -46,14 +51,14 @@ def open_private_text(path: Path) -> TextIO:
     """Open a private text artifact without following a final-component symlink."""
 
     ensure_private_directory(path.parent)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | BINARY_FLAG
     flags |= getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags, PRIVATE_FILE_MODE)
     try:
         if os.name == "posix":
             os.fchmod(descriptor, PRIVATE_FILE_MODE)
-        return os.fdopen(descriptor, "w", encoding="utf-8")
+        return os.fdopen(descriptor, "w", encoding="utf-8", newline="")
     except BaseException:
         os.close(descriptor)
         raise
@@ -71,19 +76,87 @@ def write_text(path: Path, text: str) -> None:
     try:
         if os.name == "posix":
             os.fchmod(descriptor, PRIVATE_FILE_MODE)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
             descriptor = -1
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
         reject_symlink_destination(path)
-        os.replace(temporary_path, path)
+        replace(temporary_path, path)
         fsync_directory(path.parent)
     except BaseException:
         if descriptor >= 0:
             os.close(descriptor)
         temporary_path.unlink(missing_ok=True)
         raise
+
+
+def replace(source: Path, destination: Path) -> None:
+    """Atomically replace destination, retrying Windows sharing violations.
+
+    Windows refuses to replace a file that another process (a concurrent
+    reader or an antivirus scanner) holds open; such holds are brief.
+    """
+
+    deadline = time.monotonic() + REPLACE_RETRY_SECONDS
+    while True:
+        try:
+            os.replace(source, destination)
+            return
+        except PermissionError:
+            if os.name != "nt" or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.02)
+
+
+def open_lock_file(path: Path) -> int:
+    """Open an owner-only lock file without following a final symlink."""
+
+    flags = os.O_RDWR | os.O_CREAT | BINARY_FLAG
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, PRIVATE_FILE_MODE)
+    if os.name == "posix":
+        try:
+            os.fchmod(descriptor, PRIVATE_FILE_MODE)
+        except BaseException:
+            os.close(descriptor)
+            raise
+    return descriptor
+
+
+def try_lock(descriptor: int) -> bool:
+    """Take an exclusive lock without waiting; return False when another holder has it."""
+
+    if os.name == "nt":
+        import msvcrt
+
+        # Lock one byte at offset 0; Windows allows a lock past end of file.
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        try:
+            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+        except OSError:
+            return False
+        return True
+    import fcntl
+
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    return True
+
+
+def unlock(descriptor: int) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+        return
+    import fcntl
+
+    fcntl.flock(descriptor, fcntl.LOCK_UN)
 
 
 def fsync_directory(path: Path) -> None:

@@ -57,7 +57,7 @@ class SelectionAuditTests(TestCase):
                              'modelUsage': {'claude-opus-5-5': {}}})
         def run(args, **kwargs):
             settings = json.loads(args[args.index('--settings') + 1])
-            words = fixtures.shlex.split(settings['hooks']['Stop'][0]['hooks'][0]['command'])
+            words = settings['hooks']['Stop'][0]['hooks'][0]['args']
             path = Path(words[words.index('--output') + 1])
             telemetry.capture(path, fixtures.request()['run_id'], 'xhigh', json.dumps(
                 {'hook_event_name': 'Stop', 'effort': {'level': 'xhigh'}}))
@@ -102,8 +102,7 @@ class SelectionAuditTests(TestCase):
             with self.subTest(events=events), tempfile.TemporaryDirectory() as tmp:
                 def run(args, **kwargs):
                     settings = json.loads(args[args.index("--settings") + 1])
-                    hook = settings["hooks"]["Stop"][0]["hooks"][0]["command"]
-                    words = fixtures.shlex.split(hook)
+                    words = settings["hooks"]["Stop"][0]["hooks"][0]["args"]
                     output = Path(words[words.index("--output") + 1])
                     for effort in events:
                         payload = {"hook_event_name": "Stop"}

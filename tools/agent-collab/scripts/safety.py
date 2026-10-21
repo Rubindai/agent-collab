@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import re
-import shlex
 import shutil
 import signal
 import subprocess
@@ -64,6 +64,44 @@ AGENT_COLLAB_OWNED_CODEX_CONFIG_KEYS = {
 CANONICAL_CODEX_CONFIG_KEY = re.compile(
     r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*\Z"
 )
+PROCESS_IDENTITY_KINDS = {"linux_proc", "posix_ps", "windows_process"}
+# A gated child blocks on one byte from an inherited pipe before starting the
+# real command, so the parent can commit the child's exact identity first.
+# POSIX execs in place and keeps the PID. Windows has no exec, so the
+# trampoline stays alive as the job root and relays the exit status.
+POSIX_GATE_CODE = """import os, sys
+gate_fd = int(sys.argv[1])
+try:
+    token = os.read(gate_fd, 1)
+finally:
+    os.close(gate_fd)
+if token != b"1":
+    raise SystemExit(125)
+os.execvp(sys.argv[2], sys.argv[2:])
+"""
+WINDOWS_GATE_CODE = """import msvcrt, os, subprocess, sys
+gate_fd = msvcrt.open_osfhandle(int(sys.argv[1]), os.O_RDONLY)
+try:
+    token = os.read(gate_fd, 1)
+finally:
+    os.close(gate_fd)
+if token != b"1":
+    raise SystemExit(125)
+raise SystemExit(subprocess.call(sys.argv[2:], stdin=0, stdout=1, stderr=2))
+"""
+_SIBLINGS: dict[str, Any] = {}
+
+
+def _load_sibling(name: str) -> Any:
+    if name not in _SIBLINGS:
+        path = Path(__file__).resolve().parent / f"{name}.py"
+        spec = importlib.util.spec_from_file_location(f"agent_collab_{name}_safety", path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"cannot load Agent Collab runtime module: {path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _SIBLINGS[name] = module
+    return _SIBLINGS[name]
 
 
 def _read_linux_start_time(pid: int) -> str:
@@ -82,6 +120,16 @@ def _read_linux_start_time(pid: int) -> str:
 def process_identity(pid: int) -> dict[str, Any]:
     if type(pid) is not int or pid <= 0:
         raise ValueError("pid must be a positive integer")
+    if os.name == "nt":
+        # A Windows group is the job rooted at this process (windows_jobs.py),
+        # and creation time is unique across reboots.
+        return {
+            "kind": "windows_process",
+            "pid": pid,
+            "pgid": pid,
+            "boot_id": "not_available",
+            "start_time": _load_sibling("windows_jobs").process_start_time(pid),
+        }
     pgid = os.getpgid(pid)
     boot_id_path = Path("/proc/sys/kernel/random/boot_id")
     if sys.platform.startswith("linux") and boot_id_path.is_file():
@@ -117,7 +165,7 @@ def process_identity(pid: int) -> dict[str, Any]:
 def validate_process_identity(value: Any) -> None:
     if not isinstance(value, dict) or set(value) != PROCESS_IDENTITY_KEYS:
         raise ValueError(f"process identity must contain exactly {sorted(PROCESS_IDENTITY_KEYS)}")
-    if value["kind"] not in {"linux_proc", "posix_ps"}:
+    if value["kind"] not in PROCESS_IDENTITY_KINDS:
         raise ValueError("process identity kind is invalid")
     for key in ("pid", "pgid"):
         if type(value[key]) is not int or value[key] <= 0:
@@ -138,15 +186,30 @@ def process_identity_state(expected: Any) -> str:
     except ProcessLookupError:
         return "dead_or_replaced"
     except (OSError, RuntimeError, subprocess.SubprocessError, ValueError):
-        # A failed /proc or ps read is not proof that the launcher has exited.
+        # A failed /proc, ps, or Windows read is not proof that the launcher
+        # has exited.
         try:
-            os.kill(expected["pid"], 0)
-        except ProcessLookupError:
-            return "dead_or_replaced"
+            if not pid_alive(expected["pid"]):
+                return "dead_or_replaced"
         except OSError:
             pass
         return "unknown"
     return "matching" if observed == expected else "dead_or_replaced"
+
+
+def pid_alive(pid: int) -> bool:
+    """Return whether pid names a live process; permission errors count as live."""
+
+    if os.name == "nt":
+        # os.kill(pid, 0) would send CTRL_C_EVENT on Windows.
+        return _load_sibling("windows_jobs").pid_alive(pid)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def process_identity_matches(expected: Any) -> bool:
@@ -176,6 +239,8 @@ def process_group_alive(pgid: int) -> bool:
 
     if type(pgid) is not int or pgid <= 0:
         raise ValueError("pgid must be a positive integer")
+    if os.name == "nt":
+        return _load_sibling("windows_jobs").group_alive(pgid)
     if sys.platform.startswith("linux"):
         return any(state != "Z" for _, state in _linux_process_group_members(pgid))
     try:
@@ -193,10 +258,14 @@ def terminate_process_group(
     term_timeout_seconds: float = 5.0,
     kill_timeout_seconds: float = 5.0,
 ) -> dict[str, Any]:
-    """Terminate a tracked POSIX process group and prove bounded quiescence."""
+    """Terminate a tracked process group and prove bounded quiescence."""
 
     if type(pgid) is not int or pgid <= 0:
         raise ValueError("pgid must be a positive integer")
+    if os.name == "nt":
+        if pgid == os.getpid():
+            raise ValueError("refusing to terminate the caller's own process group")
+        return _load_sibling("windows_jobs").terminate_group(pgid, kill_timeout_seconds)
     if pgid == os.getpgrp():
         raise ValueError("refusing to terminate the caller's own process group")
     if not process_group_alive(pgid):
@@ -243,6 +312,120 @@ def terminate_process_group(
     }
 
 
+def popen_group(args: list[str], *, detached: bool = False, **kwargs: Any) -> subprocess.Popen[Any]:
+    """Start args as the root of a new tracked process group.
+
+    POSIX starts a new session, so the child's PID is its PGID. Windows makes
+    the child the root of a named Job Object (windows_jobs.py). A detached
+    Windows root also breaks away from the caller's job, whose closure would
+    otherwise end the run with the caller's command, and fails closed when
+    that job forbids breakaway.
+    """
+
+    if os.name != "nt":
+        return subprocess.Popen(args, start_new_session=True, **kwargs)
+    flags = subprocess.CREATE_NEW_PROCESS_GROUP
+    if detached:
+        flags |= subprocess.CREATE_NO_WINDOW | subprocess.CREATE_BREAKAWAY_FROM_JOB
+    try:
+        process = subprocess.Popen(args, creationflags=flags, **kwargs)
+    except PermissionError as exc:
+        if not detached:
+            raise
+        raise PermissionError(
+            "could not start a detached process outside the caller's Windows job; "
+            f"the job may forbid breakaway: {exc}"
+        ) from exc
+    try:
+        _load_sibling("windows_jobs").adopt(process.pid)
+    except BaseException:
+        process.kill()
+        process.wait()
+        raise
+    return process
+
+
+def pass_gate(read_fd: int, popen_kwargs: dict[str, Any]) -> int:
+    """Let only the next child inherit a gate's read end; return its token."""
+
+    if os.name == "nt":
+        import msvcrt
+
+        handle = msvcrt.get_osfhandle(read_fd)
+        os.set_handle_inheritable(handle, True)
+        startupinfo = popen_kwargs.setdefault("startupinfo", subprocess.STARTUPINFO())
+        attributes = dict(startupinfo.lpAttributeList or {})
+        attributes["handle_list"] = [*attributes.get("handle_list", ()), handle]
+        startupinfo.lpAttributeList = attributes
+        return handle
+    os.set_inheritable(read_fd, True)
+    popen_kwargs["pass_fds"] = (*popen_kwargs.get("pass_fds", ()), read_fd)
+    return read_fd
+
+
+def receive_gate(token: int) -> int:
+    """Return the child's descriptor for a token from pass_gate."""
+
+    if os.name == "nt":
+        import msvcrt
+
+        return msvcrt.open_osfhandle(token, os.O_RDONLY)
+    return token
+
+
+def gated_command(args: list[str], read_fd: int, popen_kwargs: dict[str, Any]) -> list[str]:
+    """Wrap args so they start only after the gate receives one byte."""
+
+    token = pass_gate(read_fd, popen_kwargs)
+    code = WINDOWS_GATE_CODE if os.name == "nt" else POSIX_GATE_CODE
+    return [sys.executable, "-c", code, str(token), *args]
+
+
+def resolve_cli(name: str, path: str | None = None) -> str:
+    """Find a provider CLI on PATH, or raise FileNotFoundError with the reason.
+
+    Windows accepts only a native executable and skips the implicit
+    current-directory search: cmd.exe re-parses the arguments of .cmd and
+    .bat shims such as npm's, which corrupts inline JSON settings and quoted
+    config values.
+    """
+
+    if os.name != "nt":
+        resolved = shutil.which(name, path=path)
+        if resolved is None:
+            raise FileNotFoundError(f"required CLI not found on PATH: {name}")
+        return resolved
+    search_path = os.environ.get("PATH", "") if path is None else path
+    extensions = [item.lower() for item in (os.environ.get("PATHEXT") or ".COM;.EXE;.BAT;.CMD").split(";") if item]
+    for directory in search_path.split(os.pathsep):
+        directory = directory.strip().strip('"')
+        if not directory:
+            continue
+        for extension in extensions:
+            candidate = Path(directory) / f"{name}{extension}"
+            if not candidate.is_file():
+                continue
+            if extension != ".exe":
+                raise FileNotFoundError(
+                    f"{name} resolves to {candidate}, which is not a native executable; "
+                    f"install {name} with its official Windows installer so that {name}.exe "
+                    "comes first on PATH"
+                )
+            return str(candidate)
+    raise FileNotFoundError(f"required CLI not found on PATH: {name}")
+
+
+def native_command(args: list[str], env: Mapping[str, str] | None = None) -> list[str]:
+    """Pin a provider command to its native executable on Windows.
+
+    POSIX keeps exec's own PATH lookup.
+    """
+
+    if os.name != "nt":
+        return list(args)
+    return [resolve_cli(args[0], (os.environ if env is None else env).get("PATH")), *args[1:]]
+
+
 def codex_bundled_bwrap(env: Mapping[str, str] | None = None) -> str | None:
     """Locate the bubblewrap Codex falls back to when none is on PATH.
 
@@ -274,6 +457,17 @@ def sandbox_preflight(repo_root: Path, env: Mapping[str, str] | None = None) -> 
     """
 
     repo_root = repo_root.resolve()
+    if os.name == "nt":
+        # Codex runs native Windows commands without an OS sandbox unless its
+        # own Windows sandbox is configured, which Agent Collab cannot verify.
+        return {
+            "status": "sandbox_unavailable",
+            "backend": "windows",
+            "details": (
+                "Codex safe mode on native Windows has no Agent Collab-verified read-only sandbox; "
+                "use full mode, a Claude peer, or WSL2"
+            ),
+        }
     if not sys.platform.startswith("linux"):
         return {
             "status": "not_applicable",
@@ -336,20 +530,19 @@ def sandbox_preflight(repo_root: Path, env: Mapping[str, str] | None = None) -> 
     }
 
 
-def claude_agent_guard_command(counter_path: Path, limit: int) -> str:
+def claude_agent_guard_args(counter_path: Path, limit: int) -> list[str]:
+    """Return the exec-form arguments that follow sys.executable in the hook."""
+
     if type(limit) is not int or limit < 0 or limit > MAX_LOCAL_SUBAGENTS:
         raise ValueError(f"Claude Agent call limit must be between 0 and {MAX_LOCAL_SUBAGENTS}")
-    return shlex.join(
-        [
-            sys.executable,
-            str(Path(__file__).resolve()),
-            "claude-agent-guard",
-            "--counter",
-            str(counter_path.resolve()),
-            "--limit",
-            str(limit),
-        ]
-    )
+    return [
+        str(Path(__file__).resolve()),
+        "claude-agent-guard",
+        "--counter",
+        str(counter_path.resolve()),
+        "--limit",
+        str(limit),
+    ]
 
 
 def claude_agent_guard_settings(
@@ -376,8 +569,11 @@ def claude_agent_guard_settings(
                     "matcher": "Agent",
                     "hooks": [
                         {
+                            # Exec form runs without a shell on every
+                            # platform, so paths need no quoting.
                             "type": "command",
-                            "command": claude_agent_guard_command(counter_path, limit),
+                            "command": sys.executable,
+                            "args": claude_agent_guard_args(counter_path, limit),
                             "timeout": 5,
                             "onFailure": "block",
                         }
@@ -514,8 +710,7 @@ def validate_codex_config_overrides(values: list[str]) -> None:
 
 def _run_claude_agent_guard(counter_path: Path, limit: int) -> int:
     try:
-        import fcntl
-
+        strict_json = _load_sibling("strict_json")
         if limit < 0 or limit > MAX_LOCAL_SUBAGENTS:
             raise ValueError("invalid Agent call limit")
         counter_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -526,39 +721,44 @@ def _run_claude_agent_guard(counter_path: Path, limit: int) -> int:
                 os.fchmod(directory_fd, 0o700)
             finally:
                 os.close(directory_fd)
-        flags = os.O_RDWR
+        flags = os.O_RDWR | strict_json.BINARY_FLAG
         flags |= getattr(os, "O_CLOEXEC", 0)
         flags |= getattr(os, "O_NOFOLLOW", 0)
-        lock_descriptor = os.open(counter_path.with_name(counter_path.name + '.lock'), flags | os.O_CREAT, 0o600)
-        os.fchmod(lock_descriptor, 0o600)
+        lock_descriptor = strict_json.open_lock_file(counter_path.with_name(counter_path.name + '.lock'))
         with os.fdopen(lock_descriptor, 'a+') as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            # The hook's own timeout bounds this wait.
+            while not strict_json.try_lock(lock.fileno()):
+                time.sleep(0.01)
             try:
-                descriptor = os.open(counter_path, flags | os.O_CREAT | os.O_EXCL, 0o600)
-                created = True
-            except FileExistsError:
-                descriptor = os.open(counter_path, flags, 0o600)
-                created = False
-            if os.name == "posix":
-                os.fchmod(descriptor, 0o600)
-            with os.fdopen(descriptor, "a+", encoding="utf-8") as handle:
-                handle.seek(0)
-                raw = handle.read(64)
-                if (not raw and not created) or (raw and (re.fullmatch(r"0|[1-9][0-9]*", raw) is None or len(raw) > 2)):
-                    raise ValueError("Agent call counter must be a canonical non-negative integer")
-                count = int(raw) if raw else 0
-                if count >= limit:
-                    print(
-                        f"Agent Collab blocked Agent tool call {count + 1}: the finite per-run limit is {limit}.",
-                        file=sys.stderr,
-                    )
-                    return 2
-                handle.seek(0)
-                handle.truncate()
-                handle.write(str(count + 1))
-                handle.flush()
-                os.fsync(handle.fileno())
-                return 0
+                try:
+                    descriptor = os.open(counter_path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+                    created = True
+                except FileExistsError:
+                    descriptor = os.open(counter_path, flags, 0o600)
+                    created = False
+                if os.name == "posix":
+                    os.fchmod(descriptor, 0o600)
+                with os.fdopen(descriptor, "a+", encoding="utf-8") as handle:
+                    handle.seek(0)
+                    raw = handle.read(64)
+                    if (not raw and not created) or (raw and (re.fullmatch(r"0|[1-9][0-9]*", raw) is None or len(raw) > 2)):
+                        raise ValueError("Agent call counter must be a canonical non-negative integer")
+                    count = int(raw) if raw else 0
+                    if count >= limit:
+                        print(
+                            f"Agent Collab blocked Agent tool call {count + 1}: the finite per-run limit is {limit}.",
+                            file=sys.stderr,
+                        )
+                        return 2
+                    handle.seek(0)
+                    handle.truncate()
+                    handle.write(str(count + 1))
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                    return 0
+            finally:
+                # Windows may release a closed handle's lock late.
+                strict_json.unlock(lock.fileno())
     except BaseException as exc:
         print(f"Agent Collab could not enforce the Agent tool call limit: {exc}", file=sys.stderr)
         return 2
