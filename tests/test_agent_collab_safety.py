@@ -164,6 +164,7 @@ class SafetyTests(unittest.TestCase):
             [
                 "agents.enabled=true",
                 "agents.max_concurrent_threads_per_session=8",
+                "agents.max_depth=1",
                 "features.multi_agent_v2.max_concurrent_threads_per_session=9",
                 "features.multi_agent_v2.expose_spawn_agent_model_overrides=false",
                 'agents.default_subagent_model="gpt-6-astra"',

@@ -18,6 +18,10 @@ from typing import Any, Mapping
 sys.dont_write_bytecode = True
 
 MAX_LOCAL_SUBAGENTS = 64
+# A cold interpreter start can take seconds on Windows and macOS; a timed-out
+# Agent guard blocks a legitimate call, and a timed-out Stop capture fails the
+# run for missing effort evidence. The peer deadline still bounds both.
+CLAUDE_HOOK_TIMEOUT_SECONDS = 30
 MAX_AGENT_TIMEOUT_SECONDS = 86_400
 SANDBOX_PREFLIGHT_TIMEOUT_SECONDS = 10
 PROCESS_IDENTITY_KEYS = {"kind", "pid", "pgid", "boot_id", "start_time"}
@@ -632,7 +636,7 @@ def claude_agent_guard_settings(
                             "type": "command",
                             "command": sys.executable,
                             "args": claude_agent_guard_args(counter_path, limit),
-                            "timeout": 5,
+                            "timeout": CLAUDE_HOOK_TIMEOUT_SECONDS,
                             "onFailure": "block",
                         }
                     ],
@@ -679,6 +683,9 @@ def codex_fanout_overrides(
     return [
         "agents.enabled=true",
         f"agents.max_concurrent_threads_per_session={max_local_subagents}",
+        # Models whose catalog entry selects multi-agent V1 nest by this
+        # depth; V2 ignores it.
+        "agents.max_depth=1",
         # V2 counts the root thread and reads its own table before the agents
         # value, so a user config.toml table could otherwise widen the cap.
         f"features.multi_agent_v2.max_concurrent_threads_per_session={max_local_subagents + 1}",
@@ -701,7 +708,6 @@ def codex_launch_policy_overrides() -> list[str]:
         'approval_policy="never"',
         'approvals_reviewer="user"',
         "features.memories=false",
-        "features.memory_tool=false",
     ]
 
 

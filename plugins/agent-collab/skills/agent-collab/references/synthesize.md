@@ -140,8 +140,11 @@ or the network.
 
 Internal lifecycle artifacts without published schemas (`peer-process.json`,
 `workspace-mutation.json`, `cancel-workspace-mutation.json`, `isolation-state.json`,
-`startup-cleanup-failure.json`, and the worktree guard `active-v2.json`) are validated
-strictly in code; hosts should not author them.
+`startup-cleanup-failure.json`, the workspace snapshots `before.snapshot.json`,
+`after.snapshot.json`, and `cancel-after.snapshot.json` with their text companions, and the
+worktree guard `active-v2.json`) are validated strictly in code; hosts should not author them.
+The bounded provider telemetry files `peer-stdout.txt` and `peer.stderr.log` are runtime-owned
+too.
 If cancellation is interrupted after its mutation diagnostic is committed, retrying validates
 and reuses the recorded snapshot hashes without overwriting that evidence. The recorded snapshot
 describes the cancellation capture point; later workspace edits are outside that capture.

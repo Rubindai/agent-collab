@@ -40,6 +40,19 @@ class SettingsParsingTests(TestCase):
         with self.assertRaises(ValueError):
             host.normalize_settings({"history_retained_runs": "٥"}, "env")
 
+    def test_timeout_and_cli_numbers_accept_only_ascii_decimals(self):
+        host = fixtures.load_host()
+        self.assertEqual(host.normalize_timeout("2700"), 2700)
+        self.assertEqual(host.normalize_timeout(" 90.5 "), 90.5)
+        for value in ("٢٧٠٠", "２７００", "2_700", "2.7e3", "inf", "nan", True):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                host.normalize_timeout(value)
+        self.assertEqual(host.cli_integer("8"), 8)
+        self.assertEqual(host.cli_number("90.5"), 90.5)
+        for parse, value in ((host.cli_integer, "٨"), (host.cli_integer, "1_0"), (host.cli_number, "2.7e3")):
+            with self.subTest(value=value), self.assertRaises(host.argparse.ArgumentTypeError):
+                parse(value)
+
     def test_claude_tools_sentinel_must_be_lowercase_default(self):
         host = fixtures.load_host()
         peer = fixtures.load_peer()

@@ -890,7 +890,7 @@ def build_peer_command(
                 output_path.with_name("claude-effort.json"), request["run_id"],
                 load_availability_runtime().effective_claude_effort(request["peer_effort"]),
             ),
-            "timeout": 5,
+            "timeout": SAFETY.CLAUDE_HOOK_TIMEOUT_SECONDS,
         }]}]
         args = [
             "claude",
@@ -1707,7 +1707,12 @@ def invoke_peer(
             return with_mutation_check(failure("invalid_request", str(exc), request))
         except subprocess.TimeoutExpired as exc:
             return with_mutation_check(
-                failure("timeout", "Peer run exceeded AGENT_COLLAB_TIMEOUT_SECONDS", request, str(exc))
+                failure(
+                    "timeout",
+                    f"Peer run exceeded its {request['peer_timeout_seconds']}-second deadline",
+                    request,
+                    str(exc),
+                )
             )
         except TimeoutError as exc:
             return with_mutation_check(failure("timeout", str(exc), request))

@@ -555,7 +555,14 @@ def parse_non_negative_int(value: Any, label: str) -> int:
     return number
 
 
+ASCII_NUMBER = re.compile(r"[0-9]+(?:\.[0-9]+)?", flags=re.ASCII)
+
+
 def normalize_timeout(value: Any) -> float | int:
+    # Strings (environment values) must be ASCII decimal numbers; float()
+    # alone would also accept Unicode digits, underscores, and exponents.
+    if isinstance(value, bool) or (isinstance(value, str) and not ASCII_NUMBER.fullmatch(value.strip())):
+        raise ValueError("timeout must be a finite number of seconds")
     try:
         seconds = float(value)
     except (TypeError, ValueError) as exc:
@@ -565,6 +572,22 @@ def normalize_timeout(value: Any) -> float | int:
             f"timeout must be between {MIN_PEER_WAIT_SECONDS} and {SAFETY.MAX_AGENT_TIMEOUT_SECONDS} seconds"
         )
     return int(seconds) if seconds.is_integer() else seconds
+
+
+def cli_integer(value: str) -> int:
+    """argparse type for ASCII integers; int() would accept Unicode digits."""
+
+    if not re.fullmatch(r"-?[0-9]+", value.strip(), flags=re.ASCII):
+        raise argparse.ArgumentTypeError(f"invalid integer: {value!r}")
+    return int(value)
+
+
+def cli_number(value: str) -> float:
+    """argparse type for ASCII decimal numbers; float() would accept Unicode digits."""
+
+    if not ASCII_NUMBER.fullmatch(value.strip()):
+        raise argparse.ArgumentTypeError(f"invalid number: {value!r}")
+    return float(value)
 
 
 def normalize_codex_config(value: Any, source: str) -> list[str]:
@@ -1217,6 +1240,10 @@ def read_json_if_exists(path: Path) -> dict[str, Any] | None:
 
 def workspace_guard_path(repo_root: Path) -> Path:
     completed = run_git_probe(["rev-parse", "--git-path", WORKSPACE_GUARD_GIT_PATH], cwd=repo_root)
+    if completed is None and load_snapshot_runtime().has_git_metadata(repo_root):
+        # Without Git the guard would move out of the repository, where it no
+        # longer excludes runs started from an environment that has Git.
+        raise SystemExit("git is required inside a Git repository, but it is not on PATH")
     if completed is not None and completed.returncode == 0 and completed.stdout.strip():
         candidate = Path(completed.stdout.strip())
         candidate = candidate if candidate.is_absolute() else repo_root / candidate
@@ -4299,7 +4326,7 @@ def doctor(args: argparse.Namespace) -> int:
     checks = {
         "repo_root": {"ok": repo_root.exists(), "value": str(repo_root)},
         "run_root": {"ok": run_root.exists() or path_is_creatable(run_root), "value": str(run_root)},
-        "python": {"ok": sys.version_info >= (3, 10), "value": sys.version.split()[0]},
+        "python": {"ok": sys.version_info >= (3, 11), "value": sys.version.split()[0]},
         "platform": {
             "ok": is_supported_platform(),
             "value": {"os_name": os.name, "platform": sys.platform, "supported": ["Linux", "macOS", "Windows"]},
@@ -4406,7 +4433,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override online research for this run.",
     )
-    start_parser.add_argument("--max-local-subagents", type=int)
+    start_parser.add_argument("--max-local-subagents", type=cli_integer)
     start_parser.add_argument(
         "--local-subagents",
         action=argparse.BooleanOptionalAction,
@@ -4425,13 +4452,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     start_parser.add_argument(
         "--timeout-seconds",
-        type=float,
+        type=cli_number,
         default=None,
         help="Override the hard finite peer deadline for this run (60-86400 seconds).",
     )
     start_parser.add_argument(
         "--claude-max-turns",
-        type=int,
+        type=cli_integer,
         help="Explicitly opt into a positive Claude CLI turn cap for this run.",
     )
     start_parser.add_argument("--run-id")
@@ -4448,7 +4475,7 @@ def build_parser() -> argparse.ArgumentParser:
     availability_parser.add_argument("--effort", required=True)
     availability_parser.add_argument(
         "--timeout-seconds",
-        type=float,
+        type=cli_number,
         default=DEFAULT_AVAILABILITY_TIMEOUT_SECONDS,
         help=f"Bound the provider metadata check to at most {MAX_AVAILABILITY_TIMEOUT_SECONDS:g} seconds.",
     )
@@ -4462,10 +4489,10 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument("--print-env", action="store_true", help="Include equivalent environment variables in output.")
     setup_parser.add_argument("--reset", choices=sorted(RESET_SCOPES), help="Remove local, global, or all Agent Collab settings.")
     setup_parser.add_argument("--local-subagents-allowed", action=argparse.BooleanOptionalAction)
-    setup_parser.add_argument("--max-local-subagents", type=int)
+    setup_parser.add_argument("--max-local-subagents", type=cli_integer)
     setup_parser.add_argument("--adjudicator-enabled", action=argparse.BooleanOptionalAction)
-    setup_parser.add_argument("--timeout-seconds", type=float)
-    setup_parser.add_argument("--history-retained-runs", type=int)
+    setup_parser.add_argument("--timeout-seconds", type=cli_number)
+    setup_parser.add_argument("--history-retained-runs", type=cli_integer)
     setup_parser.add_argument("--clear-history", action="store_true", help="Clear old run history after setup.")
     setup_parser.add_argument("--yes", action="store_true", help="Confirm setup actions that delete run history.")
     setup_parser.add_argument("--safe-mode", action=argparse.BooleanOptionalAction)
@@ -4487,7 +4514,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     finish_parser = sub.add_parser("finish", help="Validate peer output and write synthesis support artifacts.")
     finish_parser.add_argument("run", help="Run ID, unique prefix, or run directory.")
-    finish_parser.add_argument("--timeout-seconds", type=float, default=None)
+    finish_parser.add_argument("--timeout-seconds", type=cli_number, default=None)
     finish_parser.add_argument("--run-root", type=Path)
     finish_parser.add_argument("--repo-root", type=Path)
     finish_parser.set_defaults(func=finish)
@@ -4502,8 +4529,8 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser.add_argument("run", nargs="?", help="Optional run ID, unique prefix, or run directory.")
     status_parser.add_argument("--all", action="store_true", help="List all retained jobs instead of the newest eight.")
     status_parser.add_argument("--wait", action="store_true", help="When inspecting one run, wait while the peer is alive.")
-    status_parser.add_argument("--timeout-seconds", type=float, default=2700)
-    status_parser.add_argument("--poll-interval-seconds", type=float, default=2)
+    status_parser.add_argument("--timeout-seconds", type=cli_number, default=2700)
+    status_parser.add_argument("--poll-interval-seconds", type=cli_number, default=2)
     status_parser.add_argument("--run-root", type=Path)
     status_parser.add_argument("--repo-root", type=Path)
     status_parser.set_defaults(func=status)
@@ -4515,7 +4542,7 @@ def build_parser() -> argparse.ArgumentParser:
     result_parser.set_defaults(func=result)
 
     clear_history_parser = sub.add_parser("clear-history", help="Delete old Agent Collab run history.")
-    clear_history_parser.add_argument("--retain", type=int, help="Number of newest terminal runs to keep.")
+    clear_history_parser.add_argument("--retain", type=cli_integer, help="Number of newest terminal runs to keep.")
     clear_history_parser.add_argument("--all", action="store_true", help="Delete all terminal runs.")
     clear_history_parser.add_argument("--run", help="Run ID, unique prefix, or run directory to delete.")
     clear_history_parser.add_argument("--dry-run", action="store_true", help="Show deletion candidates without deleting.")

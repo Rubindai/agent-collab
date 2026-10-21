@@ -321,6 +321,19 @@ class GitOptionalTests(TestCase):
                 with self.assertRaisesRegex(RuntimeError, "git is required"):
                     snapshot.mutation_snapshot(folder, deadline=time.monotonic() + 30)
 
+    def test_guard_stays_in_the_repository_when_git_is_missing(self):
+        host = fixtures.load_host()
+        with tempfile.TemporaryDirectory() as tmp:
+            empty_bin = Path(tmp) / "bin"
+            empty_bin.mkdir()
+            folder = Path(tmp) / "project"
+            folder.mkdir()
+            with mock.patch.dict(os.environ, {"PATH": str(empty_bin), "XDG_STATE_HOME": str(Path(tmp) / "state")}):
+                self.assertIn("workspace-guards", str(host.workspace_guard_path(folder)))
+                (Path(tmp) / ".git").mkdir()
+                with self.assertRaisesRegex(SystemExit, "git is required"):
+                    host.workspace_guard_path(folder)
+
 
 class WindowsStdioTests(TestCase):
     def test_entry_points_use_utf8_with_lf_output_and_universal_input(self):

@@ -1,5 +1,17 @@
 # Changelog
 
+## 6.0.0 — 2026-10-22
+
+- **Breaking:** require Python 3.11 or newer. Python 3.10 reached end of life on 2026-10-01, and `doctor` now flags it. CI tests the oldest supported release, 3.11, and the latest stable, 3.15.
+- **Breaking:** accept only ASCII decimal numbers for `AGENT_COLLAB_TIMEOUT_SECONDS` and every numeric command-line flag, as integer settings already required; Unicode digits, underscores, and exponents are rejected.
+- `start` refuses a Git repository when `git` is not on `PATH` instead of moving the worktree guard out of the repository, where it would not exclude a run started with Git available.
+- Pin Codex `agents.max_depth=1` for models on multi-agent V1, which still expose per-spawn model and effort overrides, and drop the legacy `features.memory_tool` alias; `features.memories=false` already disables memory.
+- Raise Claude hook timeouts from 5 to 30 seconds, so a slow interpreter start on Windows or macOS neither blocks a legitimate `Agent` call nor loses Stop effort evidence.
+- Name the actual deadline in timeout results instead of `AGENT_COLLAB_TIMEOUT_SECONDS`.
+- Write skill commands with literal placeholders instead of shell variables, so they also run in PowerShell, where `$host` is reserved.
+- Move CI to `actions/checkout@v7` and `actions/setup-python@v7`, which run on Node.js 24, and require the latest stable release of every selected dependency in `AGENTS.md`.
+- Correct the documentation against the implementation and current Claude Code and Codex documentation: the isolated workspace's fresh `/tmp`, minimal `/dev`, and which sockets stay reachable; credential paths; the startup gates' scope; macOS Codex safe mode; multi-agent V1 overrides; the effective Codex `ultra` effort; mods as a spawn channel outside the `Agent` counter; Claude Code's refusal of `bypassPermissions` as root; WinGet updates; and the workflow and agent-team environment pins.
+
 ## 5.0.1 — 2026-10-21
 
 - Fix macOS process-group supervision. macOS answers EPERM to `killpg` while a group holds an unreaped zombie, so cleanup reported `permission_denied`, waited out its grace period, and left runs non-quiescent. Group liveness now comes from a `ps` scan that ignores zombies, and EPERM falls through to that check; Linux keeps its existing EPERM handling. First found by the macOS CI job, which had not run before.
@@ -22,6 +34,7 @@
 - Run in folders outside any Git repository without Git installed, using filesystem snapshots; a Git repository still requires `git`, and `doctor` flags it only there.
 - On Windows, run snapshot Git commands in a job nested in the caller's job, so a timeout also stops Git helpers holding their pipes; POSIX keeps Git in the caller's process group so cancellation still covers it. Report an expired snapshot deadline as `timeout` rather than `snapshot_unavailable`.
 - Use `$agent-collab:agent-collab` for explicit Codex mentions, document storage locations, catalog caching, and probe limits, and refresh the README, references, and `AGENTS.md` against current documentation.
+- Finish and complete runs started with 4.x before upgrading: peer findings now appear in the rebuilt claim matrix, so its digest changes and `complete` can refuse a synthesis written before the upgrade.
 
 ## 4.0.0 — 2026-10-21
 

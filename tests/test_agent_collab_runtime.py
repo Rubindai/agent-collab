@@ -938,8 +938,9 @@ class PeerV2Tests(TestCase):
         args = peer.build_peer_command(req, "p", REPO_ROOT, PEER_SCHEMA, Path("/tmp/out"), {}, "git").args
         self.assertEqual(args[:4], ["codex", "exec", "--strict-config", "--ephemeral"])
         self.assertNotIn("--ask-for-approval", args)
+        self.assertNotIn("features.memory_tool=false", args)
         for pinned in ('approval_policy="never"', 'approvals_reviewer="user"',
-                       "features.memories=false", "features.memory_tool=false"):
+                       "features.memories=false"):
             self.assertEqual(args.count(pinned), 1)
             self.assertEqual(args[args.index(pinned) - 1], "-c")
         self.assertEqual(args[args.index("--model") + 1], "gpt-6-astra")
