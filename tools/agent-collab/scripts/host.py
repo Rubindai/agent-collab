@@ -1812,7 +1812,9 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
         "peer_status": peer_report.get("status") if peer_report else None,
         "peer_verdict": peer_report.get("verdict") if peer_report else None,
         "peer_report_incomplete": peer_report_incomplete,
-        "normalization_source": normalization.get("source") if normalization else None,
+        # A failed wrapper may never write normalization; "none" is the state
+        # index's value for that case, while None would be rejected.
+        "normalization_source": (normalization.get("source") if normalization else None) or "none",
         "validation_status": normalization.get("validation_status") if normalization else None,
         "workspace_mutation": workspace_mutation,
         "cancel_result": cancel_result,
@@ -3096,7 +3098,9 @@ def _finish_after_wait_locked(
             "peer_status": peer_report.get("status"),
             "peer_verdict": peer_report.get("verdict"),
             "validation_status": validation_status,
-            "normalization_source": (read_json_if_exists(run_dir / "peer-normalization.json") or {}).get("source"),
+            "normalization_source": (
+                (read_json_if_exists(run_dir / "peer-normalization.json") or {}).get("source") or "none"
+            ),
             "workspace_mutation": bool(workspace_mutation),
             "summary": peer_report.get("summary"),
         },

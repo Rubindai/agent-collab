@@ -615,3 +615,20 @@ class IsolationDependencyScriptTests(TestCase):
         self.assertTrue(all(line.endswith("fuse-overlayfs") for line in install_lines), install_lines)
         self.assertNotIn("fuse3", calls)
         self.assertNotIn("bubblewrap", calls)
+
+
+class NormalizationSourceTests(TestCase):
+    def test_missing_normalization_is_recorded_as_none_in_state(self):
+        host = fixtures.load_host()
+        state = fixtures.load_state()
+        self.assertIn("none", state.NORMALIZATION_SOURCES)
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "agent-collab-test"
+            run_dir.mkdir()
+            (run_dir / "host-request.json").write_text(json.dumps(fixtures.request()))
+            (run_dir / "peer-process.json").write_text(json.dumps(
+                fixtures.valid_peer_process(run_dir, Path(tmp), Path(tmp) / "guard.json")
+            ))
+            with mock.patch.object(host, "process_identity_matches", return_value=False):
+                summary = host.summarize_run(run_dir)
+        self.assertEqual(summary["normalization_source"], "none")
