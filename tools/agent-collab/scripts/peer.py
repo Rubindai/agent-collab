@@ -539,70 +539,48 @@ def resource_root() -> Path:
     return runtime_dir().parent
 
 
-def load_snapshot_runtime() -> Any:
-    path = runtime_dir() / "snapshot.py"
-    spec = importlib.util.spec_from_file_location("agent_collab_snapshot", path)
+_SIBLING_MODULES: dict[str, Any] = {}
+
+
+def _load_sibling(filename: str, module_name: str) -> Any:
+    """Load a sibling runtime module once, so every caller shares its classes and state."""
+
+    cached = _SIBLING_MODULES.get(module_name)
+    if cached is not None:
+        return cached
+    path = runtime_dir() / filename
+    spec = importlib.util.spec_from_file_location(module_name, path)
     if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load snapshot runtime: {path}")
+        raise RuntimeError(f"cannot load runtime module: {path}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
+    _SIBLING_MODULES[module_name] = module
     return module
+
+
+def load_snapshot_runtime() -> Any:
+    return _load_sibling("snapshot.py", "agent_collab_snapshot")
 
 
 def load_isolation_runtime() -> Any:
-    path = runtime_dir() / "isolation.py"
-    spec = importlib.util.spec_from_file_location("agent_collab_isolation_peer", path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load isolation runtime: {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return _load_sibling("isolation.py", "agent_collab_isolation_peer")
 
 
 def load_availability_runtime() -> Any:
-    path = runtime_dir() / "availability.py"
-    spec = importlib.util.spec_from_file_location("agent_collab_availability", path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load availability runtime: {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return _load_sibling("availability.py", "agent_collab_availability")
 
 
 def load_safety_runtime() -> Any:
-    path = runtime_dir() / "safety.py"
-    spec = importlib.util.spec_from_file_location("agent_collab_safety_peer", path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load safety runtime: {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return _load_sibling("safety.py", "agent_collab_safety_peer")
 
 
 def load_strict_json_runtime() -> Any:
-    path = runtime_dir() / "strict_json.py"
-    spec = importlib.util.spec_from_file_location("agent_collab_strict_json_peer", path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load strict JSON runtime: {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return _load_sibling("strict_json.py", "agent_collab_strict_json_peer")
 
 
 def load_claude_telemetry_runtime() -> Any:
-    path = runtime_dir() / "claude_telemetry.py"
-    spec = importlib.util.spec_from_file_location("agent_collab_claude_telemetry", path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load Claude telemetry runtime: {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return _load_sibling("claude_telemetry.py", "agent_collab_claude_telemetry")
 
 
 SAFETY = load_safety_runtime()
@@ -897,11 +875,15 @@ def build_peer_command(
     schema_path: Path,
     output_path: Path,
     env: dict[str, str],
-    workspace_mode: str | None,
+    snapshot_kind: str | None,
 ) -> PeerCommand:
+    # The launch is built only from the persisted request; the ambient
+    # environment is accepted for call-site symmetry and deliberately unused.
     del env
-    if workspace_mode not in {"git", "filesystem"}:
-        raise ValueError(f"unsupported workspace snapshot mode: {workspace_mode}")
+    # snapshot_kind is the baseline's git|filesystem kind, distinct from the
+    # request's isolated|direct workspace_mode.
+    if snapshot_kind not in {"git", "filesystem"}:
+        raise ValueError(f"unsupported workspace snapshot mode: {snapshot_kind}")
     safe_mode = request["safe_mode"]
     if request["peer"] == "claude":
         policy_failure = SAFETY.claude_helper_policy_failure(request["peer_model"], request["peer_effort"])
@@ -990,7 +972,7 @@ def build_peer_command(
     # The baseline snapshot already established whether this workspace has
     # Git metadata. Bypass Codex's Git-repository check only for filesystem
     # workspaces; keep the CLI check for Git workspaces.
-    if workspace_mode == "filesystem":
+    if snapshot_kind == "filesystem":
         args.append("--skip-git-repo-check")
     for config in request["codex_config"]:
         args.extend(["-c", config])
@@ -1154,10 +1136,6 @@ def claude_selection_mismatch_details(
                 ),
             }
     return None
-
-
-def claude_model_mismatch_details(stdout: str, requested_model: str) -> dict[str, Any] | None:
-    return claude_selection_mismatch_details(stdout, requested_model, None)
 
 
 CODEX_REROUTE_PREFIX = "model rerouted: "
@@ -1515,8 +1493,12 @@ def validate_peer_report(report: dict[str, Any]) -> None:
             raise PeerReportValidationError("error details must be a string or null")
 
 
+# Shared with host.py so both validators bind the same report fields.
+PEER_REPORT_REQUEST_BINDING_KEYS = ("run_id", "origin", "host", "peer", "mode", "target")
+
+
 def validate_peer_report_matches_request(report: dict[str, Any], request: dict[str, Any]) -> None:
-    for key in ("run_id", "origin", "host", "peer", "mode", "target"):
+    for key in PEER_REPORT_REQUEST_BINDING_KEYS:
         if report.get(key) != request.get(key):
             raise PeerReportValidationError(f"peer report {key} does not match the v2 request")
 

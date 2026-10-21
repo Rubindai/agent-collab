@@ -88,14 +88,6 @@ def _absolute(path: Path) -> Path:
     return Path.cwd() / path
 
 
-def _is_relative_to(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-    except ValueError:
-        return False
-    return True
-
-
 def _normalize_ignored_paths(paths: Iterable[Path] | None) -> list[Path]:
     ignored: list[Path] = []
     for path in paths or []:
@@ -117,7 +109,7 @@ def should_ignore(path: Path, repo_root: Path, ignored_paths: Iterable[Path] | N
     repo_root = _resolve(repo_root)
     path = _absolute(path)
     for ignored in _normalize_ignored_paths(ignored_paths):
-        if _resolve(path) == ignored or _is_relative_to(_resolve(path), ignored):
+        if _resolve(path) == ignored or _resolve(path).is_relative_to(ignored):
             return True
     try:
         parts = _rel_parts(repo_root, path)
@@ -256,7 +248,7 @@ def _git_pathspecs(repo_root: Path, ignored_paths: Iterable[Path] | None = None)
     repo_root = _resolve(repo_root)
     pathspecs = ["--", "."]
     for ignored in _normalize_ignored_paths(ignored_paths):
-        if not _is_relative_to(ignored, repo_root):
+        if not ignored.is_relative_to(repo_root):
             continue
         rel = ignored.relative_to(repo_root).as_posix()
         if rel:

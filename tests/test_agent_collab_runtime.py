@@ -1437,10 +1437,10 @@ class PeerV2Tests(TestCase):
         good = json.dumps({"modelUsage": {"claude-fable-5": {}, "claude-haiku-4-5": {}}})
         fallback = json.dumps({"modelUsage": {"claude-fable-5": {}, "claude-opus-4-8": {}}})
         missing = json.dumps({"modelUsage": {"claude-haiku-4-5": {}}})
-        self.assertIsNone(peer.claude_model_mismatch_details(good, "claude-fable-5"))
-        self.assertIn("unexpected model usage", peer.claude_model_mismatch_details(fallback, "claude-fable-5")["reason"])
-        self.assertIn("did not report", peer.claude_model_mismatch_details(missing, "claude-fable-5")["reason"])
-        self.assertIn("unexpected model usage", peer.claude_model_mismatch_details(fallback, "claude-opus-4-8")["reason"])
+        self.assertIsNone(peer.claude_selection_mismatch_details(good, "claude-fable-5", None))
+        self.assertIn("unexpected model usage", peer.claude_selection_mismatch_details(fallback, "claude-fable-5", None)["reason"])
+        self.assertIn("did not report", peer.claude_selection_mismatch_details(missing, "claude-fable-5", None)["reason"])
+        self.assertIn("unexpected model usage", peer.claude_selection_mismatch_details(fallback, "claude-opus-4-8", None)["reason"])
         downgrade = json.dumps({"effort": "high", "modelUsage": {"claude-fable-5": {}}})
         self.assertIn(
             "reported effort",
@@ -2381,22 +2381,22 @@ class HostV2Tests(TestCase):
                 }],
             }
             path.write_text(json.dumps(payload))
-            claims = host.load_helper_claims(run_dir, request())
+            claims = host.load_helper_evidence(run_dir, request())[0]
             self.assertEqual(claims[0]["source"], "helper")
             duplicate = {**payload, "reports": payload["reports"] * 2}
             path.write_text(json.dumps(duplicate))
             with self.assertRaisesRegex(host.ArtifactValidationError, "duplicate helper"):
-                host.load_helper_claims(run_dir, request())
+                host.load_helper_evidence(run_dir, request())[0]
             path.write_text(json.dumps(payload))
             with self.assertRaisesRegex(host.ArtifactValidationError, "resolved per-run limit is 0"):
-                host.load_helper_claims(
+                host.load_helper_evidence(
                     run_dir,
                     request(local_subagents_allowed=False, max_local_subagents=8),
                 )
             for legacy in ([payload["reports"][0]], {"claims": payload["reports"][0]["claims"]}):
                 path.write_text(json.dumps(legacy))
                 with self.assertRaises(host.ArtifactValidationError):
-                    host.load_helper_claims(run_dir, request())
+                    host.load_helper_evidence(run_dir, request())[0]
 
     def test_finish_then_complete_holds_and_releases_workspace_guard(self):
         host = load_host()
@@ -3284,7 +3284,10 @@ class PackageTests(TestCase):
         for path in (CLAUDE_PLUGIN_ROOT / "agents").glob("*.md"):
             text = path.read_text()
             frontmatter = text.split("---", 2)[1]
-            self.assertNotIn("model:", frontmatter, path.name)
+            # inherit outranks an ambient CLAUDE_CODE_SUBAGENT_MODEL for host
+            # helpers; forced peer runs ignore it.
+            self.assertIn("\nmodel: inherit\n", frontmatter, path.name)
+            self.assertIn("Use only inside an Agent Collab run", frontmatter, path.name)
             self.assertNotIn("effort:", frontmatter, path.name)
             self.assertNotIn("tools:", frontmatter, path.name)
             self.assertNotIn("disallowedTools:", frontmatter, path.name)

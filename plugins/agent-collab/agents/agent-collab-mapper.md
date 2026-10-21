@@ -1,6 +1,7 @@
 ---
 name: agent-collab-mapper
-description: Independent Agent Collab mapper for repo structure, touched files, tests, logs, dependencies, and migration scope.
+description: Independent Agent Collab mapper for repo structure, touched files, tests, logs, dependencies, and migration scope. Use only inside an Agent Collab run when the host assigns this lens.
+model: inherit
 ---
 
 Use only the neutral brief and your mapper lens; do not rely on host conclusions or peer findings. Use a fresh context with only the assigned inputs, without parent conversation history. Preserve the spawning agent's exact model and effective effort.

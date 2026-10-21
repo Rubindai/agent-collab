@@ -298,48 +298,40 @@ def configured_timeout_seconds(value: Any) -> float:
     return float(normalize_timeout(value))
 
 
-def load_peer_runtime() -> Any:
-    path = runtime_dir() / "peer.py"
-    spec = importlib.util.spec_from_file_location("agent_collab_peer", path)
+_SIBLING_MODULES: dict[str, Any] = {}
+
+
+def _load_sibling(filename: str, module_name: str) -> Any:
+    """Load a sibling runtime module once, so every caller shares its classes and state."""
+
+    cached = _SIBLING_MODULES.get(module_name)
+    if cached is not None:
+        return cached
+    path = runtime_dir() / filename
+    spec = importlib.util.spec_from_file_location(module_name, path)
     if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load peer runtime: {path}")
+        raise RuntimeError(f"cannot load runtime module: {path}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
+    _SIBLING_MODULES[module_name] = module
     return module
+
+
+def load_peer_runtime() -> Any:
+    return _load_sibling("peer.py", "agent_collab_peer")
 
 
 def load_availability_runtime() -> Any:
-    path = runtime_dir() / "availability.py"
-    spec = importlib.util.spec_from_file_location("agent_collab_availability", path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load availability runtime: {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return _load_sibling("availability.py", "agent_collab_availability")
 
 
 def load_safety_runtime() -> Any:
-    path = runtime_dir() / "safety.py"
-    spec = importlib.util.spec_from_file_location("agent_collab_safety_host", path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load safety runtime: {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return _load_sibling("safety.py", "agent_collab_safety_host")
 
 
 def load_strict_json_runtime() -> Any:
-    path = runtime_dir() / "strict_json.py"
-    spec = importlib.util.spec_from_file_location("agent_collab_strict_json_host", path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load strict JSON runtime: {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return _load_sibling("strict_json.py", "agent_collab_strict_json_host")
 
 
 SAFETY = load_safety_runtime()
@@ -347,36 +339,15 @@ STRICT_JSON = load_strict_json_runtime()
 
 
 def load_snapshot_runtime() -> Any:
-    path = runtime_dir() / "snapshot.py"
-    spec = importlib.util.spec_from_file_location("agent_collab_snapshot", path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load snapshot runtime: {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return _load_sibling("snapshot.py", "agent_collab_snapshot")
 
 
 def load_isolation_runtime() -> Any:
-    path = runtime_dir() / "isolation.py"
-    spec = importlib.util.spec_from_file_location("agent_collab_isolation_host", path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load isolation runtime: {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return _load_sibling("isolation.py", "agent_collab_isolation_host")
 
 
 def load_state_runtime() -> Any:
-    path = runtime_dir() / "state.py"
-    spec = importlib.util.spec_from_file_location("agent_collab_state", path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load state runtime: {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return _load_sibling("state.py", "agent_collab_state")
 
 
 def read_text_arg(value: str | None, file_value: Path | None) -> str:
@@ -863,21 +834,6 @@ def write_settings_file(path: Path, settings: dict[str, Any]) -> None:
             "settings": normalized,
         },
     )
-
-
-def git_output(repo_root: Path, args: list[str]) -> str:
-    try:
-        completed = subprocess.run(
-            ["git", *args],
-            cwd=repo_root,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
-    except FileNotFoundError:
-        return ""
-    return completed.stdout.strip()
 
 
 def snapshot_json_path(output_path: Path) -> Path:
@@ -2571,7 +2527,7 @@ def validate_host_result(report: dict[str, Any], request: dict[str, Any], run_di
 
 
 def validate_peer_report_matches_request(report: dict[str, Any], request: dict[str, Any]) -> None:
-    for key in ("run_id", "origin", "host", "peer", "mode", "target"):
+    for key in load_peer_runtime().PEER_REPORT_REQUEST_BINDING_KEYS:
         if report.get(key) != request.get(key):
             raise PeerReportRequestMismatch(f"peer report {key} does not match host request")
 
@@ -2713,10 +2669,6 @@ def load_helper_evidence(
             validate_claim_shape(claim, "helper-report")
             claims.append({**claim, "source": "helper"})
     return claims, canonical_artifact_sha256(data)
-
-
-def load_helper_claims(run_dir: Path, request: dict[str, Any]) -> list[dict[str, Any]]:
-    return load_helper_evidence(run_dir, request)[0]
 
 
 def build_claim_matrix(
@@ -4048,22 +4000,6 @@ def settings_from_args(args: argparse.Namespace) -> dict[str, Any]:
     if getattr(args, "timeout_seconds", None) is not None:
         updates["agent_timeout_seconds"] = args.timeout_seconds
     return normalize_settings(updates, "setup arguments")
-
-
-def choose_option(label: str, current: str, options: list[str]) -> str:
-    while True:
-        print(f"{label} [{current}]")
-        for index, option in enumerate(options, start=1):
-            marker = " (current)" if option == current else ""
-            print(f"  {index}. {option}{marker}")
-        answer = input("> ").strip()
-        if not answer:
-            return current
-        if answer.isdigit() and 1 <= int(answer) <= len(options):
-            return options[int(answer) - 1]
-        if answer in options:
-            return answer
-        print(f"Choose one of: {', '.join(options)}")
 
 
 def choose_text(label: str, current: str) -> str:

@@ -243,6 +243,27 @@ def terminate_process_group(
     }
 
 
+def codex_bundled_bwrap(env: Mapping[str, str] | None = None) -> str | None:
+    """Locate the bubblewrap Codex falls back to when none is on PATH.
+
+    Codex 0.163.0 checks its package resources directory and then legacy
+    `codex-resources/bwrap` locations next to the resolved executable.
+    """
+
+    codex = shutil.which("codex", path=(env or os.environ).get("PATH"))
+    if codex is None:
+        return None
+    exe_dir = Path(codex).resolve().parent
+    for candidate in (
+        exe_dir.parent / "codex-resources" / "bwrap",
+        exe_dir / "codex-resources" / "bwrap",
+        exe_dir / "bwrap",
+    ):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
+
+
 def sandbox_preflight(repo_root: Path, env: Mapping[str, str] | None = None) -> dict[str, Any]:
     """Exercise Linux bubblewrap once without launching a peer.
 
@@ -259,12 +280,12 @@ def sandbox_preflight(repo_root: Path, env: Mapping[str, str] | None = None) -> 
             "backend": "provider_native",
             "details": f"Linux bwrap preflight is not applicable on {sys.platform}",
         }
-    executable = shutil.which("bwrap", path=(env or os.environ).get("PATH"))
+    executable = shutil.which("bwrap", path=(env or os.environ).get("PATH")) or codex_bundled_bwrap(env)
     if executable is None:
         return {
             "status": "sandbox_unavailable",
             "backend": "bwrap",
-            "details": "bubblewrap executable was not found on PATH",
+            "details": "bubblewrap was not found on PATH or bundled with the Codex CLI",
         }
     command = [
         executable,
