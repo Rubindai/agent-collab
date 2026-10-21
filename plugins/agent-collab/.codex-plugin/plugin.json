@@ -1,6 +1,6 @@
 {
   "name": "agent-collab",
-  "version": "4.0.0",
+  "version": "5.0.0",
   "description": "Repo-grounded Claude and Codex collaboration workflow with independent peer verification, helper agents, and synthesis support.",
   "author": {
     "name": "Agent Collab"
@@ -14,8 +14,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Agent Collab",
-    "shortDescription": "Independent Claude/Codex review and verification.",
-    "longDescription": "Run peer-first Claude and Codex collaboration with strict v2 run contracts, current model defaults, independent analysis, and evidence-backed synthesis.",
+    "shortDescription": "Cross-check with Claude/Codex",
+    "longDescription": "Run peer-first Claude and Codex collaboration with exact model attestation, strict schema 2.0 run artifacts, independent analysis, and evidence-backed synthesis.",
     "developerName": "Agent Collab",
     "category": "Productivity",
     "capabilities": [

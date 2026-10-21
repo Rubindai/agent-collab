@@ -1,5 +1,21 @@
 # Changelog
 
+## 5.0.0 — 2026-10-21
+
+- **Breaking:** reject `codex_config` entries in, or parent tables of, every Codex namespace that selects the model, provider endpoint, auth, catalog, approval/reviewer, sandbox, tools, memory, or helpers (for example `openai_base_url`, `model_catalog_json`, `approvals_reviewer`, `tools.*`, `sandbox_workspace_write.*`). Settings that contain them must be edited before upgrading.
+- **Breaking:** reject an empty boolean environment value (such as `AGENT_COLLAB_SAFE_MODE=`) instead of treating it as false, reject non-ASCII integer digits, and require the `claude_tools` sentinel to be lowercase `default`.
+- **Breaking:** stop selecting the state root from an inherited `CLAUDE_PLUGIN_DATA`. Claude Code never exports it to Bash-tool commands, so the value always belonged to another plugin whose data directory is deleted on uninstall. Claude-host state now lives under `${XDG_STATE_HOME:-~/.local/state}/agent-collab`; archive any earlier history from the other plugin's directory.
+- Pass `approval_policy="never"` and `approvals_reviewer="user"` to `codex exec`, which ignores the root `--ask-for-approval` flag and otherwise turns an `auto_review` user config into on-request approvals.
+- Pin the Codex `features.multi_agent_v2` helper cap and disable per-spawn model overrides, so a user `config.toml` cannot widen the helper bound; disable it with helpers.
+- Disable provider memory for peers (Codex `features.memories`/`memory_tool`, Claude `autoMemoryEnabled` and `CLAUDE_CODE_DISABLE_AUTO_MEMORY`) and ask peers not to consult saved memory or earlier run artifacts.
+- Detect Codex model reroutes from the `item.completed` error items `codex exec --json` actually emits.
+- Stop binding the run directory writable into the isolated sandbox, clean up from in-memory mounts, re-verify workspace cleanup after cancel kills a live wrapper, make isolation state writes crash-safe, and bind the peer product's credential file through so rotated refresh tokens persist. Document that Docker, D-Bus/systemd, SSH-agent, and network access remain reachable and unobserved in isolated mode.
+- Close direct-mode snapshot gaps: no false mutation from a read-only `git status`; detect assume-unchanged, skip-worktree, permission-only, textconv-hidden, and submodule content changes; ignore inherited `GIT_*`; disable fsmonitor; and handle non-UTF-8 filenames. The wrapper reuses the host baseline, and the attestation window covers the bounded baseline snapshot.
+- Add peer findings to the claim matrix as unverified rows, bind peer-process deadline metadata to the request, resolve the active run through the worktree guard across host run roots, reject symlinked guards, bound Git probes, defer signals during provider cleanup, release the provider gate only after pending-signal checks, preserve another worktree's or a young startup's runs during `clear-history`, and reject lone surrogates and digit-limit integers in strict JSON.
+- Give helper agents `model: inherit`, scope their descriptions to Agent Collab runs, specify that the host saves the adjudicator's JSON report, and probe the bwrap bundled with Codex for Linux safe mode.
+- Add `scripts/release-check.sh` and a CI workflow; make `sync-packages.sh` use `python3`, parse strictly, compare file modes, and swap generated trees atomically; install only missing isolation packages; make tests hermetic and portable; and add schema/runtime parity tests.
+- Use `$agent-collab:agent-collab` for explicit Codex mentions, document storage locations, catalog caching, and probe limits, and refresh the README, references, and `AGENTS.md` against current documentation.
+
 ## 4.0.0 — 2026-10-21
 
 - Add a Linux system-package setup script for disposable workspaces, with a read-only dependency check and Debian/Ubuntu and Fedora installation paths.

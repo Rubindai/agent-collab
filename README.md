@@ -2,9 +2,9 @@
 
 Agent Collab is a peer-first, challenge-first collaboration plugin for Codex and Claude Code. It launches the opposite product with a neutral brief, keeps the host analysis independent, then validates and combines the evidence.
 
-Version 4.0.0 adds platform-aware workspace modes. Linux full-capability runs default to a disposable copy-on-write workspace; fresh macOS settings default to direct mode with bounded snapshots. The new required `workspace_mode` setting is a breaking change to persisted settings, so recreate existing settings before upgrading. Strict schema 2.0 remains in force, and 1.x settings and run artifacts still have no compatibility layer.
+Version 5.0.0 hardens the launch contract found in the 2026-10-21 audit: Codex peers pin headless approval and the helper caps regardless of user `config.toml`, provider memory is disabled for peers, the isolated workspace no longer exposes host-owned run artifacts, and Agent Collab state no longer follows another plugin's `CLAUDE_PLUGIN_DATA`. Some previously accepted `codex_config` entries and settings values are now rejected; see [CHANGELOG.md](CHANGELOG.md). Strict schema 2.0 remains in force, and 1.x settings and run artifacts still have no compatibility layer.
 
-**Last comprehensive evaluation: 2026-10-18.** All README sections, repository instructions, package contents, and runtime controls were reassessed against current official documentation and local evidence. The evaluation covers correctness and documented behavior; it does not establish optimal review quality, latency, or cost. See [Evaluation evidence](#evaluation-evidence) for scope and outstanding checks. Version 3.0.0 appeared on GitHub `main` without a release tag; formal tags begin with `v4.0.0`.
+**Last comprehensive evaluation: 2026-10-21.** Code, packaging, and documentation were audited against current official Claude Code and Codex documentation and the Codex 0.163.0 source, with an independent Agent Collab Codex peer. See [Evaluation evidence](#evaluation-evidence) for scope and outstanding checks. Version 3.0.0 appeared on GitHub `main` without a release tag; formal tags begin with `v4.0.0`.
 
 ## Defaults
 
@@ -19,7 +19,7 @@ The user can select a model and reasoning or effort level in natural language. T
 
 Claude peer effort may be `low`, `medium`, `high`, `xhigh`, or `max`, subject to exact availability. Claude Code also recognizes `ultracode`, an orchestration mode with effective provider effort `xhigh`. Agent Collab rejects an explicit `ultracode` run with `helper_policy_unavailable` before creating run artifacts: a live test showed that Workflow agents bypass the finite Agent-call counter, and the documented Workflow agent budget does not implement this per-run bound. The runtime disables and denies Workflow for ordinary peers. It never substitutes `xhigh` for an explicit `ultracode` request. `check-availability` still reports provider support separately from this execution-policy restriction. [Claude workflows](https://code.claude.com/docs/en/workflows#behavior-and-limits)
 
-Codex effort support is not a hardcoded Agent Collab list. Immediately before launch, the runtime refreshes `codex debug models` and accepts only an effort advertised for the exact requested model. The refreshed catalog is authoritative; no static effort list determines Codex availability. Actual-run Codex selection events are checked when emitted, and every observed conflict is rejected. If those events are absent, the evidence is the fresh catalog plus explicit launch arguments, not an independently observed provider selection.
+Codex effort support is not a hardcoded Agent Collab list. Immediately before launch, the runtime runs `codex debug models` and accepts only an effort advertised for the exact requested model. Codex serves that catalog from a five-minute cache or an online refresh, and can silently fall back to its bundled catalog when a refresh fails, so the attestation reflects the catalog Codex resolves, not a guaranteed network fetch. `codex exec --json` carries no resolved model or effort. Codex reports a reroute as an `item.completed` error item beginning `model rerouted:`; any reroute to another model fails the run. Without such an item, the evidence is the catalog plus the explicit launch arguments, not an independently observed provider selection.
 
 Examples:
 
@@ -33,8 +33,8 @@ Use Agent Collab and run the Codex peer on gpt-6-astra at high effort.
 
 Availability is checked before a run is created or a peer is launched:
 
-- Codex must advertise the exact model and effort in the freshly refreshed `codex debug models` catalog.
-- Claude Code must complete a bounded, configuration-reduced live probe whose API result `modelUsage` includes the exact resolved model and whose `Stop` hook reports the expected effective effort. The probe runs outside the target repository with filesystem setting sources, built-in tools, and MCP servers disabled; managed provider policy can still apply. Claude Code may also report its documented auxiliary Haiku usage; another primary model is a mismatch. For `ultracode`, the expected provider level is `xhigh`; for every provider-level request it is the requested value. A downgrade or organization cap does not pass as the requested pair.
+- Codex must advertise the exact model and effort in the `codex debug models` catalog it resolves at launch.
+- Claude Code must complete a bounded, configuration-reduced live probe whose API result `modelUsage` includes the exact resolved model and whose `Stop` hook reports the expected effective effort. The probe runs outside the target repository with filesystem setting sources, built-in tools, and MCP servers disabled; managed provider policy can still apply. Because user and project settings are skipped, a lower user or project `maxEffortLevel` or a model allow/deny list can still clamp or refuse the real peer; the actual-run Stop and `modelUsage` checks then fail the run. Claude Code may also report its documented auxiliary Haiku usage; another primary model is a mismatch. For `ultracode`, the expected provider level is `xhigh`; for every provider-level request it is the requested value. A downgrade or organization cap does not pass as the requested pair.
 
 Only an `available` attestation proceeds. `unavailable` and `unknown` stop the entire collaboration attempt before a run, peer, helper, host-first-pass, or adjudicator is created, and the host must notify the user with the probe evidence. Model/effort rejection, authentication or authorization denial, and provider quota/rate-limit responses are reported as unavailable; timeouts, malformed telemetry, and indeterminate provider failures remain unknown. Agent Collab never substitutes or retries another model or effort.
 
@@ -50,7 +50,7 @@ The explicit-only Fable rule is stricter than this general precedence order: `cl
 
 - Codex CLI 0.163.0 or newer
 - Claude Code 2.1.295 or newer
-- Python 3.10 or newer
+- Python 3.10 or newer, invoked as `python3` in the commands below
 - Git for workspace detection and Git-aware snapshots; non-Git directories use filesystem snapshots
 - Linux or macOS with POSIX process groups and file locking. Windows peer launch is rejected before run artifacts are created because equivalent supervision is not implemented.
 - On Linux, the default disposable workspace requires `fuse-overlayfs`, `fusermount3` (or `fusermount`), and `bwrap` with working FUSE/user namespaces. `start` runs a write/discard probe before creating a run. Fresh macOS settings default to direct mode with bounded persisted snapshots. Explicit isolated settings on macOS fail before run creation; they never fall back to direct.
@@ -66,10 +66,10 @@ Linux full-capability runs use a disposable workspace and need Bubblewrap, FUSE 
 ```bash
 scripts/install-linux-isolation-deps.sh --check
 scripts/install-linux-isolation-deps.sh --install
-python tools/agent-collab/scripts/host.py doctor
+python3 tools/agent-collab/scripts/host.py doctor
 ```
 
-The script installs `bubblewrap`, `fuse-overlayfs`, and `fuse3` with `apt-get` on Debian/Ubuntu or `dnf` on Fedora. It uses `sudo` when needed and skips package installation when the commands are already available. With isolated workspace mode selected, `doctor` verifies that FUSE and user namespaces work on this host; having the commands installed alone is insufficient. On other Linux distributions, install those packages with the distribution's package manager, then run `doctor`. The script does not install the Agent Collab plugin; use the host marketplace steps below.
+The script installs only the missing packages among `bubblewrap`, `fuse-overlayfs`, and `fuse3` with `apt-get` on Debian/Ubuntu or `dnf` on Fedora; an existing fuse2 `fusermount` satisfies cleanup, so `fuse3` is not added beside it. It uses `sudo` when needed and skips installation when the commands are already available. With isolated workspace mode selected, `doctor` verifies that FUSE and user namespaces work on this host; having the commands installed alone is insufficient. On other Linux distributions, install those packages with the distribution's package manager, then run `doctor`. The script does not install the Agent Collab plugin; use the host marketplace steps below.
 
 ### Codex
 
@@ -124,23 +124,24 @@ claude plugin marketplace update agent-collab
 claude plugin update agent-collab@agent-collab --scope user
 ```
 
-For a local checkout, pull the repository first and rerun `codex plugin add agent-collab@agent-collab`, then start a new Codex session. Current Claude Code reads a local marketplace's relative-path plugin directly from that checkout; use `/reload-plugins` or start a new session after edits. Hosted Claude marketplaces use cached copies and the update flow above. Check the installed source and package contents, not only the version or cache timestamp. Direct cache edits are unsupported. [Claude local marketplace edits](https://code.claude.com/docs/en/plugin-marketplaces#test-an-edit-to-a-plugin), [Codex plugin commands](https://learn.chatgpt.com/docs/developer-commands?surface=cli#cli-codex-plugin)
+For a local checkout, pull the repository first and rerun `codex plugin add agent-collab@agent-collab`, then start a new Codex session. Current Claude Code reads a local marketplace's relative-path plugin directly from that checkout; use `/reload-plugins` or start a new session after edits. `installed_plugins.json` still records a cache `installPath`; `claude plugin list --json` shows the real load folder as `readFromFolder`. Hosted Claude marketplaces use cached copies and the update flow above. Check the installed source and package contents, not only the version or cache timestamp. Direct cache edits are unsupported. [Claude plugin loading](https://code.claude.com/docs/en/plugins/loading#in-place-and-copied-plugins), [Codex plugin commands](https://learn.chatgpt.com/docs/developer-commands?surface=cli#cli-codex-plugin)
 
 Official references:
 
 - [OpenAI: Package plugins](https://developers.openai.com/plugins/build/plugins)
-- [OpenAI: Codex non-interactive mode](https://developers.openai.com/codex/noninteractive)
+- [OpenAI: Codex non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode)
 - [OpenAI: Current model catalog](https://developers.openai.com/api/docs/models)
 - [OpenAI: GPT-6 Astra](https://developers.openai.com/api/docs/guides/latest-model/gpt-6-astra.md)
 - [OpenAI: Codex models](https://learn.chatgpt.com/docs/models)
 - [OpenAI: `codex debug models`](https://learn.chatgpt.com/docs/developer-commands?surface=cli#cli-codex-debug-models)
 - [OpenAI: GPT-6 Astra prompting guidance](https://developers.openai.com/api/docs/guides/latest-model/gpt-6-astra.md#prompting-best-practices)
 - [OpenAI: Rethinking skills and prompts for GPT-6 Astra](https://developers.openai.com/blog/rethinking-skills-and-prompts-for-gpt-6-astra)
-- [OpenAI: Codex prompting](https://developers.openai.com/codex/prompting)
+- [OpenAI: Codex prompting](https://learn.chatgpt.com/docs/prompting)
 - [OpenAI: Codex subagents](https://learn.chatgpt.com/docs/agent-configuration/subagents)
 - [OpenAI: Project instructions](https://learn.chatgpt.com/docs/agent-configuration/agents-md)
 - [OpenAI: API prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching)
 - [Anthropic: Create plugin marketplaces](https://code.claude.com/docs/en/plugin-marketplaces)
+- [Anthropic: Plugin manifest reference](https://code.claude.com/docs/en/plugins-reference)
 - [Anthropic: Claude Code CLI reference](https://code.claude.com/docs/en/cli-usage)
 - [Anthropic: Claude Code best practices](https://code.claude.com/docs/en/best-practices)
 - [Anthropic: Model and effort configuration](https://code.claude.com/docs/en/model-config)
@@ -171,10 +172,10 @@ Use agent collab to audit this change.
 
 This explicitly requests the real opposite-product peer workflow, including availability checks, independent host analysis, synthesis, and closure. An acknowledgement or host-only review does not satisfy it. Quoted examples and questions about the plugin do not launch it by themselves. These discovery instructions guide the host; this repository cannot intercept every host message or guarantee skill selection by an external client.
 
-Codex:
+Codex (plugin skills are namespaced, so the explicit mention is the full skill name):
 
 ```text
-Use $agent-collab to review the current diff.
+Use $agent-collab:agent-collab to review the current diff.
 ```
 
 Claude Code:
@@ -200,32 +201,47 @@ The host resolves the Agent Collab launch request before launch. `host-request.j
 Current peer commands use only current CLI surfaces:
 
 ```text
-codex --ask-for-approval never exec --strict-config --ephemeral ...
-  --sandbox danger-full-access
+codex exec --strict-config --ephemeral --json --cd <repo>
+  --sandbox danger-full-access|read-only
+  --output-schema <provider schema> --output-last-message <tmp>/peer-output.json
   --model <resolved-model>
+  [-c <user codex_config entry>]...
   -c model_reasoning_effort="<resolved-effort>"
   -c web_search="live|disabled"
+  -c approval_policy="never" -c approvals_reviewer="user"
+  -c features.memories=false -c features.memory_tool=false
+  -c agents.enabled=true -c agents.max_concurrent_threads_per_session=<N>
+  -c features.multi_agent_v2.max_concurrent_threads_per_session=<N+1>
+  -c features.multi_agent_v2.expose_spawn_agent_model_overrides=false
+  -c agents.default_subagent_model="<model>" -c agents.default_subagent_reasoning_effort="<effort>"
+  -
 
 claude -p
   --model <resolved-model>
   --effort <resolved-effort>
-  --permission-mode bypassPermissions
-  --tools default
+  --permission-mode bypassPermissions|plan
   --no-session-persistence
-  --settings '{"availableModels":["<resolved-model>"],"fallbackModel":[],"switchModelsOnFlag":false,"disableAllHooks":false,"hooks":{...}}'
-  --json-schema ...
+  --settings '{"availableModels":["<model>"],"fallbackModel":[],"switchModelsOnFlag":false,
+              "crossSessionInbound":"refuse","disableWorkflows":true,"ultracode":false,
+              "autoMemoryEnabled":false,"disableAllHooks":false,"env":{...},
+              "hooks":{"PreToolUse":[Agent counter],"Stop":[effort capture]}}'
+  --json-schema <provider schema>
   --output-format json
+  --disallowedTools Workflow,Agent(fork)[,WebSearch,WebFetch][,Agent]
+  --tools default|<list>
 ```
 
-The Claude peer process also sets `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1`, which keeps provider-launched helpers to one layer. The finite total `Agent`-call hook remains a separate bound.
+`--tools` is last because it is variadic. With helpers disabled, Codex receives `agents.enabled=false` and `features.multi_agent_v2=false` instead of the helper caps. The Claude peer process (and its settings `env`) also sets `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1`, which keeps provider-launched helpers to one layer, `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, and `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS` equal to the peer deadline so print mode does not drop background helper results after its default ten idle minutes. The finite total `Agent`-call hook remains a separate bound.
 
 The normal Claude command deliberately omits `--max-turns`. Anthropic documents no turn limit by default. A user can opt into a positive cap for one run with `--claude-max-turns N`; only then does Agent Collab add `--max-turns N`.
 
 Agent Collab safe mode changes a Codex peer to `read-only` and a Claude peer to `plan`; it uses direct workspace mode unless an explicit incompatible isolated selection is rejected. On Linux, a safe-mode Codex peer preflights the `bwrap` backend used by Codex read-only sandboxing. A safe-mode Claude peer uses provider-native `plan` permissions, not an OS container. Full-capability isolated mode separately preflights FUSE OverlayFS and `bwrap` for either peer, then gives the provider full tool permissions inside a disposable copy-on-write workspace. A failed preflight returns structured `sandbox_unavailable` evidence before run creation. Online research can be changed independently with `--online-research` or `--no-online-research`.
 
-The reported pre-1.0 message `Codex sandbox is still broken (bwrap user-namespace failure) — implementing directly as planned.` has unverified historical provenance. The Codex safe-mode preflight passed on the evaluation host on 2026-10-18, but that did not establish a complete provider run. The new disposable-workspace preflight is a separate write/discard test and does not replace exact-pair availability attestation.
+Linux safe mode for a Codex peer preflights bubblewrap from PATH, or the copy bundled with the Codex CLI, before run creation. That initialization check does not establish a complete safe-mode provider run, and it is separate from the disposable-workspace write/discard preflight and from exact-pair availability attestation.
 
 The online-research toggle controls the provider's built-in web research tools used by Agent Collab. For Claude Code these are the CLI's built-in `WebSearch` and `WebFetch` tools. This toggle is not a general network-isolation guarantee: full-capability shells, MCP tools, plugins, and provider configuration may have separate network behavior.
+
+`codex exec` does not inherit the root `--ask-for-approval` flag, and it drops its headless `never` default when the user's config sets `approvals_reviewer = "auto_review"`. The explicit `approval_policy` and `approvals_reviewer` overrides keep every peer non-interactive with no auto-reviewer, in both modes. Managed Codex configuration can still outrank command-line overrides.
 
 Persisted settings, state, requests, helper reports, and synthesis artifacts use strict schema 2.0 contracts. Old, incomplete, noncanonical, or wrongly typed files are rejected rather than migrated or coerced. Claude success is accepted only from `structured_output`; Codex success is accepted only from its required `--output-last-message` artifact. The provider-facing `peer-report-provider.schema.json` intentionally uses the portable structured-output subset accepted by both CLIs. The runtime then validates the result against the canonical `peer-report.schema.json` and semantic request relations, including exact run, origin, host, peer, mode, and target binding. `peer-normalization.schema.json` separately constrains raw-provider extraction and canonical-report validation evidence; host reconstruction preserves extraction warnings.
 
@@ -260,29 +276,31 @@ The prompt is an instruction to the peer, not a sandbox or a higher-precedence s
 
 ## Permissions and recursion
 
-Full capability is the configured default. On Linux, the default disposable workspace lets the peer write temporarily to an overlay of the repository and HOME; those writes are discarded after the run. The rest of the host filesystem is mounted read-only, except the Agent Collab run directory and temporary provider artifacts. On macOS, fresh settings default to direct host access with before/after mutation snapshots. These snapshots detect included changes after the fact; they do not prevent or undo edits. Neither posture is a complete host-damage boundary: networking, MCP tools, plugins, sockets, and external services can still have effects. Anthropic recommends `bypassPermissions` only inside isolated containers, virtual machines, or development containers without internet access where host damage is impossible. Select safe mode for provider-native restrictions; on Linux, use `--workspace-mode direct` when direct host access is intended:
+Full capability is the configured default. On Linux, the default disposable workspace lets the peer write temporarily to an overlay of the repository and HOME; those writes are discarded after the run. The rest of the host filesystem is mounted read-only, except a private temporary directory for provider outputs and the peer product's credential file (`~/.codex/auth.json` or `~/.claude/.credentials.json`), which is bound through so a rotated refresh token is never discarded with the overlay and the host stays logged in. Host-owned run artifacts are not writable from the sandbox. On macOS, fresh settings default to direct host access with before/after mutation snapshots. These snapshots detect included changes after the fact; they do not prevent or undo edits.
 
-- Codex peers use `danger-full-access` with approval set to `never`.
-- Claude peers use `bypassPermissions`; `--tools default` exposes every current built-in tool. `bypassPermissions` skips the permission layer and does not protect against prompt injection or unintended actions. Provider and organization policy can still refuse this mode.
-- Native helpers retain the full tool and permission context of the host in full mode. Agent Collab adds no helper `tools` or `disallowedTools` frontmatter restriction; the peer launch separately applies research, zero-helper, and conversation-fork controls, while provider, organization, session, and tool-specific policies still apply. Configured MCP tools are not restricted by Claude's `--tools` built-in-tool selector.
+Neither posture is a containment boundary. The isolated sandbox deliberately keeps host-facing facilities reachable so full-capability peers can run real tooling: networking, MCP tools, plugins, the user's Docker daemon socket (root-equivalent for members of the `docker` group, and its bind mounts resolve the real repository rather than the overlay), the D-Bus session bus and systemd user manager (which can start processes outside the sandbox), the SSH agent, and external services. Writes made through those channels persist, and isolated mode takes no content snapshot that would detect them. Anthropic recommends `bypassPermissions` only inside isolated containers, virtual machines, or development containers without internet access where host damage is impossible. Select safe mode for provider-native restrictions; on Linux, use `--workspace-mode direct` when direct host access is intended:
+
+- Codex peers use `danger-full-access` with `approval_policy="never"` and `approvals_reviewer="user"` passed to `codex exec`.
+- Claude peers use `bypassPermissions`; `--tools default` selects Claude Code's default built-in set (on macOS, Linux, and WSL that set omits `Glob` and `Grep`, and some tools are opt-in). `bypassPermissions` skips the permission layer and does not protect against prompt injection or unintended actions. Provider and organization policy can still refuse this mode.
+- Native helpers keep the host's permission context in full mode; Claude subagents that run in the background receive Claude Code's documented background tool subset. Agent Collab adds no helper `tools` or `disallowedTools` frontmatter restriction; the peer launch separately applies research, zero-helper, and conversation-fork controls, while provider, organization, session, and tool-specific policies still apply. Configured MCP tools are not restricted by Claude's `--tools` built-in-tool selector.
 
 For a non-Git workspace, the Codex peer launcher passes `--skip-git-repo-check` after a lightweight Git probe in isolated mode or the filesystem snapshot in direct mode. Codex keeps its repository check for Git workspaces. [OpenAI non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode#git-repository-required)
 
-Capability is not permission to make durable edits. `edit_allowed` defaults to `false`; `--edit-allowed` requires explicit delegation and must be paired with `--workspace-mode direct`, because isolated writes are discarded. Isolated mode writes a small boundary receipt instead of hashing repository contents. Its host mutation result describes the overlay boundary and does not detect changes made outside it. The run directory is deliberately writable by the peer for reports and hooks. The peer can also affect network services, devices, and sockets that remain accessible.
+Capability is not permission to make durable edits. `edit_allowed` defaults to `false`; `--edit-allowed` requires explicit delegation and must be paired with `--workspace-mode direct`, because isolated writes are discarded. Isolated mode writes a small boundary receipt instead of hashing repository contents. Its host mutation result describes the overlay boundary and does not detect changes made outside it. Provider reports and hook receipts are written to the private temporary directory and read by the wrapper after the provider exits; the run directory itself is not writable from the sandbox. The peer can still affect network services, devices, and sockets that remain accessible.
 
-Direct mode retains before/after mutation snapshots as detective evidence. The baseline JSON must fit the 16 MiB reader limit, so large tracked-status and file manifests retain complete digests and counts with bounded path samples; Git index and patch output is streamed into digests. The persisted snapshot stays bounded as the file count grows, but scanning included contents still scales with file count and bytes. A very large ignored tree can exhaust the finite 300-second snapshot deadline. Direct mode covers tracked, untracked, most ignored, and selected Git-control surfaces, with exclusions for high-volume generated/dependency directories. Transient changes reverted between snapshots and changes outside the repository are not observed. Interrupted cancellation reuses its committed snapshot diagnostic.
+Direct mode retains before/after mutation snapshots as detective evidence. The baseline JSON must fit the 16 MiB reader limit, so large tracked-status and file manifests retain complete digests and counts with bounded path samples; Git index and patch output is streamed into digests. The persisted snapshot stays bounded as the file count grows, but scanning included contents still scales with file count and bytes. A very large ignored tree can exhaust the finite 300-second snapshot deadline. Direct mode covers tracked, untracked, most ignored, and selected Git-control surfaces. Tracked files are compared through `git status`, raw `git diff --binary --no-textconv --submodule=diff` digests, a `git ls-files --stage -v` index digest (which also records assume-unchanged and skip-worktree flags), and a tracked-path manifest of file type and permission bits, with content hashes for paths Git deliberately skips. A read-only `git status` that refreshes the index stat cache is not reported as a mutation. Snapshot Git commands ignore inherited `GIT_*` variables and disable fsmonitor. Untracked and ignored files are excluded at any depth inside directories named `.cache`, `.git`, `.hg`, `.mypy_cache`, `.next`, `.pytest_cache`, `.ruff_cache`, `.svn`, `.temp`, `.tmp`, `.tox`, `.venv`, `__pycache__`, `build`, `coverage`, `dist`, `htmlcov`, `node_modules`, `target`, `temp`, `tmp`, or `venv`; tracked files in those directories remain covered. Untracked files inside submodules, transient changes reverted between snapshots, and changes outside the repository are not observed. The wrapper reuses the host's committed baseline instead of scanning twice. Interrupted cancellation reuses its committed snapshot diagnostic.
 
-Only one Agent Collab workflow can be active per Git worktree. `start` atomically acquires a guard under the worktree Git metadata before creating artifacts; every runtime copy for that worktree sees the same guard. A stable per-worktree OS file lock serializes every guard check, stale-start recovery, acquisition, update, and release with a bounded lock wait, so a stale recoverer cannot delete a replacement run. Unavailable process-identity evidence preserves the guard; only a proven dead or replaced starting launcher permits automatic recovery. A separate bounded per-run operation lock serializes terminal `finish`, `complete`, and `cancel` transitions without holding a lock while `finish` waits for a live provider. A startup gate prevents the peer wrapper from running until that guard and its process artifact are committed, and a second gate prevents provider exec until a strict provider-process tracker is committed. The guard remains active across the peer, host-local helpers, adjudication, and synthesis. `complete` or `cancel` releases it only after tracked wrapper/provider groups are terminal and quiescent. This is process-group supervision, not descendant containment: detached groups, remote work, and external sessions are outside that proof. This guard is the hard cross-product recursion boundary. The runtime blocks Claude peer `Agent` calls above the resolved total-call bound and sets Claude's documented subagent-spawn depth to one layer; a zero bound directly denies `Agent`. It configures Codex's documented concurrent spawned-thread cap, while Codex total helper calls and nesting depth remain explicit instructions rather than provider-enforced ceilings. The absolute peer deadline bounds the tracked provider execution. Helper-report admission is capped at the resolved bound, eight by default. Workflow agents were observed bypassing the Agent hook in an isolated live zero-helper test, so Workflow is disabled in command-line settings and denied as a tool. The brief also restricts delegation to ordinary native helpers. Other facilities such as shells, MCP, remote sessions (including RemoteTrigger), scheduled work (including CronCreate), and external processes remain outside a universal spawn cap. Host-native helper launch discipline is also stated in the skill, but the shared runtime cannot intercept every host tool call.
+Only one Agent Collab workflow can be active per Git worktree. `start` atomically acquires a guard under the worktree Git metadata before creating artifacts; every runtime copy for that worktree sees the same guard, a symlinked guard is rejected, and the bounded Git probes that locate it ignore inherited `GIT_*` variables. Because each host keeps its own run root, `status`, `result`, `finish`, `complete`, and `cancel` also resolve the active run by ID through that guard. A stable per-worktree OS file lock serializes every guard check, stale-start recovery, acquisition, update, and release with a bounded lock wait, so a stale recoverer cannot delete a replacement run. Unavailable process-identity evidence preserves the guard; only a proven dead or replaced starting launcher permits automatic recovery. A separate bounded per-run operation lock serializes terminal `finish`, `complete`, and `cancel` transitions without holding a lock while `finish` waits for a live provider. A startup gate prevents the peer wrapper from running until that guard and its process artifact are committed, and a second gate prevents provider exec until a strict provider-process tracker is committed. The guard remains active across the peer, host-local helpers, adjudication, and synthesis. `complete` or `cancel` releases it only after tracked wrapper/provider groups are terminal and quiescent. This is process-group supervision, not descendant containment: detached groups, remote work, and external sessions are outside that proof. This guard is the hard cross-product recursion boundary. The runtime blocks Claude peer `Agent` calls above the resolved total-call bound and sets Claude's documented subagent-spawn depth to one layer; a zero bound directly denies `Agent`. It configures Codex's concurrent spawned-thread cap through both `agents.max_concurrent_threads_per_session` and the `features.multi_agent_v2` table, which Codex reads first, so a user `config.toml` cannot widen it; per-spawn model and effort overrides are disabled. Codex total helper calls and nesting depth remain explicit instructions rather than provider-enforced ceilings, and an explicitly requested Codex `ultra` effort (automatic task delegation) is propagated to helper defaults under the same bounds. The Claude `Agent`-call counter lives in the provider's writable temporary directory, so it bounds cooperative use; a peer with shell access could reset it. Outbound cross-session tools (`SendMessage`, `ListAgents`) remain available to a Claude peer; only inbound messages are refused. The absolute peer deadline bounds the tracked provider execution. The host evaluates that deadline against wall-clock time recorded at launch, so time spent suspended counts toward it. Helper-report admission is capped at the resolved bound, eight by default. Workflow agents were observed bypassing the Agent hook in an isolated live zero-helper test, so Workflow is disabled in command-line settings and denied as a tool. The brief also restricts delegation to ordinary native helpers. Other facilities such as shells, MCP, remote sessions (including RemoteTrigger), scheduled work (including CronCreate), and external processes remain outside a universal spawn cap. Host-native helper launch discipline is also stated in the skill, but the shared runtime cannot intercept every host tool call.
 
 Independent helpers start in fresh contexts with a neutral bounded task, required inputs, edit authorization, remaining deadline, and expected evidence. Do not copy parent conversation history or use custom agents or explicit spawn arguments that override the spawning agent's model or effort. Reuse a helper for follow-up work. The Codex prompt explicitly limits total spawns to the resolved helper count even after threads close; only concurrency is provider-enforced. Claude inbound cross-session messages are refused to preserve review independence. Its own helper `SendMessage` resumes remain available and do not consume an `Agent` call, so the call counter is not a cap on all resumed work; the absolute peer deadline still applies. For explicitly authorized parallel edits, assign disjoint writable paths and one integration owner, serialize overlaps, and preserve other agents' changes. [OpenAI subagents](https://learn.chatgpt.com/docs/agent-configuration/subagents), [Anthropic subagents](https://code.claude.com/docs/en/sub-agents)
 
 Cancellation is append-only. It never replaces `peer-report.json`, `peer-normalization.json`, `host-result.json`, `host-synthesis.json`, or `claim-matrix.json`. After proving process-tree quiescence it writes immutable `cancel-result.json`, hashes the designated pre-existing report, raw-output, normalization, result, synthesis, and claim-matrix artifacts, and records mutation comparison separately in `cancel-workspace-mutation.json`. Other telemetry files are not covered by those hashes. If a valid terminal peer report already exists, `cancel` keeps the guard and directs the host to `finish` so completed evidence is not reclassified as cancellation.
 
-For Claude runs, the runtime removes conflicting effort environment overrides, sets `CLAUDE_CODE_EFFORT_LEVEL` to the requested provider level, and supplies command-line settings that restrict `availableModels` to the exact request, empty `fallbackModel`, set `switchModelsOnFlag=false`, and explicitly keep hooks enabled. Command-line settings outrank user, project, and local settings; managed policy remains authoritative. Current Claude Code replaces the ordered `fallbackModel` chain by precedence, while non-managed `availableModels` arrays can merge and model entries can prefix-match extended identifiers. `availableModels` is not an exact model lock. Refusal fallback is separate: `switchModelsOnFlag=false` ends a flagged non-interactive main turn with a refusal, but subagents have documented exceptions. Exact-model live attestation and post-run `modelUsage` checks therefore remain necessary; these are not a universal prevention guarantee for provider substitutions. The probe requires its Stop hook to run, so policies that suppress it fail launch closed. Agent Collab never selects or retries a fallback and rejects observable primary-model mismatches. [Settings precedence](https://code.claude.com/docs/en/settings#lists-merge-instead-of-overriding), [Model fallback](https://code.claude.com/docs/en/model-config#ask-before-switching)
+For Claude runs, the runtime removes conflicting effort environment overrides, sets `CLAUDE_CODE_EFFORT_LEVEL` to the requested provider level, and supplies command-line settings that restrict `availableModels` to the exact request, empty `fallbackModel`, set `switchModelsOnFlag=false`, and explicitly keep hooks enabled. Command-line settings outrank user, project, and local settings; managed policy remains authoritative. Current Claude Code replaces the ordered `fallbackModel` chain by precedence, while non-managed `availableModels` arrays can merge and model entries can prefix-match extended identifiers. `availableModels` is not an exact model lock. Refusal fallback is separate: `switchModelsOnFlag=false` ends a flagged non-interactive main turn with a refusal, but subagents have documented exceptions. Exact-model live attestation and post-run `modelUsage` checks therefore remain necessary; these are not a universal prevention guarantee for provider substitutions. Claude Code checks the fallback model against `availableModels` and blocks a fallback that list excludes. The probe requires its Stop hook to run, so policies that suppress it fail launch closed. Agent Collab never selects or retries a fallback and rejects observable primary-model mismatches. The exact `modelUsage` match and the auxiliary-Haiku allowance target first-party model identifiers; Bedrock, Vertex, Foundry, or gateway identifiers fail closed as unexpected models. The runtime depends on non-bare `-p`, which loads OAuth sign-in and `--settings` hooks; if Claude Code makes `--bare` the `-p` default, the Stop-hook evidence fails closed until an explicit opt-out is adopted. [Settings precedence](https://code.claude.com/docs/en/settings#lists-merge-instead-of-overriding), [Model fallback](https://code.claude.com/docs/en/model-config#automatic-model-fallback), [Headless mode](https://code.claude.com/docs/en/headless)
 
 ## Settings audit
 
-The original settings audit was completed on 2026-07-26; all settings and launch-control claims were reassessed on 2026-10-18 with Codex CLI `0.163.0` and Claude Code `2.1.302`. Provider documentation defines what each control does; defaults remain Agent Collab product decisions. The helper count, deadline, and high-effort defaults have not been established as cost or latency optima.
+The original settings audit was completed on 2026-07-26; all settings and launch-control claims were reassessed on 2026-10-21 with Codex CLI `0.163.0` (including its source) and Claude Code `2.1.305`. Provider documentation defines what each control does; defaults remain Agent Collab product decisions. The helper count, deadline, and high-effort defaults have not been established as cost or latency optima.
 
 ### Persisted Agent Collab settings
 
@@ -296,8 +314,8 @@ The original settings audit was completed on 2026-07-26; all settings and launch
 | `workspace_mode` | Linux: `isolated`; macOS: `direct` | Linux uses copy-on-write HOME and repository overlays with full provider tools inside, after a successful `fuse-overlayfs` and `bwrap` write/discard preflight. macOS uses direct host filesystem access and bounded persisted mutation snapshots by default; snapshots do not prevent edits and still read included file contents. Explicit settings and per-run choices are preserved. Safe mode resolves to `direct` unless a conflicting isolated selection is explicitly requested. |
 | `codex_model` | `gpt-6-astra` | Explicit GPT-6 Astra default for independent peer work. Availability still requires the exact ID in the refreshed Codex catalog. [OpenAI GPT-6 guide](https://developers.openai.com/api/docs/guides/latest-model/gpt-6-astra.md) |
 | `codex_effort` | `xhigh` | Project-selected default. Preserve per-run overrides and validate each pair against the live model entry; this is not a universal provider recommendation. |
-| `online_research` | `true` | Maps only the provider research tools Agent Collab configures: Codex `web_search=live`, and Claude Code built-in `WebSearch`/`WebFetch` availability. Current-source verification is central to the research use case. This setting does not restrict network access through shells, MCP, plugins, or other provider facilities. [OpenAI web-search configuration](https://learn.chatgpt.com/docs/config-file/config-reference), [Anthropic CLI reference](https://code.claude.com/docs/en/cli-usage) |
-| `codex_config` | `[]` | Optional additive Codex `-c key=value` entries, a documented CLI surface. Empty by default to minimize hidden policy. Agent Collab rejects overrides of its owned model, provider routing, profiles, effort, sandbox, approval, web-search, and helper keys so the immutable request cannot disagree with the actual launch. [OpenAI Codex CLI reference](https://learn.chatgpt.com/docs/developer-commands?surface=cli#cli-codex-exec) |
+| `online_research` | `true` | Maps only the provider research tools Agent Collab configures: Codex `web_search=live`, and Claude Code built-in `WebSearch`/`WebFetch` availability. Current-source verification is central to the research use case. This setting does not restrict network access through shells, MCP, plugins (including Codex's bundled browser plugins), or other provider facilities. [OpenAI web-search configuration](https://learn.chatgpt.com/docs/config-file/config-reference), [Anthropic CLI reference](https://code.claude.com/docs/en/cli-usage) |
+| `codex_config` | `[]` | Optional additive Codex `-c key=value` entries, a documented CLI surface. Empty by default to minimize hidden policy. Agent Collab rejects every entry in, or a parent table of, the namespaces it owns: model and effort selection (`model`, `model_reasoning_effort`, `plan_mode_reasoning_effort`, `review_model`, `service_tier`, `daybreak`), provider routing and auth (`model_provider`, `model_providers`, `openai_base_url`, `chatgpt_base_url`, `oss_provider`, `cli_auth_credentials_store`, `forced_login_method`, `forced_chatgpt_workspace_id`, `responses_api_metadata`, `apps_mcp_product_sku`, `experimental_realtime_*`), the catalog (`model_catalog_json`), approval (`approval_policy`, `approvals_reviewer`, `auto_review`), sandboxing (`sandbox_mode`, `sandbox_workspace_write`, `default_permissions`, `permissions`), research and tools (`web_search`, `tools`), memory (`memories`), helpers (`agents`, `features`), and profiles. The immutable request therefore cannot disagree with the actual launch or its attestation. [OpenAI Codex CLI reference](https://learn.chatgpt.com/docs/developer-commands?surface=cli#cli-codex-exec) |
 | `claude_model` | `claude-opus-5-5` | Fixed Opus 5.5 ID; the live probe must observe this exact primary model. Fable remains explicit-only. [Anthropic Opus 5.5 guide](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-opus-5-5) |
 | `claude_effort` | `xhigh` | Project-selected default, verified through Stop-hook telemetry. Explicit `max` remains supported when attested. `ultracode` provider support can be probed, but bounded peer execution rejects that orchestration mode. [Anthropic effort](https://platform.claude.com/docs/en/build-with-claude/effort) |
 | `claude_tools` | `default` | Keeps Claude's normal built-in tool surface in full-capability mode so the peer can inspect, test, and research. `default` is an exclusive sentinel rather than a list member. Online-research, zero-helper, and conversation-fork controls are applied separately with `--disallowedTools`. MCP tools and provider-managed policy are outside this selector. [Anthropic CLI reference](https://code.claude.com/docs/en/cli-usage) |
@@ -325,11 +343,12 @@ The original settings audit was completed on 2026-07-26; all settings and launch
 | Codex `--json` | enabled | Produces bounded JSONL lifecycle telemetry retained in `peer-stdout.txt`, including usage when emitted. The required final report is read only from `--output-last-message`; telemetry is never a report fallback. |
 | Codex `--cd` | exact repository root | Makes repository scope explicit and avoids launch-directory ambiguity. |
 | Codex `--output-schema` and `--output-last-message` | provider-compatible peer schema and run artifact | Official structured-output path for stable downstream validation; stdout events are never substituted for the final report. The runtime applies the richer canonical schema and request relations afterward. [OpenAI non-interactive mode](https://developers.openai.com/codex/noninteractive) |
-| Codex `--ask-for-approval never` | always | A background peer cannot answer interactive approval prompts. Safe mode combines this with read-only sandboxing; full mode is intentionally autonomous and carries the documented risk. |
+| Codex `approval_policy="never"`, `approvals_reviewer="user"` | always | A background peer cannot answer interactive approval prompts. `codex exec` ignores the root `--ask-for-approval` flag and rebuilds its approval policy from config when the user's reviewer is `auto_review`; pinning both keys keeps the peer headless with no auto-reviewer. Safe mode combines this with read-only sandboxing; full mode is intentionally autonomous and carries the documented risk. |
+| Codex `features.memories=false`, `features.memory_tool=false` | always | Keeps saved Codex memories, which can hold conclusions from earlier Agent Collab runs, out of the independent peer. `--ephemeral` already prevents memory writes. |
 | Codex `--sandbox` | `danger-full-access` or `read-only` | Full mode supports deep investigation; safe mode is a no-write posture and on Linux first requires a working `bwrap` preflight. |
 | Codex `--model`, `model_reasoning_effort` | exact attested pair | Prevents implicit model/effort selection and makes the request auditable. |
 | Codex `web_search` | `live` or `disabled` | Makes current research intent explicit instead of relying on the full-access default. |
-| Codex `agents.enabled`, `agents.max_concurrent_threads_per_session` | derived helper policy | Uses the current documented multi-agent keys. Agent Collab does not claim a provider-enforced total-call, nesting-depth, or per-helper runtime limit. |
+| Codex `agents.enabled`, `agents.max_concurrent_threads_per_session`, `features.multi_agent_v2.*` | derived helper policy | Uses the current multi-agent keys. `features.multi_agent_v2` outranks the `agents` keys, so it is pinned too: disabled with helpers, otherwise capped at N+1 threads (the root counts) with per-spawn model overrides off. Agent Collab does not claim a provider-enforced total-call, nesting-depth, or per-helper runtime limit. |
 | Codex `agents.default_subagent_model`, `agents.default_subagent_reasoning_effort` | exact requested peer pair | Overrides ambient helper defaults. Custom agent definitions and explicit spawn arguments can still override model or effort, so the brief forbids conflicting agents; this is not a universal helper-selection guarantee. [OpenAI subagents](https://learn.chatgpt.com/docs/agent-configuration/subagents) |
 | Claude `-p` | non-interactive print mode | Required for structured one-shot automation and the CLI's budget/turn controls. |
 | Claude `--model`, `--effort` | exact attested pair | Overrides implicit selection for the session. Agent Collab pins the effective effort in process and command-line settings environments and checks observed model usage afterward. Managed policy remains authoritative. The actual peer must produce valid Stop-hook effort evidence; missing, invalid, or conflicting observations fail with `effort_unverified`. |
@@ -339,14 +358,16 @@ The original settings audit was completed on 2026-07-26; all settings and launch
 | Claude `CLAUDE_CODE_SUBAGENT_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` | exact peer model, `1` | Forces the helper model instead of relying on inheritance or the environment default alone. Force support requires Claude Code 2.1.257+. [Anthropic subagents](https://code.claude.com/docs/en/sub-agents) |
 | Claude `CLAUDE_CODE_EFFORT_LEVEL` | exact effective effort | Overrides helper frontmatter and invocation effort. Provider caps can still apply and must pass availability attestation plus actual-run Stop verification. Explicit `ultracode` execution is blocked by the finite-helper policy. [Anthropic model configuration](https://code.claude.com/docs/en/model-config) |
 | Claude `CLAUDE_CODE_FORK_SUBAGENT`, `--disallowedTools Agent(fork)` | `0`, denied | Prevents copying the parent conversation into independent helper contexts, including when ambient settings enable forks. [Anthropic subagents](https://code.claude.com/docs/en/sub-agents) |
-| Claude `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` | `1` | Uses the documented depth control to prevent helpers from recursively spawning another helper layer. The total `Agent`-call hook and absolute peer deadline remain independent bounds. [Anthropic changelog](https://code.claude.com/docs/en/changelog) |
+| Claude `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` | `1` | Uses the documented depth control to prevent helpers from recursively spawning another helper layer. The total `Agent`-call hook and absolute peer deadline remain independent bounds. [Anthropic subagents](https://code.claude.com/docs/en/sub-agents#let-subagents-spawn-their-own-subagents) |
+| Claude `autoMemoryEnabled=false`, `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` | disabled | Keeps prior auto-memory notes out of the independent peer; the environment variable takes precedence for the session. [Anthropic memory](https://code.claude.com/docs/en/memory) |
+| Claude `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS` | peer deadline in ms | Print mode otherwise stops waiting for background helpers after ten idle minutes and drops their results; the absolute peer deadline remains the liveness bound. [Anthropic environment variables](https://code.claude.com/docs/en/env-vars) |
 | Claude Stop hook | bounded `claude-effort.json` evidence | Records observed main-peer effort; missing evidence or any mismatch rejects the result, even if later observations match. Private pending markers make capture failures and interruptions after bookkeeping begins visible to the wrapper. Failures before the capture executable starts remain outside that observation boundary. `onFailure` does not apply to Stop hooks. Receipts, markers, and locks use `0600` modes. [Hook effort fields](https://code.claude.com/docs/en/hooks#common-input-fields) |
 | Claude `disableWorkflows`, `--disallowedTools Workflow` | disabled, denied | Prevents Workflow agents from bypassing the Agent-call counter. Explicit `ultracode` fails before launch; other full-mode capabilities retain their configured policy. |
 | Claude `--json-schema`, `--output-format json` | provider-compatible peer schema | Uses Claude's official structured-output envelope; the richer canonical schema and request relations are checked after extraction, and bare or cross-provider shapes are rejected. [Anthropic structured outputs](https://code.claude.com/docs/en/agent-sdk/structured-outputs) |
 | Claude `--tools`, `--disallowedTools` | resolved built-ins | Starts from the configured built-in surface, then removes web tools when research is off and directly denies `Agent` when helpers are disabled. It does not claim control of MCP or plugin tools. |
 | Claude `--max-turns` | omitted unless explicitly requested | Avoids truncating valid tool-heavy work. If opted in, a reached cap is a distinct structured failure. |
 
-Availability has a narrower contract than a peer run. Codex refreshes `codex debug models` and accepts only the exact advertised pair. The Claude probe runs outside the repository with filesystem setting sources, built-in tools, and MCP discovery disabled, uses one turn because the only task is to return `AVAILABLE`, and requires both exact primary-model `modelUsage` and Stop-hook effort telemetry. That one-turn probe cap does not apply to the real peer run.
+Availability has a narrower contract than a peer run. Codex resolves `codex debug models` and accepts only the exact advertised pair. The Claude probe runs outside the repository with filesystem setting sources, built-in tools, and MCP discovery disabled, uses one turn because the only task is to return `AVAILABLE`, and requires both exact primary-model `modelUsage` and Stop-hook effort telemetry. That one-turn probe cap does not apply to the real peer run.
 
 The runtime neutralizes inherited thinking overrides in the process environment and supplies command-line environment pins. Boolean `0` values are documented; the empty `MAX_THINKING_TOKENS` pin is not independently specified by current provider documentation. Exact effort is checked through Stop telemetry, but this does not prove every internal thinking-budget behavior. [Claude environment variables](https://code.claude.com/docs/en/env-vars)
 
@@ -370,20 +391,22 @@ Use the fewest independent helpers needed and reuse them for follow-ups. Exact r
 
 ### Repository instructions
 
-`AGENTS.md` remains the shared contract and `CLAUDE.md` contains only `@AGENTS.md`. Current Claude Code also supports direct AGENTS discovery, but the import is still supported, avoids duplicate loading, and covers the supported CLI versions before direct discovery arrived. The repository guidance fits Codex's default 32 KiB combined project-instruction budget; parent or global instructions can consume the rest. Imports do not reduce token cost. [Claude memory](https://code.claude.com/docs/en/memory#remove-an-earlier-agentsmd-workaround), [Codex instructions](https://learn.chatgpt.com/docs/agent-configuration/agents-md)
+`AGENTS.md` remains the shared contract and `CLAUDE.md` contains only `@AGENTS.md`. Every supported Claude Code version (2.1.295 and newer) can read `AGENTS.md` directly; the import is kept because Anthropic documents it as never loading the file twice and as the way to keep `AGENTS.md` available in sessions where direct support is unavailable, such as when the built-in AGENTS.md plugin is disabled. The repository guidance fits Codex's default 32 KiB combined project-instruction budget and Claude's 200-line target; parent or global instructions can consume the rest. Imports do not reduce token cost. [Claude memory](https://code.claude.com/docs/en/memory#remove-an-earlier-agentsmd-workaround), [Codex instructions](https://learn.chatgpt.com/docs/agent-configuration/agents-md)
 
 ### Setup and overrides
+
+The commands below run the copy in a repository checkout. An installed plugin runs the same commands from its own skill directory (`<skill-root>/scripts/host.py`); the host agent resolves that path from the skill.
 
 Interactive setup:
 
 ```bash
-python tools/agent-collab/scripts/host.py setup
+python3 tools/agent-collab/scripts/host.py setup
 ```
 
 One-run overrides:
 
 ```bash
-python tools/agent-collab/scripts/host.py start \
+python3 tools/agent-collab/scripts/host.py start \
   --host codex \
   --target "current diff" \
   --brief "Review release readiness" \
@@ -413,33 +436,55 @@ Environment keys:
 - `AGENT_COLLAB_ADJUDICATOR_ENABLED`
 - `AGENT_COLLAB_HISTORY_RETAINED_RUNS`
 
+Boolean keys accept `1/0`, `true/false`, `yes/no`, or `on/off`; an empty value is rejected rather than treated as false. Integer keys accept ASCII digits only.
+
 Run `doctor` to check versions, authentication, schemas, paths, resolved defaults, and the selected workspace backend:
 
 ```bash
-python tools/agent-collab/scripts/host.py doctor
+python3 tools/agent-collab/scripts/host.py doctor
 ```
 
-`doctor` strictly parses every bundled schema and meta-validates it when Python `jsonschema` is installed; its `meta_validator` field distinguishes those checks. Release verification requires full schema meta-validation. Because 2.0 has no migration layer, an invalid legacy settings or state file must be archived or removed before retrying. Rerun `setup` to create canonical settings; for legacy run state, archive the old run root and start with a fresh default root or explicit `--run-root`. Do not edit installed caches or ask the runtime to coerce old artifacts.
+`doctor` strictly parses every bundled schema and meta-validates it when Python `jsonschema` is installed; its `meta_validator` field distinguishes those checks. Release verification requires full schema meta-validation. Because 2.0 has no migration layer, an invalid legacy settings or state file must be archived or removed before retrying. `setup --reset local|global|all` removes Agent Collab settings files (`--dry-run` previews); archive a file first if you need it, then rerun `setup` to create canonical settings. For legacy run state, archive the old run root and start with a fresh default root or explicit `--run-root`. Do not edit installed caches or ask the runtime to coerce old artifacts.
 
 After the host has synthesized a run:
 
 ```bash
-python tools/agent-collab/scripts/host.py complete RUN_ID
+python3 tools/agent-collab/scripts/host.py complete RUN_ID
 ```
+
+### Storage locations
+
+| Data | Location |
+| --- | --- |
+| Global settings | `$AGENT_COLLAB_HOME/settings.json`, else `${XDG_CONFIG_HOME:-~/.config}/agent-collab/settings.json` |
+| Local settings and run history (installed plugin) | `<state root>/repos/<repo-name>-<hash>/settings.local.json` and `.../runs/` |
+| State root | `$AGENT_COLLAB_STATE_HOME`; else `$CODEX_HOME/agent-collab` when the runtime is installed under `CODEX_HOME`; else `${XDG_STATE_HOME:-~/.local/state}/agent-collab` |
+| Local settings and run history (repository checkout) | `tools/agent-collab/settings.local.json` and `tools/agent-collab/runs/` |
+| Worktree guard | `<git dir>/agent-collab/active-v2.json`; non-Git folders use `${XDG_STATE_HOME:-~/.local/state}/agent-collab/workspace-guards/` |
+
+Local settings written by `setup` from a checkout therefore do not affect an installed plugin, and a Codex host and a Claude host keep separate run histories for the same repository; the active run is still found by ID through the shared worktree guard. Agent Collab ignores an inherited `CLAUDE_PLUGIN_DATA`: Claude Code never exports it to Bash-tool commands, so any value present belongs to another plugin, whose data directory Claude Code deletes on uninstall. Versions before 5.0.0 could store state under such a directory; archive it if you need that history.
 
 ## Repository layout
 
 ```text
 .agents/plugins/marketplace.json                  Codex repo marketplace
 .claude-plugin/marketplace.json                   Claude Code marketplace
-plugins/agent-collab/                             Unified generated Codex/Claude package
+.github/workflows/ci.yml                          CI: release checks in --ci mode (Linux, macOS; Python 3.10, 3.13)
+plugins/agent-collab/                             Dual-host package; skill and agents are synchronized copies, manifests are edited here
 tools/agent-collab/                               Canonical skill, runtime, schemas, references, and host-agent assets
 tools/agent-collab/agents/                        Canonical Codex metadata and Claude helper agents
-scripts/sync-packages.sh                          Package synchronization
-tests/test_agent_collab_runtime.py                Runtime and package tests
+scripts/sync-packages.sh                          Package synchronization and byte/mode parity check
+scripts/release-check.sh                          Every release verification step
+scripts/install-linux-isolation-deps.sh           Linux isolated-workspace dependencies
+tests/test_agent_collab_runtime.py                Runtime and package tests, plus shared fixtures
 tests/test_agent_collab_safety.py                 Process, recursion, snapshot, and strict-JSON safety tests
+tests/test_agent_collab_hardening.py              Isolation boundary, Codex policy, snapshot, schema-parity, and lifecycle hardening tests
+tests/test_agent_collab_lifecycle_audit.py        Lifecycle and guard transition tests
+tests/test_agent_collab_selection_audit.py        Model/effort selection evidence tests
+tests/test_agent_collab_final_audit.py            Helper counters and Fable admission tests
+tests/test_agent_collab_probe_interrupt.py        Availability probe interruption and cleanup tests
 AGENTS.md                                         Repository maintenance contract
-VERSION                                            Release version
+VERSION                                           Release version
 CHANGELOG.md                                      Release history
 ```
 
@@ -452,38 +497,42 @@ scripts/sync-packages.sh --check
 
 ## Verify
 
-Run the checks below independently. Current Plugin Creator guidance supports this existing `.codex-plugin/plugin.json` format; it recommends root `plugin.json` for new portable packages, which does not require migrating this dual-host package. [OpenAI package formats](https://developers.openai.com/plugins/build/plugins)
-
-Codex verification covers strict package JSON, schema and version consistency, official skill validation, and isolated marketplace installation. Test representative requests in a fresh conversation after installation. Public-directory publication additionally requires the submission portal's automated checks. [OpenAI local plugin testing](https://developers.openai.com/plugins/deploy/connect-chatgpt), [OpenAI submission checks](https://developers.openai.com/plugins/deploy/submission)
+Run every release check with one command. Release mode fails if any step, including the official validators and isolated installations, cannot run; `--ci` reports steps that need provider CLIs as skipped:
 
 ```bash
-python -m unittest discover -s tests -v
-python -m py_compile tools/agent-collab/scripts/*.py
-scripts/sync-packages.sh --check
-python "${CODEX_HOME:-$HOME/.codex}/skills/.system/skill-creator/scripts/quick_validate.py" tools/agent-collab
-python "${CODEX_HOME:-$HOME/.codex}/skills/.system/skill-creator/scripts/quick_validate.py" plugins/agent-collab/skills/agent-collab
-claude plugin validate . --strict
-claude plugin validate plugins/agent-collab --strict
+scripts/release-check.sh
+scripts/release-check.sh --ci
 ```
 
-Before publication, parse every release JSON file strictly and test isolated marketplace installation on both hosts. Claude installation must pass `--scope user` explicitly.
+It runs, in order:
+
+```bash
+python3 -m unittest discover -s tests -v
+scripts/sync-packages.sh --check
+python3 -m py_compile tools/agent-collab/scripts/*.py
+# strict parse of every tracked JSON file and meta-validation of every schema (needs jsonschema)
+# VERSION, both manifests, and the CHANGELOG entry agree
+python3 "${CODEX_HOME:-$HOME/.codex}/skills/.system/skill-creator/scripts/quick_validate.py" tools/agent-collab
+python3 "${CODEX_HOME:-$HOME/.codex}/skills/.system/skill-creator/scripts/quick_validate.py" plugins/agent-collab/skills/agent-collab
+claude plugin validate . --strict
+claude plugin validate plugins/agent-collab --strict
+# isolated installs: CLAUDE_CONFIG_DIR=<tmp> with --scope user, and CODEX_HOME=<tmp>
+```
+
+Current Plugin Creator guidance supports this existing `.codex-plugin/plugin.json` format; it recommends root `plugin.json` for new portable packages, which does not require migrating this dual-host package. Codex verification covers strict package JSON, schema and version consistency, official skill validation, and isolated marketplace installation. Test representative requests in a fresh conversation after installation. Public-directory publication additionally requires the submission portal's automated checks; the package currently has no LICENSE or icon, which both directories require. [OpenAI package formats](https://developers.openai.com/plugins/build/plugins), [OpenAI local plugin testing](https://developers.openai.com/plugins/deploy/connect-chatgpt), [OpenAI submission checks](https://developers.openai.com/plugins/deploy/submission)
 
 ### Tagged releases
 
 GitHub `main` is an installable marketplace source. Any push that changes `plugins/agent-collab/` must carry a new Semantic Versioning release; do not publish different package contents under the same manifest version. Use a major bump for incompatible settings or runtime contracts, a minor bump for backward-compatible functionality, and a patch bump for compatible fixes. The 3.0.0 source was on `main` without a tag or GitHub Release. Formal annotated tags start at `v4.0.0`; do not backfill `v3.0.0` without release evidence.
 
-For each release, update `VERSION`, both plugin manifests, and the root `CHANGELOG.md`, then synchronize the package and run the [Verify](#verify) checks. Commit the verified release state on `main` before creating a new annotated `v<version>` tag on that exact commit. Confirm that the remote branch has not changed, push the branch and tag, and verify both remote refs point to the intended commit. Publish a GitHub Release from the existing tag, with notes drawn from the matching root changelog entry. Never move or reuse a release tag. A version tag identifies an exact package; marketplace sources that track `main` still follow the branch, while sources pinned to a tag remain fixed until users choose a newer tag. [Semantic Versioning](https://semver.org/spec/v2.0.0.html), [Codex Git refs](https://developers.openai.com/plugins/build/plugins), [Claude marketplace versions and refs](https://code.claude.com/docs/en/plugins/host-marketplace), [GitHub releases](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository)
+For each release, update `VERSION`, both plugin manifests, and the root `CHANGELOG.md`, then synchronize the package and run `scripts/release-check.sh`. Commit the verified release state on `main` before creating a new annotated `v<version>` tag on that exact commit. Confirm that the remote branch has not changed, push the branch and tag, and verify both remote refs point to the intended commit. Publish a GitHub Release from the existing tag, with notes drawn from the matching root changelog entry. Never move or reuse a release tag. A version tag identifies an exact package; marketplace sources that track `main` still follow the branch, while sources pinned to a tag remain fixed until users choose a newer tag. [Semantic Versioning](https://semver.org/spec/v2.0.0.html), [Codex Git refs](https://developers.openai.com/plugins/build/plugins), [Claude marketplace versions and refs](https://code.claude.com/docs/en/plugins/host-marketplace), [GitHub releases](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository)
 
 Use the same version and commit for the tag, manifests, changelog entry, and GitHub Release. `gh release create` must use `--verify-tag` so it cannot silently create a tag at another commit. Check the release URL and tag target after publication. The root changelog is the maintained history; GitHub Release notes are a copy of that version's entry, not a separate source of truth. [GitHub CLI release creation](https://cli.github.com/manual/gh_release_create)
 
 ### Evaluation evidence
 
-The 2026-10-18 evaluation checked every README section against current provider documentation, the canonical runtime, schemas, package tests, and installed CLI help. Two independent Agent Collab Claude Opus 5.5/xhigh reviews, independent host runtime review, and advisory adjudication supplement those checks. The second peer completed with exact-model usage and four matching xhigh Stop observations; its coverage limitations and all candidate dispositions are retained in the local run artifacts. Confirmed findings were fixed and checked after integration. Evaluation results are scoped to this Linux checkout and the versions listed above; macOS, every model/provider combination, and comparative quality/cost benchmarks were not exercised.
+The 2026-10-21 audit reviewed the runtime, schemas, tests, packaging, and documentation against current Claude Code documentation, Codex documentation, and the Codex 0.163.0 source. It combined an independent Agent Collab Codex peer (`gpt-6-astra`/`xhigh`, isolated workspace), four host-local lenses, and advisory adjudication; every material claim was re-verified by the host. Confirmed findings were fixed in 5.0.0 with regression tests, including a real fuse-overlayfs and bwrap integration test of the isolated boundary. `scripts/release-check.sh` then passed in release mode: the full unit suite, package byte and mode parity, compilation, strict parsing of every tracked JSON file, schema meta-validation, version consistency, both official validators, and isolated installations on both hosts. Codex launch overrides were checked against `codex exec --strict-config` without starting a session.
 
-After removing the obsolete external-validator test hook, the 2026-10-18 regression run passed all 160 tests with no skips. Package byte parity, Python compilation, strict parsing of all 36 release JSON files, meta-validation of all 32 schema copies, official skill and Claude validators, and isolated installations on both hosts passed. The global Codex installation was refreshed to 3.0.0 and all 39 package files matched; Claude was refreshed at user scope and reads the synchronized local package directly. These are checkout-specific results, not a tagged or published release.
-
-The evaluation also reproduced and fixed interrupted probe cleanup, Git index self-mutation during snapshots, strict-type and symlink-admission gaps, expiry between attestation and launch, conflicting selection evidence, noncanonical helper counters, dropped Stop captures, and normalization warning loss. A live before/after Workflow test demonstrated the counter bypass and confirmed that the disabled Workflow tool could no longer launch the test agent. The Linux `bwrap` initialization check passed; that does not establish a complete safe-mode provider run. Fresh availability probes remain mandatory for future runs, since today's account/model access is not a durable guarantee.
-
-The 2026-10-21 checkout check passed 170 tests, package byte parity, Python compilation, strict parsing of 36 release JSON files, meta-validation of 32 schemas, official skill and Claude plugin validators, and isolated marketplace installations for both hosts. Tests simulate the macOS built-in direct-mode selection and verify that it does not invoke the Linux isolation preflight. This was run on Linux; native macOS execution and a complete provider peer run remain untested.
+Results are scoped to this Linux checkout with Codex CLI 0.163.0 and Claude Code 2.1.305. Native macOS execution (now in CI), a complete Codex-hosted live run, live safe-mode approval behavior, and comparative quality, latency, or cost measurements were not exercised. Fresh availability probes remain mandatory for every run, since account and model access is not a durable guarantee. Earlier evaluations are recorded in [CHANGELOG.md](CHANGELOG.md).
 
 The Codex and Claude manifests and root `VERSION` must always contain the same Semantic Versioning 2.0.0 version. Record user-visible and breaking changes in the root `CHANGELOG.md`; do not put changelogs inside skills. Version 2.0.0 intentionally rejects 1.x settings and run artifacts rather than translating them or probing compatibility fallbacks.

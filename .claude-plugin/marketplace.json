@@ -8,7 +8,7 @@
     {
       "name": "agent-collab",
       "source": "./plugins/agent-collab",
-      "description": "Run an independent cross-product peer before host verification and synthesis."
+      "description": "Repo-grounded Claude and Codex collaboration workflow with independent peer verification, helper agents, and synthesis support."
     }
   ]
 }

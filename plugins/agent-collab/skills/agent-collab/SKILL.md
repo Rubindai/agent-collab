@@ -17,17 +17,17 @@ Implicit discovery remains enabled for substantial independent cross-checking. A
 
 Treat the directory containing this file as `<skill-root>`. Use only its current `scripts/`, `references/`, and `schemas/`; do not search legacy paths, caches, or compatibility copies.
 
-Default to full provider capability, `adjudicator_enabled=true`, and `edit_allowed=false`. Fresh Linux settings use a disposable workspace where temporary validation writes are discarded. Fresh macOS settings use direct mode with before/after mutation snapshots; those snapshots detect included changes after the fact and cannot prevent or undo them. Anthropic recommends Claude `bypassPermissions` only inside isolated containers, VMs, or development containers without internet access where host damage is impossible; the Linux workspace still has network and other host-facing facilities. Use safe mode when the user selects it. Add `--edit-allowed --workspace-mode direct` only when the user explicitly delegates durable edits.
+Default to full provider capability, `adjudicator_enabled=true`, and `edit_allowed=false`. Fresh Linux settings use a disposable workspace where temporary filesystem writes to HOME and the repository are discarded. Fresh macOS settings use direct mode with before/after mutation snapshots; those snapshots detect included changes after the fact and cannot prevent or undo them. Anthropic recommends Claude `bypassPermissions` only inside isolated containers, VMs, or development containers without internet access where host damage is impossible; the Linux workspace still has network and other host-facing facilities. Use safe mode when the user selects it. Add `--edit-allowed --workspace-mode direct` only when the user explicitly delegates durable edits.
 
 Resolve the opposite-product peer:
 
 - Codex host: default Claude peer `claude-opus-5-5` with `xhigh`.
 - Claude host: default Codex peer `gpt-6-astra` with `xhigh`.
 - Preserve an explicit user model and effort choice with per-run `--peer-model` and `--peer-effort` flags. Resolve only documented aliases such as “Opus 5.5 xhigh” to `claude-opus-5-5` and `xhigh`, “Astra xhigh” to `gpt-6-astra` and `xhigh`, or “Fable 5 Max” to `claude-fable-5` and `max`.
-- For a Codex peer, do not use a hardcoded effort list. Require the exact pair to appear in the freshly refreshed `codex debug models` catalog.
+- For a Codex peer, do not use a hardcoded effort list. Require the exact pair to appear in the `codex debug models` catalog that Codex resolves at launch.
 - For a Claude peer, accept `low`, `medium`, `high`, `xhigh`, `max`, or `ultracode`. `ultracode` is recognized as an explicit CLI orchestration mode with effective provider effort `xhigh`, but `start` must reject it with `helper_policy_unavailable`: Workflow agents bypass the finite Agent-call counter. Preserve the explicit request and report the blocker; never silently run ordinary `xhigh` instead. Ordinary peers disable and deny Workflow.
 - Treat Fable as explicit-only. Never obtain it from built-in, environment, local, or global defaults.
-- Require `start` to attest availability before it creates a run or launches a peer. Codex uses the refreshed model catalog. In a live configuration-reduced Claude probe, API `modelUsage` must include the exact resolved model and the `Stop` hook must report the expected effective effort.
+- Require `start` to attest availability before it creates a run or launches a peer. Codex uses its resolved model catalog. In a live configuration-reduced Claude probe, API `modelUsage` must include the exact resolved model and the `Stop` hook must report the expected effective effort.
 - Never choose or retry a fallback model or effort. If the attestation is `unavailable` or `unknown`, or the observed pair differs, end the Agent Collab attempt immediately: do not start the peer, host-first pass, helpers, or adjudicator. Preserve and show the structured result, tell the user which pair was requested, and ask them to choose an available pair or obtain access.
 - Add `--online-research` or `--no-online-research` when the user specifies research availability.
 - Add `--safe-mode` or `--no-safe-mode`, `--timeout-seconds`, `--local-subagents` or `--no-local-subagents`, and `--max-local-subagents` when the user explicitly overrides those values for one run. Persisted settings otherwise apply.
@@ -55,7 +55,7 @@ Treat the peer brief as an instruction, not a sandbox or a higher-precedence sec
 1. Start the peer before doing host analysis:
 
 ```bash
-python "<skill-root>/scripts/host.py" start \
+python3 "<skill-root>/scripts/host.py" start \
   --host "$host" \
   --target "$target" \
   --brief-file "$brief_file"
@@ -70,17 +70,17 @@ Set `$host` to `codex` or `claude`. Add a canonical `--mode review|research|desi
 4. Use `finish` as the normal synchronization point:
 
 ```bash
-python "<skill-root>/scripts/host.py" finish "$run_dir"
+python3 "<skill-root>/scripts/host.py" finish "$run_dir"
 ```
 
 Respect the hard finite peer timeout, 2700 seconds by default. Do not cancel or replace a live peer before its deadline unless the user explicitly stops it. At the deadline require the runtime to terminate the peer and preserve a structured timeout result; never continue indefinitely.
 
-5. When adjudication is enabled, run a bounded host-local advisory adjudicator when available. This is a procedural independence requirement; the runtime validates the artifact but cannot prove what the adjudicator read. `advisory_pending` means no adjudicator report was supplied. If an adjudicator writes `adjudicator-report.json`, run `finish` again to rebuild the claim matrix. When adjudication is disabled, do not create that artifact. Verify important host, peer, helper, and adjudicator claims yourself.
+5. When adjudication is enabled, run a bounded host-local advisory adjudicator when available. This is a procedural independence requirement; the runtime validates the artifact but cannot prove what the adjudicator read. `advisory_pending` means no adjudicator report was supplied. The adjudicator returns its report and the host saves it as `adjudicator-report.json`, replacing the pending marker; then run `finish` again to rebuild the claim matrix. When adjudication is disabled, do not create that artifact. Verify important host, peer, helper, and adjudicator claims yourself.
 
 6. Synthesize with `references/synthesize.md`, bind the strict `host-synthesis.json` attestation to both ready `host-result.json` mutation and claim-matrix digests, and then close the run immediately before returning the final answer:
 
 ```bash
-python "<skill-root>/scripts/host.py" complete "$run_dir"
+python3 "<skill-root>/scripts/host.py" complete "$run_dir"
 ```
 
 Never call `complete` from a helper or before host synthesis is ready. An explicit `cancel` writes separate immutable cancellation evidence and releases the guard only after quiescence. If `cancel` reports `already_terminal`, preserve the terminal peer report and use `finish` instead.
@@ -89,7 +89,7 @@ Never call `complete` from a helper or before host synthesis is ready. An explic
 
 Allow only one Agent Collab workflow per Git worktree. Keep the atomic worktree guard as the hard cross-product recursion boundary from `start` through `complete` or `cancel`. Serialize every guard transition and stale-start recovery with one stable per-worktree OS file lock and a bounded lock wait. A separate bounded per-run lock serializes terminal operations, and completion rebuilds the claim matrix from current admitted artifacts. Startup gates prevent wrapper/provider execution before their process artifacts are committed, and guard release requires tracked process quiescence. The runtime hard-limits Claude peer total `Agent` calls, disables and denies Workflow orchestration, requires actual-run Stop effort evidence, configures Codex's documented concurrent-thread cap, and enforces helper-report admission. Codex total helper calls and depth, plus host-native helper launch discipline, remain instructions because this runtime cannot intercept them. The absolute peer deadline bounds tracked provider execution; detached groups and external sessions are outside that proof.
 
-In isolated mode the peer sees disposable copy-on-write views of HOME and the repository; the host records a small boundary receipt without scanning repository contents. The run directory remains writable for runtime artifacts. Network, sockets, devices, MCP, plugins, and remote effects are outside this filesystem boundary. In direct mode, mutation comparison is bounded detective evidence across tracked, untracked, most ignored, and selected Git-control surfaces. It excludes known high-volume generated/dependency directories and cannot observe transient changes reverted before a snapshot; large manifests retain complete digests with bounded path samples. Do not claim complete immutability or attribution.
+In isolated mode the peer sees disposable copy-on-write views of HOME and the repository, a private temporary directory for its outputs, and its provider credential file bound through so token refreshes persist; host-owned run artifacts are not writable. The host records a small boundary receipt without scanning repository contents. This is not a containment boundary: network, sockets (including a Docker daemon and the D-Bus session bus with the systemd user manager), devices, MCP, plugins, and remote effects can still change the host and the real repository, and isolated mode takes no content snapshot that would detect such changes. In direct mode, mutation comparison is bounded detective evidence across tracked, untracked, most ignored, and selected Git-control surfaces. It excludes known high-volume generated/dependency directories and cannot observe transient changes reverted before a snapshot; large manifests retain complete digests with bounded path samples. Do not claim complete immutability or attribution.
 
 When Linux safe mode is selected for a Codex peer, the runtime preflights the `bwrap` backend required by Codex read-only sandboxing. A Claude safe-mode peer uses provider-native `plan` permissions. Full-capability isolated mode separately preflights `fuse-overlayfs` and `bwrap` for either peer before run creation, and fails with `sandbox_unavailable` when unavailable. Safe mode resolves to direct workspace mode unless an explicit conflicting selection is rejected. Never retry a failed run with a different permission posture or workspace mode.
 
@@ -98,10 +98,10 @@ Use only strict settings and run schema 2.0. Reject legacy settings, runs, flags
 Useful commands:
 
 ```bash
-python "<skill-root>/scripts/host.py" setup
-python "<skill-root>/scripts/host.py" status
-python "<skill-root>/scripts/host.py" result "$run_id"
-python "<skill-root>/scripts/host.py" complete "$run_id"
-python "<skill-root>/scripts/host.py" clear-history --dry-run
-python "<skill-root>/scripts/host.py" doctor
+python3 "<skill-root>/scripts/host.py" setup
+python3 "<skill-root>/scripts/host.py" status
+python3 "<skill-root>/scripts/host.py" result "$run_id"
+python3 "<skill-root>/scripts/host.py" complete "$run_id"
+python3 "<skill-root>/scripts/host.py" clear-history --dry-run
+python3 "<skill-root>/scripts/host.py" doctor
 ```
