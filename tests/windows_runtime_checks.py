@@ -138,6 +138,42 @@ class JobSupervisionChecks(unittest.TestCase):
         self.assertEqual(process.communicate(timeout=20)[0], "")
         self.assertEqual(process.returncode, 125)
 
+    def test_a_venv_interpreter_and_its_children_stay_in_the_job(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(Path(tmp) / "venv")], check=True)
+            venv_python = Path(tmp) / "venv" / "Scripts" / "python.exe"
+            script = f"""
+                import importlib.util, json, subprocess, sys
+                spec = importlib.util.spec_from_file_location("safety", {str(SCRIPTS / "safety.py")!r})
+                safety = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(safety)
+                root = safety.popen_group([sys.executable, "-c", (
+                    "import subprocess, sys, time;"
+                    "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'],"
+                    " creationflags=subprocess.DETACHED_PROCESS);"
+                    "print(child.pid, flush=True); time.sleep(120)")], stdout=subprocess.PIPE, text=True)
+                grandchild = int(root.stdout.readline())
+                result = safety.terminate_process_group(root.pid)
+                root.wait(timeout=10)
+                print(json.dumps({{"quiescent": result["quiescent"], "grandchild_alive": safety.pid_alive(grandchild)}}))
+            """
+            completed = subprocess.run(
+                [str(venv_python), "-c", textwrap.dedent(script)], capture_output=True, text=True, timeout=60
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(json.loads(completed.stdout.splitlines()[-1]),
+                             {"quiescent": True, "grandchild_alive": False})
+
+    def test_ntstatus_exit_codes_survive_the_trampoline(self):
+        read_fd, write_fd = os.pipe()
+        kwargs = {}
+        command = SAFETY.gated_command(python_command("import os; os._exit(-1073741819)"), read_fd, kwargs)
+        process = SAFETY.popen_group(command, **kwargs)
+        os.close(read_fd)
+        os.write(write_fd, b"1")
+        os.close(write_fd)
+        self.assertEqual(process.wait(timeout=20), 0xC0000005)
+
     def test_detached_root_receives_its_startup_gate(self):
         read_fd, write_fd = os.pipe()
         kwargs = {}
@@ -184,6 +220,21 @@ class PortableFileChecks(unittest.TestCase):
                 self.assertEqual(subprocess.run(probe, capture_output=True, text=True).stdout.strip(), "True")
             finally:
                 os.close(descriptor)
+
+    def test_entry_point_stdio_is_utf8_with_lf(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "out.txt"
+            code = textwrap.dedent(f"""
+                import importlib.util, sys
+                spec = importlib.util.spec_from_file_location("sj", {str(SCRIPTS / "strict_json.py")!r})
+                sj = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(sj)
+                sj.use_utf8_stdio()
+                print(sys.stdin.read().strip() + " café 測試 📁")
+            """)
+            with output.open("wb") as handle:
+                subprocess.run([sys.executable, "-c", code], input="入力".encode("utf-8"), stdout=handle, check=True)
+            self.assertEqual(output.read_bytes(), "入力 café 測試 📁\n".encode("utf-8"))
 
     def test_artifacts_are_written_with_lf_line_endings(self):
         with tempfile.TemporaryDirectory() as tmp:

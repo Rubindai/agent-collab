@@ -87,7 +87,9 @@ finally:
     os.close(gate_fd)
 if token != b"1":
     raise SystemExit(125)
-raise SystemExit(subprocess.call(sys.argv[2:], stdin=0, stdout=1, stderr=2))
+code = subprocess.call(sys.argv[2:], stdin=0, stdout=1, stderr=2)
+# Keep NTSTATUS codes intact where SystemExit takes a signed 32-bit value.
+raise SystemExit(code - 2**32 if code >= 2**31 else code)
 """
 _SIBLINGS: dict[str, Any] = {}
 
@@ -180,6 +182,10 @@ def process_identity_state(expected: Any) -> str:
     try:
         validate_process_identity(expected)
     except ValueError:
+        return "unknown"
+    if (expected["kind"] == "windows_process") != (os.name == "nt"):
+        # Another platform recorded this identity (for example native Windows
+        # and WSL sharing a worktree); its PID means nothing here.
         return "unknown"
     try:
         observed = process_identity(expected["pid"])
@@ -324,7 +330,9 @@ def popen_group(args: list[str], *, detached: bool = False, **kwargs: Any) -> su
 
     if os.name != "nt":
         return subprocess.Popen(args, start_new_session=True, **kwargs)
-    flags = subprocess.CREATE_NEW_PROCESS_GROUP
+    jobs = _load_sibling("windows_jobs")
+    # The root starts suspended so nothing it launches predates its job.
+    flags = subprocess.CREATE_NEW_PROCESS_GROUP | jobs.CREATE_SUSPENDED
     if detached:
         flags |= subprocess.CREATE_NO_WINDOW | subprocess.CREATE_BREAKAWAY_FROM_JOB
     try:
@@ -337,7 +345,8 @@ def popen_group(args: list[str], *, detached: bool = False, **kwargs: Any) -> su
             f"the job may forbid breakaway: {exc}"
         ) from exc
     try:
-        _load_sibling("windows_jobs").adopt(process.pid)
+        jobs.adopt(process.pid)
+        jobs.resume(process.pid)
     except BaseException:
         process.kill()
         process.wait()
@@ -378,7 +387,9 @@ def gated_command(args: list[str], read_fd: int, popen_kwargs: dict[str, Any]) -
 
     token = pass_gate(read_fd, popen_kwargs)
     code = WINDOWS_GATE_CODE if os.name == "nt" else POSIX_GATE_CODE
-    return [sys.executable, "-c", code, str(token), *args]
+    # Isolated mode keeps the working directory and site hooks from shadowing
+    # the stdlib modules the trampoline imports.
+    return [sys.executable, "-I", "-c", code, str(token), *args]
 
 
 def resolve_cli(name: str, path: str | None = None) -> str:
@@ -757,8 +768,12 @@ def _run_claude_agent_guard(counter_path: Path, limit: int) -> int:
                     os.fsync(handle.fileno())
                     return 0
             finally:
-                # Windows may release a closed handle's lock late.
-                strict_json.unlock(lock.fileno())
+                # Windows may release a closed handle's lock late; closing
+                # still releases it if unlocking fails.
+                try:
+                    strict_json.unlock(lock.fileno())
+                except OSError:
+                    pass
     except BaseException as exc:
         print(f"Agent Collab could not enforce the Agent tool call limit: {exc}", file=sys.stderr)
         return 2

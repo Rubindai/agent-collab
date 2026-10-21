@@ -24,7 +24,7 @@ Agent Collab launches an independent opposite-product peer, then the host verifi
 - On `unavailable`, `unknown`, model substitution, or downgraded effort, end the attempt before any peer, helper, host-first pass, or adjudicator starts. Show the requested pair and structured evidence. Never select or retry a fallback.
 - Fable (`claude-fable-5`) is explicit-only: accept a user-requested per-run override, never a built-in, environment, local, or global default. Do not configure an Opus fallback.
 - Resolve Agent Collab settings in the host and persist them in `host-request.json`. The peer must not reinterpret Agent Collab environment variables. That request does not control provider policy, installed tools, MCP, plugins, or other CLI-loaded configuration.
-- Support peer launch on Linux, macOS, and Windows; fail before creating artifacts on other platforms. On Windows, each tracked group is a named kill-on-close Job Object rooted at the wrapper or gated launcher that forbids breakaway; locks use byte-range locking. Resolve provider CLIs to native executables and reject `.cmd`/`.bat` shims, and fail the detached wrapper launch closed when the caller's job forbids breakaway.
+- Support peer launch on Linux, macOS, and Windows; fail before creating artifacts on other platforms. On Windows, each tracked group is a named kill-on-close Job Object rooted at the wrapper or gated launcher that forbids breakaway; start each root suspended and resume it only after assignment, and never treat an invisible job as quiescent while its root is alive. Locks use byte-range locking, and entry points set UTF-8 with LF on standard streams. Resolve provider CLIs to native executables and reject `.cmd`/`.bat` shims, and fail the detached wrapper launch closed when the caller's job forbids breakaway. Treat process identities recorded by another platform as unknown.
 
 ## Permissions and evidence boundaries
 
@@ -39,7 +39,7 @@ Agent Collab launches an independent opposite-product peer, then the host verifi
 ### Artifacts
 
 - Enforce strict schema 2.0 for settings, state, requests, helper reports, and synthesis. Reject older, incomplete, noncanonical, or wrongly typed files without coercion or translation.
-- On supported POSIX hosts, create run directories as `0700` and persisted artifacts, settings, state, locks, snapshots, raw output, stderr, and helper counters as `0600`, independent of umask. Reject symlink destinations where no-follow creation is available. On Windows, rely on the user profile's access control list. Write artifacts in binary mode with LF line endings on every platform.
+- On supported POSIX hosts, create run directories as `0700` and persisted artifacts, settings, state, locks, snapshots, raw output, stderr, and helper counters as `0600`, independent of umask. Reject symlink destinations where no-follow creation is available. On Windows, POSIX modes do not apply; files inherit their directory's access control list. Write artifacts with LF line endings on every platform.
 
 ### Helpers
 
@@ -77,7 +77,7 @@ python3 -m unittest discover -s tests -v
 scripts/sync-packages.sh --check
 ```
 
-- Before a release, run `scripts/release-check.sh` (release mode fails on any skipped step). It strictly parses every release JSON file, meta-validates schemas, checks version consistency, runs the official Codex skill and `claude plugin validate --strict` validators, and installs into isolated `CLAUDE_CONFIG_DIR` (with `--scope user`) and `CODEX_HOME`. CI runs `scripts/release-check.sh --ci` on Linux and macOS and `tests/windows_runtime_checks.py` on Windows. Verify validator provenance against the installed package and current official documentation; historical undocumented commands are not required checks.
+- Before a release, run `scripts/release-check.sh` (release mode fails on any skipped step). It strictly parses every release JSON file, meta-validates schemas, checks version consistency, runs the official Codex skill and `claude plugin validate --strict` validators, and installs into isolated `CLAUDE_CONFIG_DIR` (with `--scope user`) and `CODEX_HOME`. CI runs `scripts/release-check.sh --ci` on Linux and macOS and `tests/windows_runtime_checks.py` on Windows. The discovery suite asserts POSIX behavior; Windows changes also need the Windows checks to pass. Verify validator provenance against the installed package and current official documentation; historical undocumented commands are not required checks.
 - Test with Codex CLI 0.163.0 or newer and Claude Code 2.1.295 or newer. Marketplace installation tests must be isolated; Claude installation must pass `--scope user` explicitly. A required check skipped because its supported tool is unavailable remains outstanding; keep independent validation and installation checks runnable.
 - Use Semantic Versioning 2.0.0. `VERSION` and both manifests must match. Record user-visible and breaking changes only in the root `CHANGELOG.md`.
 - Treat any push that changes the installable plugin package on `main` as a release: bump the version before that push, update `VERSION`, both manifests, and the root changelog, then complete all release checks. Keep checkpoint commits local until the release is ready; documentation-only pushes do not require a version bump.

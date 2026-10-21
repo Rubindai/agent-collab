@@ -66,6 +66,19 @@ def _load_strict_json_runtime() -> Any:
 STRICT_JSON = _load_strict_json_runtime()
 
 
+def _load_safety_runtime() -> Any:
+    path = Path(__file__).resolve().with_name("safety.py")
+    spec = importlib.util.spec_from_file_location("agent_collab_snapshot_safety", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load Agent Collab safety runtime: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+SAFETY = _load_safety_runtime()
+
+
 def _snapshot_deadline(deadline: float | None) -> float:
     return time.monotonic() + DEFAULT_SNAPSHOT_TIMEOUT_SECONDS if deadline is None else float(deadline)
 
@@ -191,7 +204,8 @@ def _git_output_digest(repo_root: Path, args: list[str], deadline: float) -> str
     """Hash potentially large Git output without retaining a patch or index listing."""
     try:
         with tempfile.TemporaryFile(mode="w+b") as errors:
-            process = subprocess.Popen(
+            # Git's own group lets a timeout stop helpers that share the pipe.
+            process = SAFETY.popen_group(
                 [*GIT_BASE_COMMAND, *args],
                 cwd=repo_root,
                 env=_git_env(),
@@ -203,6 +217,11 @@ def _git_output_digest(repo_root: Path, args: list[str], deadline: float) -> str
             digest = hashlib.sha256()
             size = 0
             read_errors: list[BaseException] = []
+            reader: threading.Thread | None = None
+
+            def stop_group() -> None:
+                SAFETY.terminate_process_group(process.pid, term_timeout_seconds=0, kill_timeout_seconds=2)
+                process.wait()
 
             def drain() -> None:
                 nonlocal size
@@ -213,11 +232,11 @@ def _git_output_digest(repo_root: Path, args: list[str], deadline: float) -> str
                 except BaseException as exc:
                     read_errors.append(exc)
 
-            # A reader thread bounds the pipe read portably; select() accepts
-            # only sockets on Windows.
-            reader = threading.Thread(target=drain, daemon=True)
-            reader.start()
             try:
+                # A reader thread bounds the pipe read portably; select()
+                # accepts only sockets on Windows.
+                reader = threading.Thread(target=drain, daemon=True)
+                reader.start()
                 reader.join(_remaining_seconds(deadline))
                 if reader.is_alive():
                     raise TimeoutError(f"git {' '.join(args)} exceeded the workspace snapshot deadline")
@@ -225,25 +244,25 @@ def _git_output_digest(repo_root: Path, args: list[str], deadline: float) -> str
                     raise read_errors[0]
                 returncode = process.wait(timeout=_remaining_seconds(deadline))
             except (TimeoutError, subprocess.TimeoutExpired):
-                process.kill()
-                process.wait()
+                stop_group()
                 raise TimeoutError(f"git {' '.join(args)} exceeded the workspace snapshot deadline")
             except BaseException:
-                if process.poll() is None:
-                    process.kill()
-                    process.wait()
+                stop_group()
                 raise
             finally:
                 # A blocked read holds the reader's lock; close only after the
-                # killed process has let it finish.
-                reader.join(1)
-                if not reader.is_alive():
+                # stopped group has let it finish.
+                if reader is not None:
+                    reader.join(1)
+                if reader is None or not reader.is_alive():
                     stdout.close()
             if returncode != 0:
                 errors.seek(0)
                 detail = errors.read(8192).decode("utf-8", "replace").strip()
                 raise RuntimeError(f"git {' '.join(args)} failed: {detail or f'exit status {returncode}'}")
             return f"sha256={digest.hexdigest()} bytes={size}"
+    except TimeoutError:
+        raise
     except OSError as exc:
         raise RuntimeError(f"could not execute git {' '.join(args)}: {exc}") from exc
 

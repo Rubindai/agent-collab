@@ -5,6 +5,7 @@ import json
 import math
 import os
 import stat
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -89,6 +90,20 @@ def write_text(path: Path, text: str) -> None:
             os.close(descriptor)
         temporary_path.unlink(missing_ok=True)
         raise
+
+
+def use_utf8_stdio() -> None:
+    """Use UTF-8 and LF on standard streams.
+
+    Windows otherwise uses the ANSI code page and CRLF for redirected
+    streams, which corrupts JSON reports and rejects valid hook input.
+    """
+
+    if os.name != "nt":
+        return
+    for stream, errors in ((sys.stdin, "strict"), (sys.stdout, "strict"), (sys.stderr, "backslashreplace")):
+        if stream is not None and hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors=errors, newline="\n")
 
 
 def replace(source: Path, destination: Path) -> None:

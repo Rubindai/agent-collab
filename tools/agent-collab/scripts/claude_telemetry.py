@@ -100,7 +100,7 @@ def capture(path: Path, run_id: str, expected_effort: str, raw: str) -> bool:
     directory = STRICT_JSON.ensure_private_directory(pending_directory(path))
     descriptor, marker_name = tempfile.mkstemp(prefix="stop-", dir=directory)
     marker = Path(marker_name)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+    with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
         if os.name == "posix":
             os.fchmod(handle.fileno(), 0o600)
         handle.write("capture pending\n")
@@ -150,6 +150,7 @@ def capture(path: Path, run_id: str, expected_effort: str, raw: str) -> bool:
 
 
 def main() -> int:
+    STRICT_JSON.use_utf8_stdio()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--run-id", required=True)

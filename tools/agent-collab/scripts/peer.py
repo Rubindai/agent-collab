@@ -1970,6 +1970,8 @@ def run_request(
 
 
 def main(argv: list[str] | None = None) -> int:
+    # The wrapper's stdout is peer-report.json; keep it UTF-8 with LF.
+    STRICT_JSON.use_utf8_stdio()
     parser = argparse.ArgumentParser(description="Invoke the Agent Collab cross-product peer once.")
     parser.add_argument("request_json", type=Path, help="Path to the Agent Collab request JSON file.")
     parser.add_argument("--repo-root", type=Path, default=None, help="Repository root. Defaults to git top-level.")

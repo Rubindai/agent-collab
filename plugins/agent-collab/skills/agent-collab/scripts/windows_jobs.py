@@ -21,6 +21,7 @@ from typing import Any
 
 _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
+CREATE_SUSPENDED = 0x00000004
 JOB_OBJECT_QUERY = 0x0004
 JOB_OBJECT_TERMINATE = 0x0008
 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
@@ -30,12 +31,14 @@ PROCESS_TERMINATE = 0x0001
 PROCESS_DUP_HANDLE = 0x0040
 PROCESS_SET_QUOTA = 0x0100
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-SYNCHRONIZE = 0x00100000
+THREAD_SUSPEND_RESUME = 0x0002
+TH32CS_SNAPTHREAD = 0x00000004
 DUPLICATE_SAME_ACCESS = 0x0002
 ERROR_FILE_NOT_FOUND = 2
 ERROR_INVALID_PARAMETER = 87
 ERROR_ALREADY_EXISTS = 183
-WAIT_TIMEOUT = 0x102
+STILL_ACTIVE = 259
+INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
 
 class _IoCounters(ctypes.Structure):
@@ -90,6 +93,18 @@ class _BasicAccountingInformation(ctypes.Structure):
     ]
 
 
+class _ThreadEntry(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", wintypes.DWORD),
+        ("cntUsage", wintypes.DWORD),
+        ("th32ThreadID", wintypes.DWORD),
+        ("th32OwnerProcessID", wintypes.DWORD),
+        ("tpBasePri", wintypes.LONG),
+        ("tpDeltaPri", wintypes.LONG),
+        ("dwFlags", wintypes.DWORD),
+    ]
+
+
 def _function(name: str, restype: Any, *argtypes: Any) -> Any:
     function = getattr(_kernel32, name)
     function.restype = restype
@@ -117,7 +132,15 @@ _OpenProcess = _function("OpenProcess", wintypes.HANDLE, wintypes.DWORD, wintype
 _GetProcessTimes = _function(
     "GetProcessTimes", wintypes.BOOL, wintypes.HANDLE, *([ctypes.POINTER(wintypes.FILETIME)] * 4)
 )
-_WaitForSingleObject = _function("WaitForSingleObject", wintypes.DWORD, wintypes.HANDLE, wintypes.DWORD)
+_GetExitCodeProcess = _function("GetExitCodeProcess", wintypes.BOOL, wintypes.HANDLE, wintypes.LPDWORD)
+_IsProcessInJob = _function(
+    "IsProcessInJob", wintypes.BOOL, wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)
+)
+_CreateToolhelp32Snapshot = _function("CreateToolhelp32Snapshot", wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD)
+_Thread32First = _function("Thread32First", wintypes.BOOL, wintypes.HANDLE, ctypes.POINTER(_ThreadEntry))
+_Thread32Next = _function("Thread32Next", wintypes.BOOL, wintypes.HANDLE, ctypes.POINTER(_ThreadEntry))
+_OpenThread = _function("OpenThread", wintypes.HANDLE, wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+_ResumeThread = _function("ResumeThread", wintypes.DWORD, wintypes.HANDLE)
 _DuplicateHandle = _function(
     "DuplicateHandle",
     wintypes.BOOL,
@@ -152,13 +175,19 @@ def _open_process(pid: int, access: int) -> Any:
 
 
 def _running(process: Any) -> bool:
-    return _WaitForSingleObject(process, 0) == WAIT_TIMEOUT
+    # A process that exits with code 259 reads as running, which fails closed.
+    code = wintypes.DWORD()
+    if not _GetExitCodeProcess(process, ctypes.byref(code)):
+        raise _last_error("GetExitCodeProcess")
+    return code.value == STILL_ACTIVE
 
 
 def process_start_time(pid: int) -> str:
     """Return a live process's creation time in 100 ns units since 1601."""
 
-    process = _open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE)
+    # Limited query access is granted for most processes of other users, so
+    # a reused PID still reads as a different process instead of unknown.
+    process = _open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION)
     try:
         # An open handle keeps an exited process's record readable; exited is
         # not a match.
@@ -173,23 +202,57 @@ def process_start_time(pid: int) -> str:
 
 
 def pid_alive(pid: int) -> bool:
+    """Return whether pid is live; unreadable evidence counts as live."""
+
     try:
-        process = _open_process(pid, SYNCHRONIZE)
+        process = _open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION)
     except ProcessLookupError:
         return False
-    except PermissionError:
+    except OSError:
         return True
     try:
         return _running(process)
+    except OSError:
+        return True
     finally:
         _CloseHandle(process)
+
+
+def resume(pid: int) -> None:
+    """Resume a process created with CREATE_SUSPENDED."""
+
+    snapshot = _CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)
+    if snapshot == INVALID_HANDLE_VALUE:
+        raise _last_error("CreateToolhelp32Snapshot")
+    resumed = 0
+    try:
+        entry = _ThreadEntry()
+        entry.dwSize = ctypes.sizeof(entry)
+        more = _Thread32First(snapshot, ctypes.byref(entry))
+        while more:
+            if entry.th32OwnerProcessID == pid:
+                thread = _OpenThread(THREAD_SUSPEND_RESUME, False, entry.th32ThreadID)
+                if not thread:
+                    raise _last_error(f"OpenThread({entry.th32ThreadID})")
+                try:
+                    if _ResumeThread(thread) == 0xFFFFFFFF:
+                        raise _last_error(f"ResumeThread({entry.th32ThreadID})")
+                finally:
+                    _CloseHandle(thread)
+                resumed += 1
+            more = _Thread32Next(snapshot, ctypes.byref(entry))
+    finally:
+        _CloseHandle(snapshot)
+    if not resumed:
+        raise ProcessLookupError(f"process {pid} has no thread to resume")
 
 
 def adopt(pid: int) -> None:
     """Make pid the root of a new kill-on-close job that only pid holds open.
 
-    The caller must kill pid if this raises: a process that was never
-    assigned is not contained by any job.
+    Create pid suspended and resume it only after this returns: assignment is
+    not retroactive, so anything pid started earlier would be outside the job.
+    The caller must kill pid if this raises.
     """
 
     name = job_name(pid)
@@ -244,7 +307,12 @@ def _active_processes(job: Any) -> int:
 
 
 def group_alive(pgid: int) -> bool:
-    """Return whether the job rooted at pgid still has a live member."""
+    """Return whether the job rooted at pgid still has a live member.
+
+    Callers check the root's exact identity first. Once the root has exited
+    its kill-on-close job is gone, so a missing name proves nothing is left
+    there; a live, matching root keeps the group live on its own.
+    """
 
     try:
         job = _open_job(pgid, JOB_OBJECT_QUERY)
@@ -265,7 +333,9 @@ def terminate_group(pgid: int, timeout_seconds: float) -> dict[str, Any]:
     """Terminate every member of the job rooted at pgid and prove quiescence.
 
     Windows has no group-wide graceful signal, so the job is terminated
-    directly.
+    directly. Callers hold the root's verified identity or Popen handle, so a
+    live root with no visible job means the name is in another session's
+    namespace, not that the group ended.
     """
 
     try:
@@ -273,8 +343,20 @@ def terminate_group(pgid: int, timeout_seconds: float) -> dict[str, Any]:
     except OSError as exc:
         return {"outcome": "permission_denied", "quiescent": False, "pgid": pgid, "details": str(exc)}
     if job is None:
+        if pid_alive(pgid):
+            return {
+                "outcome": "job_not_visible",
+                "quiescent": False,
+                "pgid": pgid,
+                "details": "run cancel from the Windows session that started the run",
+            }
         return {"outcome": "not_running", "quiescent": True, "pgid": pgid}
     try:
+        inside = wintypes.BOOL()
+        if not _IsProcessInJob(_GetCurrentProcess(), job, ctypes.byref(inside)):
+            raise _last_error("IsProcessInJob")
+        if inside.value:
+            raise ValueError("refusing to terminate the caller's own process group")
         if _active_processes(job) == 0:
             return {"outcome": "not_running", "quiescent": True, "pgid": pgid}
         if not _TerminateJobObject(job, 1):

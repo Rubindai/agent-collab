@@ -1254,7 +1254,10 @@ def run_operation_lock(run_dir: Path):
         yield
     finally:
         if acquired:
-            STRICT_JSON.unlock(descriptor)
+            try:
+                STRICT_JSON.unlock(descriptor)
+            except OSError:
+                pass
         os.close(descriptor)
 
 
@@ -4515,6 +4518,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    STRICT_JSON.use_utf8_stdio()
     parser = build_parser()
     args = parser.parse_args(argv)
     return args.func(args)

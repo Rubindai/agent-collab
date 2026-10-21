@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import TestCase, mock
@@ -37,8 +38,13 @@ def windows(module):
 
 
 class FakeJobs:
+    CREATE_SUSPENDED = 0x4
+
     def __init__(self):
         self.calls = []
+
+    def resume(self, pid):
+        self.calls.append(("resume", pid))
 
     def process_start_time(self, pid):
         self.calls.append(("start_time", pid))
@@ -133,11 +139,12 @@ class WindowsProcessGroupTests(TestCase):
             mock.patch.object(safety.subprocess, "Popen", return_value=process) as popen,
         ):
             self.assertIs(safety.popen_group(["x"], cwd="/"), process)
-            self.assertEqual(popen.call_args.kwargs["creationflags"], 0x200)
+            self.assertEqual(popen.call_args.kwargs["creationflags"], 0x200 | 0x4)
             self.assertIs(safety.popen_group(["x"], detached=True), process)
-            self.assertEqual(popen.call_args.kwargs["creationflags"], 0x200 | 0x08000000 | 0x01000000)
+            self.assertEqual(popen.call_args.kwargs["creationflags"], 0x200 | 0x4 | 0x08000000 | 0x01000000)
             self.assertNotIn("start_new_session", popen.call_args.kwargs)
-            self.assertEqual(jobs.calls, [("adopt", 77), ("adopt", 77)])
+            # The suspended root is assigned to its job before it runs.
+            self.assertEqual(jobs.calls, [("adopt", 77), ("resume", 77), ("adopt", 77), ("resume", 77)])
 
             popen.side_effect = PermissionError(5, "Access is denied")
             with self.assertRaisesRegex(PermissionError, "forbid breakaway"):
@@ -170,9 +177,9 @@ class WindowsProcessGroupTests(TestCase):
         ):
             kwargs = {}
             command = safety.gated_command(["codex.exe", "exec"], 5, kwargs)
-            self.assertEqual(command[:2], [sys.executable, "-c"])
-            self.assertEqual(command[2], safety.WINDOWS_GATE_CODE)
-            self.assertEqual(command[3:], ["1005", "codex.exe", "exec"])
+            self.assertEqual(command[:3], [sys.executable, "-I", "-c"])
+            self.assertEqual(command[3], safety.WINDOWS_GATE_CODE)
+            self.assertEqual(command[4:], ["1005", "codex.exe", "exec"])
             self.assertEqual(kwargs["startupinfo"].lpAttributeList["handle_list"], [1005])
             self.assertNotIn("pass_fds", kwargs)
             self.assertEqual(inherited, [(1005, True)])
@@ -191,6 +198,45 @@ class WindowsProcessGroupTests(TestCase):
         os.close(write_fd)
         self.assertEqual(process.communicate(timeout=10)[0], "started\n")
         self.assertEqual(process.returncode, 0)
+
+
+class CrossPlatformIdentityTests(TestCase):
+    def test_another_platforms_identity_is_unknown_not_dead(self):
+        safety = fixtures.load_peer().SAFETY
+        windows_identity = {"kind": "windows_process", "pid": 4, "pgid": 4,
+                            "boot_id": "not_available", "start_time": "1"}
+        self.assertEqual(safety.process_identity_state(windows_identity), "unknown")
+        posix_identity = safety.process_identity(os.getpid())
+        with windows(safety):
+            self.assertEqual(safety.process_identity_state(posix_identity), "unknown")
+        self.assertEqual(safety.process_identity_state(posix_identity), "matching")
+
+    def test_windows_trampoline_keeps_ntstatus_exit_codes(self):
+        code = fixtures.load_peer().SAFETY.WINDOWS_GATE_CODE
+        self.assertIn("code - 2**32 if code >= 2**31 else code", code)
+
+
+class SnapshotReaderTests(TestCase):
+    def test_timeout_stops_git_helpers_that_hold_the_pipe(self):
+        snapshot = fixtures.load_snapshot()
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp) / "bin"
+            bin_dir.mkdir()
+            marker = Path(tmp) / "helper.pid"
+            fake_git = bin_dir / "git"
+            fake_git.write_text(
+                "#!/bin/sh\n"
+                f"sleep 30 & echo $! > '{marker}'\n"
+                "sleep 30\n"
+            )
+            fake_git.chmod(0o755)
+            path = os.pathsep.join([str(bin_dir), os.environ.get("PATH", "")])
+            started = time.monotonic()
+            with mock.patch.dict(os.environ, {"PATH": path}), self.assertRaises(TimeoutError):
+                snapshot._git_output_digest(Path(tmp), ["diff"], time.monotonic() + 1)
+            self.assertLess(time.monotonic() - started, 5)
+            helper = int(marker.read_text())
+            self.assertIsNone(fixtures.process_state(helper))
 
 
 class WindowsLaunchPolicyTests(TestCase):
