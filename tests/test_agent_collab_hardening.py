@@ -345,3 +345,102 @@ class ProviderSchemaTests(TestCase):
                     walk(value, f"{path}[{index}]")
 
         walk(_schema("peer-report-provider.schema.json"))
+
+
+def _git(repo, *args):
+    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True,
+                   env={**{k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
+                        "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
+
+
+class SnapshotCoverageTests(TestCase):
+    def setUp(self):
+        self.snapshot = fixtures.load_snapshot()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = Path(self.tmp.name) / "repo"
+        self.repo.mkdir()
+        _git(self.repo, "init", "-q")
+        for name in ("a.txt", "b.txt", "c.txt"):
+            (self.repo / name).write_text(name)
+        _git(self.repo, "add", ".")
+        _git(self.repo, "commit", "-qm", "init")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def changed(self, mutate):
+        before = self.snapshot.mutation_snapshot(self.repo)
+        mutate()
+        after = self.snapshot.mutation_snapshot(self.repo)
+        return self.snapshot.diff_snapshots(before, after)
+
+    def test_read_only_git_status_is_not_a_mutation(self):
+        os.utime(self.repo / "a.txt", (1, 1))
+        result = self.changed(lambda: _git(self.repo, "status", "--porcelain"))
+        self.assertFalse(result["changed"], result)
+
+    def test_assume_unchanged_and_skip_worktree_edits_are_detected(self):
+        _git(self.repo, "update-index", "--assume-unchanged", "a.txt")
+        _git(self.repo, "update-index", "--skip-worktree", "b.txt")
+        result = self.changed(lambda: ((self.repo / "a.txt").write_text("edited"),
+                                       (self.repo / "b.txt").write_text("edited")))
+        self.assertTrue(result["changed"])
+        self.assertIn("a.txt", result["changed_paths"])
+        self.assertIn("b.txt", result["changed_paths"])
+
+    def test_setting_assume_unchanged_is_detected(self):
+        result = self.changed(lambda: _git(self.repo, "update-index", "--assume-unchanged", "a.txt"))
+        self.assertTrue(result["changed"])
+
+    def test_permission_only_change_is_detected(self):
+        os.chmod(self.repo / "c.txt", 0o644)
+        result = self.changed(lambda: os.chmod(self.repo / "c.txt", 0o600))
+        self.assertTrue(result["changed"])
+        self.assertIn("c.txt", result["changed_paths"])
+
+    def test_textconv_cannot_hide_a_further_edit_to_a_dirty_file(self):
+        (self.repo / ".gitattributes").write_text("*.txt diff=blank\n")
+        _git(self.repo, "add", ".gitattributes")
+        _git(self.repo, "commit", "-qm", "attrs")
+        _git(self.repo, "config", "diff.blank.textconv", "true")
+        (self.repo / "a.txt").write_text("dirty once")
+        result = self.changed(lambda: (self.repo / "a.txt").write_text("dirty twice"))
+        self.assertTrue(result["changed"])
+
+    def test_inherited_git_dir_does_not_redirect_the_snapshot(self):
+        other = Path(self.tmp.name) / "other"
+        other.mkdir()
+        _git(other, "init", "-q")
+        with mock.patch.dict(os.environ, {"GIT_DIR": str(other / ".git")}):
+            data = self.snapshot.mutation_snapshot(self.repo)
+        self.assertEqual(data["mode"], "git")
+        self.assertEqual(data["sections"]["tracked_count"], 3)
+
+    def test_non_utf8_filenames_serialize_in_git_and_filesystem_modes(self):
+        strict_json = fixtures.load_host().STRICT_JSON
+        name = os.fsdecode(b"bad-\xff.txt")
+        (self.repo / name).write_text("x")
+        git_data = self.snapshot.mutation_snapshot(self.repo)
+        strict_json.dumps(git_data).encode("utf-8")
+        self.assertEqual(git_data["sections"]["untracked_count"], 1)
+        plain = Path(self.tmp.name) / "plain"
+        plain.mkdir()
+        (plain / name).write_text("x")
+        fs_data = self.snapshot.mutation_snapshot(plain)
+        self.assertEqual(fs_data["mode"], "filesystem")
+        strict_json.dumps(fs_data).encode("utf-8")
+        out = Path(self.tmp.name) / "snapshot.txt"
+        self.snapshot.write_workspace_snapshot(self.repo, out)
+        out.read_text(encoding="utf-8")
+
+
+class StrictJSONEdgeTests(TestCase):
+    def test_lone_surrogates_and_huge_integers_raise_strict_errors(self):
+        strict_json = fixtures.load_host().STRICT_JSON
+        for text in ('"\\ud800"', '{"\\udfff": 1}', "1" * 5000):
+            with self.subTest(text=text[:20]), self.assertRaises(strict_json.StrictJSONError):
+                strict_json.loads(text)
+        with self.assertRaises(strict_json.StrictJSONError):
+            strict_json.dumps({"key": "\ud800"})
+        self.assertEqual(strict_json.loads('"\\ud83d\\ude00"'), "\U0001f600")

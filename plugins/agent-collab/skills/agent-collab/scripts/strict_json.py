@@ -120,18 +120,44 @@ def _parse_float(token: str) -> float:
 def loads(text: str, *, max_bytes: int | None = None) -> Any:
     if not isinstance(text, str):
         raise StrictJSONError("JSON input must be text")
-    size = len(text.encode("utf-8"))
+    try:
+        size = len(text.encode("utf-8"))
+    except UnicodeEncodeError as exc:
+        raise StrictJSONError(f"JSON input is not valid Unicode text: {exc}") from exc
     if max_bytes is not None and size > max_bytes:
         raise StrictJSONError(f"JSON input is {size} bytes; limit is {max_bytes}")
     try:
-        return json.loads(
+        value = json.loads(
             text,
             object_pairs_hook=_object_from_pairs,
             parse_constant=_reject_constant,
             parse_float=_parse_float,
         )
-    except (RecursionError, json.JSONDecodeError) as exc:
+    except StrictJSONError:
+        raise
+    except (RecursionError, ValueError) as exc:
+        # ValueError also covers integers beyond Python's digit limit.
         raise StrictJSONError(str(exc)) from exc
+    _require_unicode_scalars(value)
+    return value
+
+
+def _require_unicode_scalars(value: Any) -> None:
+    """Reject lone surrogates (for example "\\ud800") that cannot be re-encoded."""
+
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, str):
+            try:
+                item.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise StrictJSONError("JSON string contains a lone surrogate code point") from exc
+        elif isinstance(item, dict):
+            stack.extend(item.keys())
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
 
 
 def read_text(path: Path, *, max_bytes: int | None = None) -> str:
@@ -160,13 +186,15 @@ def load(path: Path, *, max_bytes: int | None = None) -> Any:
 
 def dumps(value: Any, *, indent: int | None = 2, sort_keys: bool = True) -> str:
     try:
-        return json.dumps(
+        text = json.dumps(
             value,
             ensure_ascii=False,
             allow_nan=False,
             indent=indent,
             sort_keys=sort_keys,
         )
+        text.encode("utf-8")
+        return text
     except (RecursionError, TypeError, ValueError) as exc:
         raise StrictJSONError(f"value is not strict JSON: {exc}") from exc
 

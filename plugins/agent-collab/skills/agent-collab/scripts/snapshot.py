@@ -134,12 +134,36 @@ def should_ignore(path: Path, repo_root: Path, ignored_paths: Iterable[Path] | N
     return any(_has_prefix(parts, prefix) for prefix in IGNORED_REL_PREFIXES)
 
 
+# Repository config must not run programs (fsmonitor) or rewrite content
+# (textconv) during a host snapshot, and inherited GIT_* variables must not
+# redirect it to another repository or index.
+GIT_BASE_COMMAND = (
+    "git", "--no-optional-locks",
+    "-c", "diff.autoRefreshIndex=false",
+    "-c", "core.fsmonitor=false",
+    "-c", "core.untrackedCache=false",
+)
+
+
+def _git_env() -> dict[str, str]:
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return env
+
+
+def _printable(value: str) -> str:
+    """Render POSIX names losslessly as valid UTF-8 for JSON artifacts."""
+    return value.encode("utf-8", "surrogateescape").decode("utf-8", "backslashreplace")
+
+
 def _run_git(repo_root: Path, args: list[str], deadline: float) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
-            ["git", "--no-optional-locks", "-c", "diff.autoRefreshIndex=false", *args],
+            [*GIT_BASE_COMMAND, *args],
             cwd=repo_root,
-            text=True,
+            env=_git_env(),
+            encoding="utf-8",
+            errors="surrogateescape",
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=_remaining_seconds(deadline),
@@ -176,8 +200,9 @@ def _git_output_digest(repo_root: Path, args: list[str], deadline: float) -> str
     try:
         with tempfile.TemporaryFile(mode="w+b") as errors:
             process = subprocess.Popen(
-                ["git", "--no-optional-locks", "-c", "diff.autoRefreshIndex=false", *args],
+                [*GIT_BASE_COMMAND, *args],
                 cwd=repo_root,
+                env=_git_env(),
                 stdout=subprocess.PIPE,
                 stderr=errors,
             )
@@ -258,7 +283,7 @@ def _bounded_entries(entries: dict[str, str]) -> tuple[dict[str, str], int, str]
         digest.update(line)
         digest.update(b"\0")
         if len(retained) < MAX_RETAINED_ENTRIES and retained_bytes + len(line) <= MAX_RETAINED_ENTRY_BYTES:
-            retained[path] = signature
+            retained[_printable(path)] = _printable(signature)
             retained_bytes += len(line)
     return retained, len(entries), digest.hexdigest()
 
@@ -267,10 +292,10 @@ def _bounded_status(value: str, separator: str) -> tuple[str, str, bool]:
     raw = value.encode("utf-8", "surrogateescape")
     digest = hashlib.sha256(raw).hexdigest()
     if len(raw) <= MAX_RETAINED_STATUS_BYTES:
-        return value, digest, False
+        return _printable(value), digest, False
     boundary = raw.rfind(separator.encode(), 0, MAX_RETAINED_STATUS_BYTES)
     prefix = raw[:boundary + 1] if boundary >= 0 else b""
-    return prefix.decode("utf-8", "surrogateescape"), digest, True
+    return _printable(prefix.decode("utf-8", "surrogateescape")), digest, True
 
 
 def _hash_file(path: Path, deadline: float) -> str:
@@ -384,7 +409,9 @@ def _git_control_entries(repo_root: Path, deadline: float) -> dict[str, str]:
         ("common/info/exclude", common_dir / "info" / "exclude"),
         ("common/packed-refs", common_dir / "packed-refs"),
         ("worktree/HEAD", git_dir / "HEAD"),
-        ("worktree/index", git_dir / "index"),
+        # The raw index is omitted: read-only status refreshes rewrite its stat
+        # cache. Staged content and assume-unchanged/skip-worktree flags are
+        # covered by the `ls-files --stage -v` index digest.
         ("worktree/config.worktree", git_dir / "config.worktree"),
     ]
     refs_dir = common_dir / "refs"
@@ -403,6 +430,40 @@ def _git_control_entries(repo_root: Path, deadline: float) -> dict[str, str]:
     for label, path in candidates:
         if path.exists() or path.is_symlink():
             entries[label] = _path_signature(path, deadline)
+    return dict(sorted(entries.items()))
+
+
+def _git_tracked_entries(
+    repo_root: Path,
+    ignored_paths: Iterable[Path] | None,
+    deadline: float,
+) -> dict[str, str]:
+    """Record working-tree metadata Git status cannot see.
+
+    Every tracked path contributes its type and permission bits, which catches
+    mode-only changes Git does not track. Paths Git deliberately skips
+    (assume-unchanged or skip-worktree) also contribute a content hash.
+    """
+
+    repo_root = _resolve(repo_root)
+    output = _git_stdout(repo_root, ["ls-files", "-v", "-z", *_git_pathspecs(repo_root, ignored_paths)], deadline)
+    entries: dict[str, str] = {}
+    for entry in (item for item in output.split("\0") if item):
+        tag, _, raw_path = entry.partition(" ")
+        path = repo_root / raw_path
+        _remaining_seconds(deadline)
+        try:
+            stat = path.lstat()
+        except FileNotFoundError:
+            entries[raw_path] = f"missing tag={tag}"
+            continue
+        except OSError as exc:
+            entries[raw_path] = f"error error={type(exc).__name__}"
+            continue
+        signature = f"mode={stat.st_mode:o}"
+        if tag.islower() or tag == "S":
+            signature = f"{_path_signature(path, deadline)} tag={tag}"
+        entries[raw_path] = signature
     return dict(sorted(entries.items()))
 
 
@@ -431,6 +492,7 @@ def _filesystem_entries(
             if should_ignore(path, repo_root, ignored):
                 continue
             rel = _absolute(path).relative_to(repo_root).as_posix()
+            _remaining_seconds(deadline)
             try:
                 if child.is_symlink():
                     entries[rel] = f"symlink target={os.readlink(path)!r}"
@@ -452,6 +514,10 @@ def _filesystem_entries(
     return dict(sorted(entries.items()))
 
 
+# Raw bytes, no textconv rewriting, and submodule content changes inline.
+GIT_DIFF_OPTIONS = ("--binary", "--no-ext-diff", "--no-textconv", "--submodule=diff")
+
+
 def _git_snapshot(
     repo_root: Path,
     ignored_paths: Iterable[Path] | None,
@@ -459,7 +525,10 @@ def _git_snapshot(
 ) -> dict[str, Any]:
     pathspecs = _git_pathspecs(repo_root, ignored_paths)
     head = _git_head(repo_root, deadline)
-    index = _git_output_digest(repo_root, ["ls-files", "--stage", "-z", *pathspecs], deadline)
+    index = _git_output_digest(repo_root, ["ls-files", "--stage", "-v", "-z", *pathspecs], deadline)
+    tracked, tracked_count, tracked_digest = _bounded_entries(
+        _git_tracked_entries(repo_root, ignored_paths, deadline)
+    )
     untracked, untracked_count, untracked_digest = _bounded_entries(
         _git_untracked_entries(repo_root, ignored_paths, deadline)
     )
@@ -480,6 +549,9 @@ def _git_snapshot(
     sections = {
         "head": head,
         "index": index,
+        "tracked": tracked,
+        "tracked_count": tracked_count,
+        "tracked_digest": tracked_digest,
         "untracked": untracked,
         "untracked_count": untracked_count,
         "untracked_digest": untracked_digest,
@@ -498,8 +570,8 @@ def _git_snapshot(
         "status_z": status_z,
         "status_z_digest": status_z_digest,
         "status_z_truncated": status_z_truncated,
-        "diff": _git_output_digest(repo_root, ["diff", "--binary", "--no-ext-diff", *pathspecs], deadline),
-        "diff_cached": _git_output_digest(repo_root, ["diff", "--cached", "--binary", "--no-ext-diff", *pathspecs], deadline),
+        "diff": _git_output_digest(repo_root, ["diff", *GIT_DIFF_OPTIONS, *pathspecs], deadline),
+        "diff_cached": _git_output_digest(repo_root, ["diff", "--cached", *GIT_DIFF_OPTIONS, *pathspecs], deadline),
     }
     digest = _digest_lines(
         [
@@ -508,6 +580,7 @@ def _git_snapshot(
             status_z_digest,
             sections["diff"],
             sections["diff_cached"],
+            tracked_digest,
             untracked_digest,
             ignored_digest,
             git_control_digest,
@@ -612,6 +685,17 @@ def diff_snapshots(before: dict[str, Any], after: dict[str, Any], limit: int = 2
                 changed_path_set.add("<HEAD>")
             if before_sections.get("index") != after_sections.get("index"):
                 changed_path_set.add("<index>")
+            before_tracked = before_sections.get("tracked", {})
+            after_tracked = after_sections.get("tracked", {})
+            if isinstance(before_tracked, dict) and isinstance(after_tracked, dict):
+                keys = set(before_tracked) | set(after_tracked)
+                changed_path_set.update(
+                    path for path in keys if before_tracked.get(path) != after_tracked.get(path)
+                )
+                if (before_sections.get("tracked_digest") != after_sections.get("tracked_digest")
+                        and (before_sections.get("tracked_count", len(before_tracked)) > len(before_tracked)
+                             or after_sections.get("tracked_count", len(after_tracked)) > len(after_tracked))):
+                    changed_path_set.add("<tracked entries beyond retained path sample may have changed>")
             before_untracked = before_sections.get("untracked", {})
             after_untracked = after_sections.get("untracked", {})
             if isinstance(before_untracked, dict) and isinstance(after_untracked, dict):
@@ -698,12 +782,13 @@ def snapshot_text(
         )
         lines.extend(
             [
-                f"branch={_git_stdout(repo_root, ['branch', '--show-current'], effective_deadline)}",
+                f"branch={_printable(_git_stdout(repo_root, ['branch', '--show-current'], effective_deadline))}",
                 f"head={snapshot['sections']['head']}",
                 f"dirty={'true' if snapshot['sections']['status_z_digest'] != EMPTY_SHA256 or snapshot['sections']['untracked_count'] else 'false'}",
                 f"untracked_entry_count={snapshot['sections']['untracked_count']}",
                 f"ignored_entry_count={snapshot['sections']['ignored_count']}",
                 f"git_control_entry_count={snapshot['sections']['git_control_count']}",
+                f"tracked_entry_count={snapshot['sections']['tracked_count']}",
                 f"status_truncated={'true' if snapshot['sections']['status_truncated'] else 'false'}",
                 "-- status_porcelain_v1",
                 status,
