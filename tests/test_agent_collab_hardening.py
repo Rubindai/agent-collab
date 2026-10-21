@@ -444,3 +444,129 @@ class StrictJSONEdgeTests(TestCase):
         with self.assertRaises(strict_json.StrictJSONError):
             strict_json.dumps({"key": "\ud800"})
         self.assertEqual(strict_json.loads('"\\ud83d\\ude00"'), "\U0001f600")
+
+
+class WorkspaceGuardPathTests(TestCase):
+    def test_symlinked_guard_is_rejected_instead_of_followed(self):
+        host = fixtures.load_host()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            _git(repo, "init", "-q")
+            guard = host.workspace_guard_path(repo)
+            guard.parent.mkdir(parents=True, exist_ok=True)
+            outside = Path(tmp) / "outside.json"
+            guard.symlink_to(outside)
+            self.assertEqual(host.workspace_guard_path(repo), guard)
+            self.assertEqual(host.workspace_guard_lock_path(repo).parent, guard.parent)
+            with self.assertRaisesRegex(SystemExit, "must not be a symlink"):
+                host.read_workspace_guard(repo)
+            self.assertFalse(outside.exists())
+
+    def test_git_probes_ignore_inherited_git_variables(self):
+        host = fixtures.load_host()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, other = Path(tmp) / "repo", Path(tmp) / "other"
+            for path in (repo, other):
+                path.mkdir()
+                _git(path, "init", "-q")
+            with mock.patch.dict(os.environ, {"GIT_DIR": str(other / ".git")}):
+                guard = host.workspace_guard_path(repo)
+            self.assertEqual(guard.parent, (repo / ".git" / "agent-collab").resolve())
+
+
+class PeerSupervisionSignalTests(TestCase):
+    def test_signal_during_spawn_does_not_release_the_provider_gate(self):
+        import signal as signal_module
+
+        peer = fixtures.load_peer()
+        real_popen = peer.subprocess.Popen
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "provider-started"
+
+            def signalled_popen(*args, **kwargs):
+                process = real_popen(*args, **kwargs)
+                os.kill(os.getpid(), signal_module.SIGTERM)
+                return process
+
+            with mock.patch.object(peer.subprocess, "Popen", side_effect=signalled_popen):
+                with self.assertRaises(SystemExit) as raised:
+                    peer.run_peer_command(
+                        [sys.executable, "-c", f"from pathlib import Path;Path({str(marker)!r}).write_text('x')"],
+                        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
+                    )
+            self.assertEqual(raised.exception.code, 128 + signal_module.SIGTERM)
+            self.assertFalse(marker.exists())
+
+    def test_signal_during_cleanup_is_deferred_until_cleanup_finishes(self):
+        import signal as signal_module
+
+        peer = fixtures.load_peer()
+        real_cleanup = peer._cleanup_provider_process
+        calls = []
+
+        def interrupted_cleanup(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                os.kill(os.getpid(), signal_module.SIGTERM)
+            return real_cleanup(*args, **kwargs)
+
+        with mock.patch.object(peer, "_cleanup_provider_process", side_effect=interrupted_cleanup):
+            with self.assertRaises(SystemExit) as raised:
+                peer.run_peer_command(
+                    [sys.executable, "-c", "print('done')"],
+                    text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
+                )
+        self.assertEqual(raised.exception.code, 128 + signal_module.SIGTERM)
+        self.assertEqual(len(calls), 1)
+
+
+class SharedHistoryCleanupTests(TestCase):
+    def run_clear(self, host, repo, run_root):
+        args = host.build_parser().parse_args([
+            "clear-history", "--all", "--yes", "--run-root", str(run_root), "--repo-root", str(repo),
+        ])
+        return host.build_clear_history_output(args)
+
+    def test_another_worktrees_guarded_run_and_young_orphans_survive(self):
+        host = fixtures.load_host()
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            repo_a, repo_b, run_root = base / "a", base / "b", base / "shared-runs"
+            for path in (repo_a, repo_b):
+                path.mkdir()
+            owned = run_root / "run-a"
+            young = run_root / "starting-orphan"
+            old = run_root / "stale-orphan"
+            for run_dir in (owned, young, old):
+                run_dir.mkdir(parents=True)
+                (run_dir / "host-request.json").write_text("{}")
+            (owned / "peer-process.json").write_text(json.dumps({"repo_root": str(repo_a)}))
+            os.utime(old, (1, 1))
+            guards = {repo_a.resolve(): base / "guard-a.json", repo_b.resolve(): base / "guard-b.json"}
+            with mock.patch.object(host, "workspace_guard_path", side_effect=lambda root: guards[root.resolve()]):
+                host.acquire_workspace_guard(repo_a, "run-a", "codex", owned)
+                status, output = self.run_clear(host, repo_b, run_root)
+            self.assertEqual(status, 0)
+            self.assertEqual([item["run_id"] for item in output["deleted"]], ["stale-orphan"])
+            self.assertTrue(owned.exists())
+            self.assertTrue(young.exists())
+            self.assertFalse(old.exists())
+
+
+class WrapperBaselineTests(TestCase):
+    def test_wrapper_reuses_only_a_matching_host_baseline(self):
+        peer = fixtures.load_peer()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run_dir = Path(tmp) / "repo", Path(tmp) / "run"
+            repo.mkdir()
+            run_dir.mkdir()
+            env = {"AGENT_COLLAB_RUN_DIR": str(run_dir)}
+            self.assertIsNone(peer.host_baseline_snapshot(env, repo))
+            baseline = {"mode": "git", "repo_root": str(repo.resolve()), "digest": "d"}
+            (run_dir / "before.snapshot.json").write_text(json.dumps(baseline))
+            self.assertEqual(peer.host_baseline_snapshot(env, repo), baseline)
+            self.assertIsNone(peer.host_baseline_snapshot(env, Path(tmp)))
+            (run_dir / "before.snapshot.json").write_text(json.dumps({**baseline, "mode": "isolated"}))
+            self.assertIsNone(peer.host_baseline_snapshot(env, repo))
+            self.assertIsNone(peer.host_baseline_snapshot({}, repo))

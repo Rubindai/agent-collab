@@ -95,7 +95,10 @@ REQUEST_KEYS = REQUIRED_REQUEST_KEYS
 RUN_ID_SAFE_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
 MIN_AGENT_TIMEOUT_SECONDS = 60
 MAX_PEER_OUTPUT_BYTES = 16 * 1024 * 1024
-MAX_AVAILABILITY_ATTESTATION_AGE_SECONDS = 300
+# The host attests before it creates the run, then takes a bounded baseline
+# snapshot (at most 300 s) before the wrapper launches the provider. The window
+# covers that snapshot plus margin; it is checked again at provider launch.
+MAX_AVAILABILITY_ATTESTATION_AGE_SECONDS = 600
 PROVIDER_GATE_CODE = """import os, sys
 gate_fd = int(sys.argv[1])
 try:
@@ -259,10 +262,17 @@ def run_peer_command(args: list[str], **kwargs: Any) -> subprocess.CompletedProc
     previous_handlers: dict[int, Any] = {}
     forwarded_signals = {signal.SIGTERM, signal.SIGINT}
     pending_signal: list[int] = []
+    cleanup_started: list[bool] = []
+    deferred_signal: list[int] = []
     provider_gate_read: int | None = None
     provider_gate_write: int | None = None
 
     def forward_signal(signum: int, _frame: Any) -> None:
+        if cleanup_started:
+            # Cleanup is already terminating the group; re-entering it from a
+            # handler could interrupt tracker writes. Exit once it finishes.
+            deferred_signal.append(signum)
+            return
         process_value = active.get("process")
         identity_value = active.get("identity")
         if process_value is not None and identity_value is not None:
@@ -302,16 +312,18 @@ def run_peer_command(args: list[str], **kwargs: Any) -> subprocess.CompletedProc
         _write_provider_tracker(tracker_path, run_id, identity, "running", None)
         if launch_check is not None:
             launch_check()
+        # A signal that arrived during spawn must stop the gated child before
+        # the provider CLI is released to start work.
+        if pending_signal:
+            signum = pending_signal[-1]
+            _cleanup_provider_process(process, identity, tracker_path, run_id)
+            raise SystemExit(128 + signum)
         if provider_gate_write is not None:
             os.write(provider_gate_write, b"1")
             os.close(provider_gate_write)
             provider_gate_write = None
             os.close(provider_gate_read)
             provider_gate_read = None
-        if pending_signal:
-            signum = pending_signal[-1]
-            _cleanup_provider_process(process, identity, tracker_path, run_id)
-            raise SystemExit(128 + signum)
     except BaseException:
         for descriptor in (provider_gate_write, provider_gate_read):
             if descriptor is not None:
@@ -349,6 +361,7 @@ def run_peer_command(args: list[str], **kwargs: Any) -> subprocess.CompletedProc
             try:
                 stdout, stderr = process.communicate(input=input_text, timeout=timeout)
             except subprocess.TimeoutExpired as timeout_error:
+                cleanup_started.append(True)
                 cleanup = _cleanup_provider_process(process, identity, tracker_path, run_id)
                 if not cleanup.get("quiescent"):
                     raise ProviderCleanupError(
@@ -413,6 +426,7 @@ def run_peer_command(args: list[str], **kwargs: Any) -> subprocess.CompletedProc
                     break
                 time.sleep(0.02)
 
+            cleanup_started.append(True)
             cleanup = _cleanup_provider_process(process, identity, tracker_path, run_id)
             cleanup_result = cleanup
             for reader in readers:
@@ -452,6 +466,7 @@ def run_peer_command(args: list[str], **kwargs: Any) -> subprocess.CompletedProc
             if stop_reason == "timeout":
                 raise subprocess.TimeoutExpired(args, timeout, output=stdout, stderr=stderr)
 
+        cleanup_started.append(True)
         cleanup = cleanup_result or _cleanup_provider_process(process, identity, tracker_path, run_id)
         if not cleanup.get("quiescent"):
             raise ProviderCleanupError(
@@ -502,6 +517,8 @@ def run_peer_command(args: list[str], **kwargs: Any) -> subprocess.CompletedProc
         if os.name == "posix":
             for signum, handler in previous_handlers.items():
                 signal.signal(signum, handler)
+        if deferred_signal:
+            raise SystemExit(128 + deferred_signal[-1])
 
     completed = subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
     if check and completed.returncode != 0:
@@ -598,12 +615,15 @@ def default_schema_path() -> Path:
 
 
 def default_repo_root() -> Path:
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     try:
         completed = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
+            env=env,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            timeout=30,
             check=True,
         )
         return Path(completed.stdout.strip()).resolve()
@@ -691,7 +711,9 @@ def validate_request(
             raise RequestValidationError("availability_attestation checked_at must be an ISO-8601 timestamp") from exc
         if age_seconds < -30 or age_seconds > MAX_AVAILABILITY_ATTESTATION_AGE_SECONDS:
             raise RequestValidationError(
-                "availability_attestation is not fresh enough to launch the persisted request"
+                "availability_attestation is not fresh enough to launch the persisted request "
+                f"(age {age_seconds:.0f} s; limit {MAX_AVAILABILITY_ATTESTATION_AGE_SECONDS} s); "
+                "start a new run"
             )
     timeout = request["peer_timeout_seconds"]
     if (
@@ -1248,6 +1270,30 @@ def ignored_snapshot_paths(
     return paths
 
 
+def host_baseline_snapshot(env: dict[str, str], repo_root: Path) -> dict[str, Any] | None:
+    """Reuse the host's committed direct-mode baseline instead of rescanning.
+
+    The host captures before.snapshot.json with the same run-directory
+    exclusion immediately before launching the wrapper; a second scan only
+    doubled startup time on large workspaces.
+    """
+
+    run_dir = env.get("AGENT_COLLAB_RUN_DIR", "").strip()
+    if not run_dir:
+        return None
+    path = Path(run_dir) / "before.snapshot.json"
+    if not path.is_file() or path.is_symlink():
+        return None
+    data = STRICT_JSON.load(path, max_bytes=16 * 1024 * 1024)
+    if (
+        not isinstance(data, dict)
+        or data.get("mode") not in {"git", "filesystem"}
+        or data.get("repo_root") != str(repo_root.resolve())
+    ):
+        return None
+    return data
+
+
 def git_mutation_snapshot(
     repo_root: Path,
     ignored_paths: list[Path] | None = None,
@@ -1540,7 +1586,7 @@ def invoke_peer(
                 "digest": "disposable_overlay",
             }
         else:
-            before_snapshot = git_mutation_snapshot(
+            before_snapshot = host_baseline_snapshot(effective_env, repo_root) or git_mutation_snapshot(
                 repo_root, snapshot_ignored_paths, deadline=absolute_deadline,
             )
     except (TimeoutError, subprocess.TimeoutExpired) as exc:

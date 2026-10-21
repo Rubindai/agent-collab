@@ -224,15 +224,38 @@ def settings_path(scope: str, repo_root: Path) -> Path:
     raise ValueError(f"invalid settings scope: {scope}")
 
 
+GIT_PROBE_TIMEOUT_SECONDS = 30
+
+
+def run_git_probe(args: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str] | None:
+    """Run a bounded Git metadata query; None means Git is not installed.
+
+    Inherited GIT_* variables are ignored so the worktree is always the one
+    containing the working directory. A slow Git fails closed rather than
+    silently selecting a different (non-Git) guard location.
+    """
+
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    try:
+        return subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=GIT_PROBE_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except FileNotFoundError:
+        return None
+    except subprocess.TimeoutExpired as exc:
+        raise SystemExit(f"git {' '.join(args)} exceeded {GIT_PROBE_TIMEOUT_SECONDS} seconds") from exc
+
+
 def default_repo_root() -> Path:
-    completed = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-    if completed.returncode == 0 and completed.stdout.strip():
+    completed = run_git_probe(["rev-parse", "--show-toplevel"])
+    if completed is not None and completed.returncode == 0 and completed.stdout.strip():
         return Path(completed.stdout.strip()).resolve()
     return Path.cwd().resolve()
 
@@ -1240,22 +1263,16 @@ def read_json_if_exists(path: Path) -> dict[str, Any] | None:
 
 
 def workspace_guard_path(repo_root: Path) -> Path:
-    try:
-        completed = subprocess.run(
-            ["git", "rev-parse", "--git-path", WORKSPACE_GUARD_GIT_PATH],
-            cwd=repo_root,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
-    except FileNotFoundError:
-        completed = None
+    completed = run_git_probe(["rev-parse", "--git-path", WORKSPACE_GUARD_GIT_PATH], cwd=repo_root)
     if completed is not None and completed.returncode == 0 and completed.stdout.strip():
         candidate = Path(completed.stdout.strip())
-        return (candidate if candidate.is_absolute() else repo_root / candidate).resolve()
-    base = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")).expanduser()
-    return (base / "agent-collab" / "workspace-guards" / f"{repo_storage_id(repo_root)}.json").resolve()
+        candidate = candidate if candidate.is_absolute() else repo_root / candidate
+    else:
+        base = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")).expanduser()
+        candidate = base / "agent-collab" / "workspace-guards" / f"{repo_storage_id(repo_root)}.json"
+    # Resolve only the parent: a symlinked guard file must be rejected, not
+    # followed to a redirected guard or lock location.
+    return candidate.parent.resolve() / candidate.name
 
 
 def workspace_guard_lock_path(repo_root: Path) -> Path:
@@ -1348,6 +1365,8 @@ def workspace_guard_transaction(repo_root: Path):
 
 def _read_workspace_guard_unlocked(repo_root: Path) -> tuple[Path, dict[str, Any] | None]:
     path = workspace_guard_path(repo_root)
+    if path.is_symlink():
+        raise SystemExit(f"Agent Collab workspace guard must not be a symlink: {path}")
     if not path.exists():
         return path, None
     try:
@@ -3443,6 +3462,9 @@ def run_dir_timestamp(run_dir: Path) -> str:
     return datetime.fromtimestamp(timestamp, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+ORPHAN_STARTUP_GRACE_SECONDS = 24 * 60 * 60
+
+
 def history_candidates(run_root: Path, state_runtime: Any) -> list[dict[str, Any]]:
     loaded_state = state_runtime.load_state(run_root)
     jobs = [job for job in loaded_state.get("jobs", []) if isinstance(job, dict)]
@@ -3530,14 +3552,44 @@ def build_clear_history_output(args: argparse.Namespace, default_retained: int =
         str(Path(str(active_guard["run_dir"])).resolve()) if active_guard is not None else None
     )
 
+    owner_guards: dict[str, Any] = {}
+
+    def owner_guard_holds(candidate: dict[str, Any]) -> bool:
+        """Preserve runs another worktree's guard owns, or whose owner is unknown."""
+
+        run_dir = Path(candidate["run_dir"])
+        try:
+            process_info = read_json_if_exists(run_dir / "peer-process.json")
+        except (OSError, ValueError, SystemExit):
+            return True
+        owner = process_info.get("repo_root") if isinstance(process_info, dict) else None
+        if not isinstance(owner, str) or not owner:
+            # A startup records ownership only after creating the run directory;
+            # keep young orphans until a start could no longer be in progress.
+            if candidate["status"] != "orphan":
+                return False
+            try:
+                age = time.time() - run_dir.stat().st_mtime
+            except OSError:
+                return True
+            return age < ORPHAN_STARTUP_GRACE_SECONDS
+        if owner not in owner_guards:
+            try:
+                owner_guards[owner] = read_workspace_guard(Path(owner))[1]
+            except (OSError, ValueError, RuntimeError, SystemExit):
+                owner_guards[owner] = "indeterminate"
+        guard = owner_guards[owner]
+        if guard == "indeterminate":
+            return True
+        return bool(guard is not None and guard.get("run_id") == candidate["run_id"])
+
     def is_guarded(candidate: dict[str, Any]) -> bool:
-        return bool(
-            active_guard is not None
-            and (
-                candidate["run_id"] == guarded_run_id
-                or str(Path(candidate["run_dir"]).resolve()) == guarded_run_dir
-            )
-        )
+        if active_guard is not None and (
+            candidate["run_id"] == guarded_run_id
+            or str(Path(candidate["run_dir"]).resolve()) == guarded_run_dir
+        ):
+            return True
+        return owner_guard_holds(candidate)
 
     if getattr(args, "run", None):
         try:
