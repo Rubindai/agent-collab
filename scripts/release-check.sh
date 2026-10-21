@@ -45,8 +45,17 @@ skip_or_fail() {
 }
 
 step "unit tests"
+# On failure print every failure and error block, not just the summary, so a
+# CI log identifies each failing test.
+show_test_failures() {
+  if grep -q '^======================================================================$' "$work/tests.log"; then
+    sed -n '/^======================================================================$/,$p' "$work/tests.log" | head -1000 >&2
+  else
+    tail -40 "$work/tests.log" >&2
+  fi
+}
 PYTHONDONTWRITEBYTECODE=1 "$python_bin" -m unittest discover -s tests -v >"$work/tests.log" 2>&1 \
-  || { tail -40 "$work/tests.log" >&2; fail "unit tests"; }
+  || { show_test_failures; fail "unit tests"; }
 tail -3 "$work/tests.log"
 if grep -Eq '^OK \(skipped=|skipped [0-9]+' "$work/tests.log"; then
   grep -E "skipped '" "$work/tests.log" || true
