@@ -1,6 +1,6 @@
 # Launch Policy and Prerequisites
 
-Read this reference before `start`. Paths are relative to the skill root containing `SKILL.md`; use only that root's current scripts, references, and schemas.
+Read **Resolve the run** before `start`. Consult **Runtime boundaries and failures** when evaluating permissions or isolation, supervising platform-specific processes, or resolving a blocked run. Paths are relative to the skill root containing `SKILL.md`; use only that root's current scripts, references, and schemas.
 
 ## Resolve the run
 

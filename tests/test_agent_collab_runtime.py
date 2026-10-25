@@ -896,6 +896,12 @@ class PeerV2Tests(TestCase):
         claude_helpers = peer.build_prompt(request(), REPO_ROOT, PEER_SCHEMA)
         self.assertIn("runtime limit of 8 Agent calls", claude_helpers)
         self.assertNotIn("V1 configures", claude_helpers)
+        for helper_prompt in (codex_helpers, claude_helpers):
+            self.assertEqual(helper_prompt.count("Do not nest helpers"), 1)
+            self.assertIn(
+                "an explicit prohibition on further helper or cross-product delegation",
+                helper_prompt,
+            )
         writable = peer.build_prompt(request(edit_allowed=True), REPO_ROOT, PEER_SCHEMA)
         self.assertIn("disjoint writable paths and one integration owner", writable)
 
@@ -3312,7 +3318,15 @@ class PackageTests(TestCase):
         launch = (CODEX_SKILL_ROOT / "references" / "launch.md").read_text()
         for token in ("--peer-model", "--peer-effort", '"schema_version": "2.0"'):
             self.assertIn(token, codex)
-        self.assertIn("references/launch.md", codex)
+        for reference in ("launch.md", "peer-only.md", "synthesize.md"):
+            self.assertIn("references/" + reference, codex)
+            self.assertTrue((CODEX_SKILL_ROOT / "references" / reference).is_file())
+        commands = re.findall(r'scripts/host\.py" (start|finish|complete)', codex)
+        self.assertEqual(commands, ["start", "finish", "complete"])
+        for artifact in ("host-first-pass.json", "host-synthesis.json", "host-result.json"):
+            self.assertIn(artifact, codex)
+        self.assertIn("peer did not run", codex)
+        self.assertIn("Never retry a fallback", codex)
         for token in ("claude-fable-5", "helper_policy_unavailable", "sandbox_unavailable"):
             self.assertIn(token, launch)
         self.assertNotIn("plugins/cache", codex)
