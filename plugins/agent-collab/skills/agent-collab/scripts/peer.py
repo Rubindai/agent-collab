@@ -775,6 +775,11 @@ def build_prompt(request: dict[str, Any], repo_root: Path, schema_path: Path) ->
             "in fresh contexts without parent conversation history; never use conversation forks for them. "
             "Reuse helpers for follow-ups and merge only evidence-backed summaries."
         )
+        if request["peer"] == "codex":
+            subagent_rule += (
+                ' For Codex spawn_agent, explicitly set fork_turns="none"; '
+                "omitting it inherits the parent conversation. This context rule is instructional."
+            )
     subagent_rule += " Delegate only through ordinary native Agent/spawn_agent helpers; do not use Workflow, agent teams, remote agents, or external sessions for delegation."
     values = {
         "role": ROLE_BY_MODE[request["mode"]],

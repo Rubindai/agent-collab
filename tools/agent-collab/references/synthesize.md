@@ -1,19 +1,25 @@
 # Host Synthesis Contract
 
+- [Workflow](#workflow)
+- [Mode-specific review](#mode-specific-review)
+- [Artifact shapes](#artifact-shapes)
+- [Evidence boundaries](#evidence-boundaries)
+- [Claim labels and verdicts](#claim-labels-and-verdicts)
+
 Agent Collab is a challenge-first second opinion workflow. The host owns the final answer. Complete the authorized workflow through synthesis and closure without stopping at a plan or offer to continue; report any blocker and remaining scope. After required checks pass, repeat or broaden them only when new evidence, changes, or unresolved claims justify it. Use peer, helper, and adjudicator reports as evidence, not authority. Do not treat agreement as proof; agreement only tells the host which shared evidence deserves closer inspection.
 
 Canonical modes are `review`, `research`, `design`, `plan`, and `debug`. The runtime auto-selects the mode from the target and neutral brief unless the host supplies one explicitly. Official-doc research can happen in any mode; `research` means source-backed external facts are the primary deliverable.
 
 Freshness rule: When a material claim depends on current or external information, including APIs, product behavior, platform docs, dependency behavior, pricing, security advisories, laws, policies, or research, use the latest official documentation or primary sources. Do not rely on model memory for unstable facts. If online research is disabled or sources are unavailable, state that limitation explicitly and mark the claim as unverified.
 
-Required flow:
+## Workflow
 
 1. Default to the configured full-capability launch posture, `adjudicator_enabled=true`, and `edit_allowed=false`. Full capability, including Claude `bypassPermissions`, has host-level consequences; Anthropic recommends that mode only inside isolated containers, VMs, or development containers without internet access where host damage is impossible. Safe mode is an explicit user choice. Classify the target and mode, and enable edits only when the user explicitly delegates changes. Launch capability and edit authorization are independent decisions.
 2. Build a neutral peer brief before doing host analysis. Lead with the outcome, then supply relevant context, expected output or done condition, decisive boundaries, and available verification signals. Include only process constraints that matter to independence or safety; omit host conclusions, suspected findings, and implementation defense.
 3. Start the peer run before host analysis. Use `scripts/host.py start` so the runtime first attests the exact model and effort pair, then creates the run directory, resolved request, workspace snapshot, recursion guard, and background peer process. For Codex, require the exact pair in the `codex debug models` catalog Codex resolves at launch (an online refresh when its five-minute cache is stale; Codex can silently fall back to its bundled catalog if that refresh fails). In a bounded, configuration-reduced Claude probe outside the target repository, require API `modelUsage` to include the exact resolved model and the `Stop` hook to report the expected effective effort (`xhigh` for `ultracode`, otherwise the requested provider level). Explicit `ultracode` execution fails before launch with `helper_policy_unavailable`, because Workflow orchestration bypasses the finite helper counter; do not substitute another mode. If the result is unavailable or unknown, or a Codex safe-mode sandbox prerequisite fails, report the structured failure instead of retrying another model, effort, permission posture, or isolation mode.
 4. Do not read peer output until independent host work is complete and `host-first-pass.json` exists. This is a procedural independence rule; artifact ordering is evidence of the sequence but the runtime cannot prove the host's reading history.
 5. While the peer is running, do independent challenge-first host analysis. Use host-local helpers only when separate context or independent verification materially helps. Keep tightly coupled planning, routing, and domain work in the main loop. Mapping, review, research, architecture, security, debugging, test strategy, and verification are optional lenses, not a mandatory pipeline. Enforce the resolved finite helper count and instructed depth, eight helpers by default. Claude peer total Agent calls are runtime-enforced. Codex peer concurrency is provider-enforced; total calls and V2 nesting depth are instructional, while V1 uses `agents.max_depth=1`. In full mode retain native tools and permissions, subject to provider policy. Do not poll peer status during this independent phase.
-6. The spawner must start host-local helpers in fresh contexts, without parent conversation forks; an already-running helper cannot choose its initial context, model, or effort. Supply a neutral bounded task and lens, required inputs, edit authorization, remaining deadline, and expected evidence; omit peer findings, host conclusions, suspected answers, and implementation defense. Preserve the spawning host's exact model and effective effort, avoid conflicting custom agent definitions, and reuse helpers for follow-ups. Count every new spawn against the resolved finite total, even after a helper completes. Explicitly forbid further helper delegation, Agent Collab, `$agent-collab:agent-collab`, `/agent-collab:agent-collab`, provider peer CLIs, and cross-product peer commands. The worktree guard is the hard recursion boundary. The runtime enforces Claude peer total `Agent` calls, Codex peer concurrency, and helper artifact admission; Claude resumes through `SendMessage` do not consume Agent calls. Host-native launch discipline, Codex total calls, and V2 depth remain instructions because the runtime cannot intercept them; V1 depth is configured separately.
+6. The spawner must start host-local helpers in fresh contexts, without parent conversation forks; an already-running helper cannot choose its initial context, model, or effort. For Codex `spawn_agent`, explicitly set `fork_turns="none"`; omission inherits parent history, and this rule is instructional. Supply a neutral bounded task and lens, required inputs, edit authorization, remaining deadline, and expected evidence; omit peer findings, host conclusions, suspected answers, and implementation defense. Preserve the spawning host's exact model and effective effort, avoid conflicting custom agent definitions, and reuse helpers for follow-ups. Count every new spawn against the resolved finite total, even after a helper completes. Explicitly forbid further helper delegation, Agent Collab, `$agent-collab:agent-collab`, `/agent-collab:agent-collab`, provider peer CLIs, and cross-product peer commands. The worktree guard is the hard recursion boundary. The runtime enforces Claude peer total `Agent` calls, Codex peer concurrency, and helper artifact admission; Claude resumes through `SendMessage` do not consume Agent calls. Host-native launch discipline, Codex total calls, and V2 depth remain instructions because the runtime cannot intercept them; V1 depth is configured separately.
 7. Ask all agents to use latest official documentation or primary sources for unstable external claims. Use online research only when the resolved run enables it; otherwise mark freshness-dependent claims unverified.
 8. Use `finish` as the synchronization point after `host-first-pass.json`; status polling is not part of the normal independent-host phase. `finish` waits for peer artifacts, validates the current canonical output shape, and builds synthesis support artifacts. It intentionally keeps the hard worktree recursion guard active through synthesis.
 9. Respect the hard finite peer deadline, 2700 seconds by default. Empty `peer-report.json` or stderr does not mean the process is stalled before that deadline. Do not replace Agent Collab with a direct provider peer-CLI fallback. At the deadline, terminate the peer and preserve the structured timeout result; never wait indefinitely. Do not configure a Claude turn cap unless the user explicitly requests `--claude-max-turns N`; if reached, preserve `turn_limit_reached` separately from timeout.
@@ -25,13 +31,15 @@ Required flow:
 
 Do not edit files, run formatters, or run commands likely to create repo-visible artifacts while the peer is running unless the user explicitly delegated implementation and the host can still distinguish host edits from peer edits. Before authorized parallel writes, assign disjoint writable paths to each writer and one integration owner. Serialize overlapping edits and preserve other agents' changes.
 
-Mode-specific challenge:
+## Mode-specific review
 
 - `review`: decide whether the work should ship. Lead with concrete bugs, regressions, security risks, missing tests, compatibility breaks, and file/line evidence.
 - `research`: decide whether claimed facts are true, current, and applicable. Prefer latest official documentation and source-backed evidence; label inference and stale or unavailable facts.
 - `design`: decide whether the proposed approach is the right architecture. Compare alternatives, constraints, reversibility, operational risk, migration impact, and repo fit.
 - `plan`: decide whether the execution sequence is actually ready. Check prerequisites, ordering, rollback, verification, test strategy, and human decisions.
 - `debug`: decide whether the diagnosis is proven. Challenge reproduction, logs, code paths, environment assumptions, and the smallest checks that would falsify the theory.
+
+## Artifact shapes
 
 Host first-pass claim shape:
 
@@ -125,6 +133,8 @@ when synthesis evidence is missing, malformed, detached from those sources, belo
 run, or predates changed mutation or claim evidence. After reports change, rerun `finish`, review
 the current claim matrix, and synthesize again with both current digests before retrying.
 
+## Evidence boundaries
+
 In direct mode, before peer launch, the host admits only a canonical baseline snapshot that fits its finite
 16 MiB JSON read limit; a larger baseline rolls startup back. Large Git index and patch output
 is represented by streamed digests. Large status and file manifests retain complete digests and
@@ -149,7 +159,7 @@ If cancellation is interrupted after its mutation diagnostic is committed, retry
 and reuses the recorded snapshot hashes without overwriting that evidence. The recorded snapshot
 describes the cancellation capture point; later workspace edits are outside that capture.
 
-Claim labels:
+## Claim labels and verdicts
 
 - `confirmed`: independently supported by host verification.
 - `plausible_unverified`: credible but not fully verified in this run.

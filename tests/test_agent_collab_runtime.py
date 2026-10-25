@@ -881,6 +881,7 @@ class PeerV2Tests(TestCase):
         self.assertIn("Do not research online", offline)
         self.assertIn("Do not use local subagents", offline)
         self.assertNotIn("As the spawner", offline)
+        self.assertNotIn("fork_turns", offline)
         codex_helpers = peer.build_prompt(
             request(peer="codex", host="claude"),
             REPO_ROOT,
@@ -889,6 +890,7 @@ class PeerV2Tests(TestCase):
         self.assertIn("Helpers must use this peer's exact model and effective effort", codex_helpers)
         self.assertIn("at most 8 total helper spawn calls", codex_helpers)
         self.assertIn("fresh contexts without parent conversation history", codex_helpers)
+        self.assertIn('explicitly set fork_turns="none"', codex_helpers)
         self.assertIn("Do not use explicit spawn overrides or custom agents", codex_helpers)
         self.assertIn("V1 configures agents.max_depth=1", codex_helpers)
         self.assertIn("under V2 the nesting ban is instructional", codex_helpers)
@@ -896,6 +898,7 @@ class PeerV2Tests(TestCase):
         claude_helpers = peer.build_prompt(request(), REPO_ROOT, PEER_SCHEMA)
         self.assertIn("runtime limit of 8 Agent calls", claude_helpers)
         self.assertNotIn("V1 configures", claude_helpers)
+        self.assertNotIn("fork_turns", claude_helpers)
         for helper_prompt in (codex_helpers, claude_helpers):
             self.assertEqual(helper_prompt.count("Do not nest helpers"), 1)
             self.assertIn(
@@ -954,7 +957,7 @@ class PeerV2Tests(TestCase):
         self.assertNotIn("features.memory_tool=false", args)
         for pinned in ('approval_policy="never"', 'approvals_reviewer="user"',
                        "features.memories=false", "memories.use_memories=false",
-                       "memories.generate_memories=false"):
+                       "memories.generate_memories=false", "features.agent_message_board=false"):
             self.assertEqual(args.count(pinned), 1)
             self.assertEqual(args[args.index(pinned) - 1], "-c")
         self.assertEqual(args[args.index("--model") + 1], "gpt-6-astra")

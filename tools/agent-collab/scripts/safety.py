@@ -684,6 +684,9 @@ def codex_launch_policy_overrides() -> list[str]:
         # provider feature alias re-enables the feature during config merging.
         "memories.use_memories=false",
         "memories.generate_memories=false",
+        # A configured remote board can receive external context even in an
+        # ephemeral session. Keep ordinary native helper messaging available.
+        "features.agent_message_board=false",
     ]
 
 
