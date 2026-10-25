@@ -1,13 +1,10 @@
 # Changelog
 
-## Unreleased
+## 6.0.1 — 2026-10-25
 
 - License the project under MIT and include the license, package README, and SVG listing/composer icons in the synchronized dual-host package.
-
 - Disable Codex message boards for peers so inherited remote-board configuration cannot inject cross-session messages into an ephemeral independent review. Ordinary local-helper messaging remains available.
-
 - Name the required `fork_turns="none"` argument for independent Codex helpers and distinguish that instruction from Claude fork controls. Clarify retained hooks/MCP, Skill-triggered subagents, and explicit Fable 5.1 selection.
-
 - Fix Linux Codex safe-mode preflight for npm installations by asking Codex to initialize its read-only sandbox instead of guessing bundled Bubblewrap paths.
 - Pin Codex's canonical memory-use and memory-generation controls so an inherited provider feature alias cannot restore automatic saved-memory context or memory tools.
 - Correct the public-directory publication guidance to distinguish OpenAI's icon requirement from Anthropic's published checklist.
