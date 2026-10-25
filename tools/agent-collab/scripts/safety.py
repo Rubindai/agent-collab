@@ -488,29 +488,8 @@ def native_command(args: list[str], env: Mapping[str, str] | None = None) -> lis
     return [resolve_cli(args[0], (os.environ if env is None else env).get("PATH")), *args[1:]]
 
 
-def codex_bundled_bwrap(env: Mapping[str, str] | None = None) -> str | None:
-    """Locate the bubblewrap Codex falls back to when none is on PATH.
-
-    Codex 0.163.0 checks its package resources directory and then legacy
-    `codex-resources/bwrap` locations next to the resolved executable.
-    """
-
-    codex = shutil.which("codex", path=(env or os.environ).get("PATH"))
-    if codex is None:
-        return None
-    exe_dir = Path(codex).resolve().parent
-    for candidate in (
-        exe_dir.parent / "codex-resources" / "bwrap",
-        exe_dir / "codex-resources" / "bwrap",
-        exe_dir / "bwrap",
-    ):
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return str(candidate)
-    return None
-
-
 def sandbox_preflight(repo_root: Path, env: Mapping[str, str] | None = None) -> dict[str, Any]:
-    """Exercise Linux bubblewrap once without launching a peer.
+    """Exercise Codex's Linux sandbox once without launching a model.
 
     Full-capability callers and Claude peers must not call this function. It is
     a prerequisite check for Codex read-only sandboxing on Linux. Non-Linux
@@ -536,26 +515,19 @@ def sandbox_preflight(repo_root: Path, env: Mapping[str, str] | None = None) -> 
             "backend": "provider_native",
             "details": f"Linux bwrap preflight is not applicable on {sys.platform}",
         }
-    executable = shutil.which("bwrap", path=(env or os.environ).get("PATH")) or codex_bundled_bwrap(env)
-    if executable is None:
-        return {
-            "status": "sandbox_unavailable",
-            "backend": "bwrap",
-            "details": "bubblewrap was not found on PATH or bundled with the Codex CLI",
-        }
+    # Let the installed CLI resolve its own bundled backend, including npm's
+    # native optional dependency. Guessing paths beside the npm JS launcher
+    # misses that backend. An explicit built-in profile tests OS capability
+    # without managed requirements remapping it to a different profile. This
+    # no-op is not a peer launch; actual peers still load managed policy.
     command = [
-        executable,
-        "--ro-bind",
-        "/",
-        "/",
-        "--proc",
-        "/proc",
-        "--dev",
-        "/dev",
-        "--unshare-all",
-        "--die-with-parent",
-        "--chdir",
+        "codex",
+        "sandbox",
+        "--permission-profile",
+        ":read-only",
+        "--cd",
         str(repo_root),
+        "--",
         sys.executable,
         "-c",
         "pass",
@@ -576,19 +548,19 @@ def sandbox_preflight(repo_root: Path, env: Mapping[str, str] | None = None) -> 
         return {
             "status": "sandbox_unavailable",
             "backend": "bwrap",
-            "details": f"bubblewrap preflight could not run: {exc}",
+            "details": f"Codex sandbox preflight could not run: {exc}",
         }
     if completed.returncode != 0:
         detail = (completed.stderr or completed.stdout).strip()[-4000:]
         return {
             "status": "sandbox_unavailable",
             "backend": "bwrap",
-            "details": detail or f"bubblewrap exited with status {completed.returncode}",
+            "details": detail or f"Codex sandbox exited with status {completed.returncode}",
         }
     return {
         "status": "available",
         "backend": "bwrap",
-        "details": "bubblewrap isolation preflight succeeded",
+        "details": "Codex read-only sandbox initialization succeeded",
     }
 
 
@@ -708,6 +680,10 @@ def codex_launch_policy_overrides() -> list[str]:
         'approval_policy="never"',
         'approvals_reviewer="user"',
         "features.memories=false",
+        # Canonical subsystem controls still suppress memory if an inherited
+        # provider feature alias re-enables the feature during config merging.
+        "memories.use_memories=false",
+        "memories.generate_memories=false",
     ]
 
 

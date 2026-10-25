@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Fix Linux Codex safe-mode preflight for npm installations by asking Codex to initialize its read-only sandbox instead of guessing bundled Bubblewrap paths.
+- Pin Codex's canonical memory-use and memory-generation controls so an inherited provider feature alias cannot restore automatic saved-memory context or memory tools.
+- Correct the public-directory publication guidance to distinguish OpenAI's icon requirement from Anthropic's published checklist.
 - Shorten the skill entry point and move conditional launch, platform, and failure details into a dedicated reference while preserving the peer-first workflow and closure requirements.
 - Select optional helpers by context separation and independent verification; keep tightly coupled work in the main loop. Assign launch choices to the spawner and explicitly forbid helpers from delegating again.
 - Correct generated Codex prompts and documentation to distinguish V1 configured depth from V2 instructional depth, hidden spawn override fields from runtime rejection, and Claude model-list narrowing from exact-model checks.

@@ -953,7 +953,8 @@ class PeerV2Tests(TestCase):
         self.assertNotIn("--ask-for-approval", args)
         self.assertNotIn("features.memory_tool=false", args)
         for pinned in ('approval_policy="never"', 'approvals_reviewer="user"',
-                       "features.memories=false"):
+                       "features.memories=false", "memories.use_memories=false",
+                       "memories.generate_memories=false"):
             self.assertEqual(args.count(pinned), 1)
             self.assertEqual(args[args.index(pinned) - 1], "-c")
         self.assertEqual(args[args.index("--model") + 1], "gpt-6-astra")

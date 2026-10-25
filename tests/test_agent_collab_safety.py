@@ -196,19 +196,48 @@ class SafetyTests(unittest.TestCase):
     @unittest.skipUnless(sys.platform.startswith("linux"), "Linux bwrap contract")
     def test_sandbox_preflight_reports_bwrap_failure_structurally(self):
         completed = subprocess.CompletedProcess(
-            ["/usr/bin/bwrap"],
+            ["codex", "sandbox"],
             1,
             stdout="",
             stderr="bwrap: user namespace unavailable",
         )
         with (
-            mock.patch.object(safety.shutil, "which", return_value="/usr/bin/bwrap"),
             mock.patch.object(safety.subprocess, "run", return_value=completed),
         ):
             result = safety.sandbox_preflight(REPO_ROOT)
         self.assertEqual(result["status"], "sandbox_unavailable")
         self.assertEqual(result["backend"], "bwrap")
         self.assertIn("user namespace unavailable", result["details"])
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux bwrap contract")
+    def test_sandbox_preflight_delegates_backend_discovery_to_codex(self):
+        env = {"PATH": "/npm/bin", "CODEX_HOME": "/isolated/codex-home"}
+        with (
+            mock.patch.object(safety.shutil, "which", return_value=None) as which,
+            mock.patch.object(safety.subprocess, "run", return_value=subprocess.CompletedProcess(
+                ["codex", "sandbox"], 0, stdout="", stderr=""
+            )) as run,
+        ):
+            result = safety.sandbox_preflight(REPO_ROOT, env)
+        self.assertEqual(result["status"], "available")
+        which.assert_not_called()
+        self.assertEqual(run.call_args.args[0], [
+            "codex", "sandbox", "--permission-profile", ":read-only",
+            "--cd", str(REPO_ROOT), "--",
+            sys.executable, "-c", "pass",
+        ])
+        self.assertEqual(run.call_args.kwargs["env"], env)
+        self.assertEqual(run.call_args.kwargs["timeout"], safety.SANDBOX_PREFLIGHT_TIMEOUT_SECONDS)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux bwrap contract")
+    def test_sandbox_preflight_fails_closed_when_codex_cannot_run(self):
+        for error in (FileNotFoundError("codex missing"), subprocess.TimeoutExpired("codex", 15)):
+            with self.subTest(error=type(error).__name__), mock.patch.object(
+                safety.subprocess, "run", side_effect=error
+            ):
+                result = safety.sandbox_preflight(REPO_ROOT)
+            self.assertEqual(result["status"], "sandbox_unavailable")
+            self.assertIn("Codex sandbox preflight could not run", result["details"])
 
     def test_untracked_host_config_content_is_in_mutation_digest(self):
         with tempfile.TemporaryDirectory() as tmp_name:
