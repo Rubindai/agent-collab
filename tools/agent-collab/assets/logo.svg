@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" fill="none">
+  <title>Agent Collab</title>
+  <rect width="256" height="256" rx="56" fill="#182432"/>
+  <path d="M53 54h94a15 15 0 0 1 15 15v56a15 15 0 0 1-15 15H89l-31 26v-26h-5a15 15 0 0 1-15-15V69a15 15 0 0 1 15-15Z" fill="#A7AEFF"/>
+  <path d="M109 98h94a15 15 0 0 1 15 15v56a15 15 0 0 1-15 15h-5v26l-31-26h-58a15 15 0 0 1-15-15v-56a15 15 0 0 1 15-15Z" fill="#76E2CC"/>
+  <path d="M109 98h53v27a15 15 0 0 1-15 15H94v-27a15 15 0 0 1 15-15Z" fill="#F4F7FF"/>
+  <path d="m113 120 9 9 19-20" stroke="#182432" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

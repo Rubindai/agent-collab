@@ -3289,6 +3289,7 @@ class PackageTests(TestCase):
             (root / "scripts").mkdir()
             shutil.copy2(REPO_ROOT / "scripts" / "sync-packages.sh", root / "scripts")
             shutil.copy2(REPO_ROOT / "VERSION", root)
+            shutil.copy2(REPO_ROOT / "LICENSE", root)
             stale = root / "plugins" / "agent-collab" / "skills" / "agent-collab" / "legacy.txt"
             stale.write_text("legacy compatibility payload", encoding="utf-8")
 

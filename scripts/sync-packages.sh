@@ -5,7 +5,7 @@ usage() {
   cat <<'USAGE'
 Usage: scripts/sync-packages.sh [--check]
 
-Sync shared Agent Collab runtime resources into the unified dual-host package.
+Sync shared Agent Collab runtime, documentation, license, and branding assets into the unified dual-host package.
 
 Options:
   --check      Verify the package is already synced without changing files.
@@ -69,13 +69,17 @@ if [[ ! -d "$claude_agents_source" || ! -f "$codex_agent_source" ]]; then
   echo "missing canonical host agent assets under $source_dir/agents" >&2
   exit 1
 fi
+if [[ ! -f "$repo_root/LICENSE" || ! -f "$source_dir/README.md" || ! -d "$source_dir/assets" ]]; then
+  echo "missing package license, README, or canonical branding assets" >&2
+  exit 1
+fi
 
 # New source-root entries must be classified explicitly so shipped payloads
 # cannot be omitted silently. Runtime state and caches remain source-local.
 while IFS= read -r source_entry; do
   source_name="${source_entry##*/}"
   case "$source_name" in
-    SKILL.md|agents|scripts|references|schemas|runs|settings.local.json|__pycache__)
+    SKILL.md|README.md|assets|agents|scripts|references|schemas|runs|settings.local.json|__pycache__)
       ;;
     *)
       echo "unclassified Agent Collab source entry: $source_entry" >&2
@@ -194,10 +198,12 @@ PY
 staging_dir="$(mktemp -d "${TMPDIR:-/tmp}/agent-collab-sync.XXXXXX")"
 new_skill_dir=""
 new_agents_dir=""
+new_metadata_dir=""
 cleanup() {
   rm -rf "$staging_dir"
   [[ -n "$new_skill_dir" ]] && rm -rf "$new_skill_dir"
   [[ -n "$new_agents_dir" ]] && rm -rf "$new_agents_dir"
+  [[ -n "$new_metadata_dir" ]] && rm -rf "$new_metadata_dir"
   return 0
 }
 trap cleanup EXIT
@@ -211,6 +217,8 @@ done
 cp -a "$claude_agents_source" "$staging_dir/claude-agents"
 mkdir -p "$staging_dir/codex-agents"
 cp -a "$codex_agent_source" "$staging_dir/codex-agents/openai.yaml"
+mkdir -p "$staging_dir/package"
+cp -a "$repo_root/LICENSE" "$source_dir/README.md" "$source_dir/assets" "$staging_dir/package/"
 find "$staging_dir" -type d -name __pycache__ -prune -exec rm -rf {} +
 find "$staging_dir" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
 
@@ -221,8 +229,11 @@ if [[ "$check" -eq 0 ]]; then
   skills_parent="$(dirname "$skill_dir")"
   find "$skills_parent" -mindepth 1 -maxdepth 1 -name '.agent-collab.*' -exec rm -rf {} +
   find "$plugin_root" -mindepth 1 -maxdepth 1 -name '.agents.*' -exec rm -rf {} +
+  find "$plugin_root" -mindepth 1 -maxdepth 1 -name '.metadata.*' -exec rm -rf {} +
+  find "$plugin_root" -mindepth 1 -maxdepth 1 -name '.assets.old.*' -exec rm -rf {} +
   new_skill_dir="$(mktemp -d "$skills_parent/.agent-collab.sync.XXXXXX")"
   new_agents_dir="$(mktemp -d "$plugin_root/.agents.sync.XXXXXX")"
+  new_metadata_dir="$(mktemp -d "$plugin_root/.metadata.sync.XXXXXX")"
   chmod 0755 "$new_skill_dir" "$new_agents_dir"
   for filename in "${shared_files[@]}"; do
     cp -a "$staging_dir/$filename" "$new_skill_dir/$filename"
@@ -232,6 +243,7 @@ if [[ "$check" -eq 0 ]]; then
   done
   cp -a "$staging_dir/codex-agents" "$new_skill_dir/agents"
   cp -a "$staging_dir/claude-agents/." "$new_agents_dir/"
+  cp -a "$staging_dir/package/." "$new_metadata_dir/"
   old_skill_dir="$skills_parent/.agent-collab.old.$$"
   old_agents_dir="$plugin_root/.agents.old.$$"
   mv "$skill_dir" "$old_skill_dir"
@@ -242,6 +254,16 @@ if [[ "$check" -eq 0 ]]; then
   fi
   mv "$new_agents_dir" "$plugin_root/agents"
   new_agents_dir=""
+  for filename in LICENSE README.md; do
+    mv "$new_metadata_dir/$filename" "$plugin_root/$filename"
+  done
+  old_assets_dir="$plugin_root/.assets.old.$$"
+  if [[ -e "$plugin_root/assets" ]]; then
+    mv "$plugin_root/assets" "$old_assets_dir"
+  fi
+  mv "$new_metadata_dir/assets" "$plugin_root/assets"
+  rm -rf "$old_assets_dir" "$new_metadata_dir"
+  new_metadata_dir=""
   rm -rf "$old_skill_dir" "$old_agents_dir"
 fi
 
@@ -291,13 +313,14 @@ pairs += [
     (staging / "claude-agents", plugin / "agents", "packaged Claude agents"),
     (staging / "codex-agents", skill / "agents", "packaged Codex agent metadata"),
 ]
+pairs += [(staging / "package" / name, plugin / name, f"packaged {name}") for name in ("LICENSE", "README.md", "assets")]
 for source, packaged, label in pairs:
     same = (
         signature(source) == signature(packaged) if source.is_file() and packaged.is_file()
         else tree(source) == tree(packaged)
     )
     if not same:
-        raise SystemExit(f"{label} is not synchronized with tools/agent-collab (content or file mode differs)")
+        raise SystemExit(f"{label} is not synchronized with its canonical source (content or file mode differs)")
 PY
 
 if [[ -e "$skill_dir/runs" || -e "$skill_dir/settings.local.json" ]]; then

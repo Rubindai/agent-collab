@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- License the project under MIT and include the license, package README, and SVG listing/composer icons in the synchronized dual-host package.
+
 - Disable Codex message boards for peers so inherited remote-board configuration cannot inject cross-session messages into an ephemeral independent review. Ordinary local-helper messaging remains available.
 
 - Name the required `fork_turns="none"` argument for independent Codex helpers and distinguish that instruction from Claude fork controls. Clarify retained hooks/MCP, Skill-triggered subagents, and explicit Fable 5.1 selection.

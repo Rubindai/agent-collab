@@ -6,6 +6,8 @@
   "author": {
     "name": "Agent Collab"
   },
+  "license": "MIT",
+  "icon": "./assets/logo.svg",
   "keywords": [
     "agent-collaboration",
     "code-review",

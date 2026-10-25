@@ -488,9 +488,11 @@ On Windows, `~` is `%USERPROFILE%`. Local settings written by `setup` from a che
 .agents/plugins/marketplace.json                  Codex repo marketplace
 .claude-plugin/marketplace.json                   Claude Code marketplace
 .github/workflows/ci.yml                          CI: release checks in --ci mode (Linux, macOS) and Windows runtime checks; Python 3.11, 3.15
-plugins/agent-collab/                             Dual-host package; skill and agents are synchronized copies, manifests are edited here
+plugins/agent-collab/                             Dual-host package; payload and metadata assets are synchronized copies, manifests are edited here
 tools/agent-collab/                               Canonical skill, runtime, schemas, references, and host-agent assets
 tools/agent-collab/agents/                        Canonical Codex metadata and Claude helper agents
+tools/agent-collab/assets/                        Canonical SVG logo and composer icon
+tools/agent-collab/README.md                      Canonical package overview
 scripts/sync-packages.sh                          Package synchronization and byte/mode parity check
 scripts/release-check.sh                          Every release verification step
 scripts/install-linux-isolation-deps.sh           Linux isolated-workspace dependencies
@@ -506,6 +508,7 @@ tests/windows_runtime_checks.py                   Windows-only Job Object, gate,
 AGENTS.md                                         Repository maintenance contract
 VERSION                                           Release version
 CHANGELOG.md                                      Release history
+LICENSE                                           MIT license, also synchronized into the package
 ```
 
 Edit shared skill and runtime resources only under `tools/agent-collab/`, then synchronize the dual-host package:
@@ -545,7 +548,7 @@ On Windows, the discovery suite's POSIX assertions do not apply; run the Windows
 py -3 tests/windows_runtime_checks.py -v
 ```
 
-Current Plugin Creator guidance keeps this existing `.codex-plugin/plugin.json` format supported as a compatibility fallback; it recommends a root `plugin.json` for new portable packages, which does not require migrating this dual-host package. Codex verification covers strict package JSON, schema and version consistency, official skill validation, and isolated marketplace installation. Test representative requests in a fresh conversation after installation. Public-directory publication additionally requires the submission portal's automated checks. This package has no license declaration or icon: OpenAI requires listing icons before submission and lists the license field as optional; Anthropic's published checklist requires a license but does not list an icon as a blocking requirement. The missing icons mean this package does not meet OpenAI's documented Codex distribution metadata requirements. Local marketplace installation remains supported; passing local validators does not establish directory acceptance. [OpenAI package formats](https://developers.openai.com/plugins/build/plugins), [OpenAI local plugin testing](https://developers.openai.com/plugins/deploy/connect-chatgpt), [OpenAI submission checks](https://developers.openai.com/plugins/deploy/submission), [Anthropic submission checks](https://claude.com/docs/plugins/pre-submission-checklist)
+Current Plugin Creator guidance keeps this existing `.codex-plugin/plugin.json` format supported as a compatibility fallback; it recommends a root `plugin.json` for new portable packages, which does not require migrating this dual-host package. Codex verification covers strict package JSON, schema and version consistency, official skill validation, and isolated marketplace installation. Test representative requests in a fresh conversation after installation. The package includes a README, the MIT license, and SVG logo and composer icons. Both manifests declare MIT, Codex references both icons, and Claude references the listing logo. The sync check compares these packaged files with their canonical sources. OpenAI requires both icons for Codex distribution and lists the license field as optional; Anthropic's checklist requires a README and license declaration. Public-directory publication additionally requires the submission portal's automated checks; passing local validators does not establish directory acceptance. [OpenAI package formats](https://developers.openai.com/plugins/build/plugins), [OpenAI local plugin testing](https://developers.openai.com/plugins/deploy/connect-chatgpt), [OpenAI submission checks](https://developers.openai.com/plugins/deploy/submission), [Anthropic submission checks](https://claude.com/docs/plugins/pre-submission-checklist)
 
 ### Tagged releases
 
@@ -570,3 +573,7 @@ The 2026-10-21 audit reviewed the runtime, schemas, tests, packaging, and docume
 The latest results are scoped to this Linux checkout with the versions recorded above. CI is configured for Linux, macOS, and Windows with Python 3.11 and 3.15; its first macOS run found the zombie EPERM defect fixed in 5.0.1. The 2026-10-25 work exercised Codex-hosted Claude review, but did not rerun macOS or native Windows CI, a live Windows peer, live safe-mode approval behavior, or comparative quality, latency, and cost measurements. Fresh availability probes remain mandatory for every run, since account and model access is not a durable guarantee. Earlier evaluations are recorded in [CHANGELOG.md](CHANGELOG.md).
 
 The Codex and Claude manifests and root `VERSION` must always contain the same Semantic Versioning 2.0.0 version. Record user-visible and breaking changes in the root `CHANGELOG.md`; do not put changelogs inside skills. Version 2.0.0 intentionally rejects 1.x settings and run artifacts rather than translating them or probing compatibility fallbacks.
+
+## License
+
+Agent Collab is available under the [MIT License](LICENSE). Reuse, modification, and redistribution require preserving the copyright and license notices. The installable package includes the same license text.

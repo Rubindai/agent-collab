@@ -5,6 +5,7 @@
   "author": {
     "name": "Agent Collab"
   },
+  "license": "MIT",
   "keywords": [
     "agent-collaboration",
     "code-review",
@@ -17,6 +18,8 @@
     "shortDescription": "Cross-check with Claude/Codex",
     "longDescription": "Run peer-first Claude and Codex collaboration with exact model attestation, strict schema 2.0 run artifacts, independent analysis, and evidence-backed synthesis.",
     "developerName": "Agent Collab",
+    "logo": "./assets/logo.svg",
+    "composerIcon": "./assets/composer-icon.svg",
     "category": "Productivity",
     "capabilities": [
       "Interactive",
