@@ -758,8 +758,8 @@ def build_prompt(request: dict[str, Any], repo_root: Path, schema_path: Path) ->
         subagent_rule = (
             f"Native local subagents are allowed with a provider-enforced concurrency cap of {helper_enforcement['limit']} "
             f"threads. Make at most {helper_enforcement['limit']} total helper spawn calls, even after "
-            "completed threads close. This total-call bound and the ban on nesting are instructions, "
-            "not provider-enforced limits."
+            "completed threads close. The total-call bound is instructional. Do not nest helpers: "
+            "V1 configures agents.max_depth=1; under V2 the nesting ban is instructional."
         )
     else:
         subagent_rule = "Do not use local subagents."
@@ -767,8 +767,9 @@ def build_prompt(request: dict[str, Any], repo_root: Path, schema_path: Path) ->
         subagent_rule += (
             " Helpers must use this peer's exact model and effective effort. Do not use explicit spawn overrides or custom agents that "
             "override either value; if the exact selection cannot be established, do the work yourself. "
-            "Use the fewest helpers needed for sizeable independent workstreams; do not nest helpers "
-            "or delegate quick lookups. Give each a self-contained neutral task, required inputs, "
+            "Use the fewest helpers needed for work that benefits from separate context or independent verification. "
+            "Keep tightly coupled work and quick lookups in your main loop; role names do not require separate agents. "
+            "Do not nest helpers. As the spawner, give each a self-contained neutral task, required inputs, "
             "edit authorization, remaining deadline, and expected evidence. Start independent reviews "
             "in fresh contexts without parent conversation history; never use conversation forks for them. "
             "Reuse helpers for follow-ups and merge only evidence-backed summaries."

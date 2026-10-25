@@ -880,6 +880,7 @@ class PeerV2Tests(TestCase):
         )
         self.assertIn("Do not research online", offline)
         self.assertIn("Do not use local subagents", offline)
+        self.assertNotIn("As the spawner", offline)
         codex_helpers = peer.build_prompt(
             request(peer="codex", host="claude"),
             REPO_ROOT,
@@ -889,6 +890,12 @@ class PeerV2Tests(TestCase):
         self.assertIn("at most 8 total helper spawn calls", codex_helpers)
         self.assertIn("fresh contexts without parent conversation history", codex_helpers)
         self.assertIn("Do not use explicit spawn overrides or custom agents", codex_helpers)
+        self.assertIn("V1 configures agents.max_depth=1", codex_helpers)
+        self.assertIn("under V2 the nesting ban is instructional", codex_helpers)
+        self.assertIn("Keep tightly coupled work and quick lookups in your main loop", codex_helpers)
+        claude_helpers = peer.build_prompt(request(), REPO_ROOT, PEER_SCHEMA)
+        self.assertIn("runtime limit of 8 Agent calls", claude_helpers)
+        self.assertNotIn("V1 configures", claude_helpers)
         writable = peer.build_prompt(request(edit_allowed=True), REPO_ROOT, PEER_SCHEMA)
         self.assertIn("disjoint writable paths and one integration owner", writable)
 
@@ -3302,8 +3309,12 @@ class PackageTests(TestCase):
             [line.split(":", 1)[0] for line in frontmatter.splitlines() if ":" in line],
             ["name", "description"],
         )
-        for token in ("--peer-model", "--peer-effort", "claude-fable-5", '"schema_version": "2.0"'):
+        launch = (CODEX_SKILL_ROOT / "references" / "launch.md").read_text()
+        for token in ("--peer-model", "--peer-effort", '"schema_version": "2.0"'):
             self.assertIn(token, codex)
+        self.assertIn("references/launch.md", codex)
+        for token in ("claude-fable-5", "helper_policy_unavailable", "sandbox_unavailable"):
+            self.assertIn(token, launch)
         self.assertNotIn("plugins/cache", codex)
         self.assertEqual(CODEX_SKILL_ROOT, CLAUDE_SKILL_ROOT)
         self.assertNotIn("allowed-tools:", frontmatter)
@@ -3321,8 +3332,9 @@ class PackageTests(TestCase):
             self.assertNotIn("effort:", frontmatter, path.name)
             self.assertNotIn("tools:", frontmatter, path.name)
             self.assertNotIn("disallowedTools:", frontmatter, path.name)
-            self.assertIn("Preserve the spawning agent's exact model and effective effort", text, path.name)
-            self.assertIn("without parent conversation history", text, path.name)
+            self.assertIn("assigned inputs and repository evidence", text, path.name)
+            self.assertIn("report that gap to the host", text, path.name)
+            self.assertIn("Do not spawn or delegate to other helpers", text, path.name)
             self.assertIn("Do not invoke Agent Collab", text, path.name)
             self.assertIn("hard recursion boundary", text, path.name)
 

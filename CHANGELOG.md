@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Shorten the skill entry point and move conditional launch, platform, and failure details into a dedicated reference while preserving the peer-first workflow and closure requirements.
+- Select optional helpers by context separation and independent verification; keep tightly coupled work in the main loop. Assign launch choices to the spawner and explicitly forbid helpers from delegating again.
+- Correct generated Codex prompts and documentation to distinguish V1 configured depth from V2 instructional depth, hidden spawn override fields from runtime rejection, and Claude model-list narrowing from exact-model checks.
+
 ## 6.0.0 — 2026-10-22
 
 - **Breaking:** require Python 3.11 or newer. Python 3.10 reached end of life on 2026-10-01, and `doctor` now flags it. CI tests the oldest supported release, 3.11, and the latest stable, 3.15.
