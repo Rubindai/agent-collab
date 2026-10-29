@@ -41,6 +41,19 @@ if [[ ! -d "$source_dir" ]]; then
   exit 1
 fi
 
+python_bin="${PYTHON:-python3}"
+if ! command -v "$python_bin" >/dev/null 2>&1; then
+  echo "Python 3 is required; set PYTHON or install python3" >&2
+  exit 1
+fi
+
+# Keep the provider projection generated from the richer canonical contract.
+if [[ "$check" == 1 ]]; then
+  "$python_bin" "$source_dir/scripts/provider_schema.py" --check
+else
+  "$python_bin" "$source_dir/scripts/provider_schema.py"
+fi
+
 plugin_root="$repo_root/plugins/agent-collab"
 skill_dir="$plugin_root/skills/agent-collab"
 shared_files=(SKILL.md)
@@ -132,11 +145,6 @@ do
   fi
 done
 
-python_bin="${PYTHON:-python3}"
-if ! command -v "$python_bin" >/dev/null 2>&1; then
-  echo "Python 3 is required; set PYTHON or install python3" >&2
-  exit 1
-fi
 
 "$python_bin" - "$repo_root" <<'PY'
 import json

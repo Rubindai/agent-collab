@@ -29,24 +29,22 @@ python3 "<skill-root>/scripts/host.py" start --host <host> --target "<target>" -
 
 Replace placeholders with literal values; `<host>` is `codex` or `claude`. Add a canonical `--mode review|research|design|plan|debug` and per-run overrides only as needed under the launch policy. On Windows use `py -3` instead of `python3`.
 
-3. Read [synthesis and artifact contracts](references/synthesize.md). Complete an independent host pass without reading peer output or polling peer status. Use helpers only for work that benefits from separate context or independent verification; keep work requiring repeated shared-context handoffs in the main loop. The role catalog is optional, not a mandatory pipeline. The spawner owns fresh-context selection, exact model and effort inheritance, neutral bounded inputs, authorization, remaining deadline, and expected evidence. Use the fewest helpers needed, respect the resolved total-spawn bound (eight by default), forbid nesting and cross-product delegation, and reuse helpers for follow-ups. Follow the synthesis reference for authorized parallel writes and provider enforcement limits.
-
-4. Save `host-first-pass.json` before reading peer output. Use the complete strict shape in the synthesis reference, beginning with `"schema_version": "2.0"`. Then synchronize:
+3. Read [synthesis and artifact contracts](references/synthesize.md). Complete an independent host pass without reading peer output or polling peer status. Save semantic JSON with `summary` and `claims`, then synchronize:
 
 ```bash
-python3 "<skill-root>/scripts/host.py" finish "<run-dir>"
+python3 "<skill-root>/scripts/host.py" finish "<run-dir>" --first-pass "<first-pass-input>"
 ```
+
+The runtime supplies `"schema_version": "2.0"` and run metadata. Follow the synthesis reference for helper selection, fresh contexts, exact model/effort inheritance, authorization, and the finite helper bound. Role catalogs are optional lenses.
 
 The absolute peer deadline is finite, 2700 seconds by default. Do not cancel or replace a live peer before it unless the user stops the run. At expiry require structured timeout evidence and termination. Do not add a Claude turn cap unless requested.
 
-5. When enabled and available, run a bounded, fresh host-local advisory adjudicator after the independent reports exist. Save its strict `adjudicator-report.json` and run `finish` again to rebuild the claim matrix. `advisory_pending` means no report was supplied. When disabled, do not create that artifact. Verify material claims yourself; agreement is not proof.
+4. When enabled and available, obtain a fresh host-local advisory report and admit it with `finish RUN --adjudicator FILE`. `advisory_pending` means no report was supplied. Verify material claims yourself; agreement is not proof.
 
-6. Write strict `host-synthesis.json`, binding both current mutation and claim-matrix digests from the ready `host-result.json`. Inspect mutation evidence and isolated-workspace cleanup. Close the run immediately before returning the final answer:
+5. `finish` returns `review_dir` and `synthesis_input`. Read the pinned evidence with `result RUN --format markdown --review DIR`, edit the generated four-field synthesis input, then close immediately before answering:
 
 ```bash
-python3 "<skill-root>/scripts/host.py" complete "<run-dir>"
+python3 "<skill-root>/scripts/host.py" complete "<run-dir>" --synthesis "<synthesis-input>"
 ```
 
-Only the host calls `complete`. Each run keeps its own guard entry through validated synthesis and quiescence. Separate sessions may run concurrently in the same worktree. Peer depth markers and CLI shadows deter nested runs but are not a hard recursion boundary. Explicit cancellation uses `cancel`; if it reports `already_terminal`, preserve the report and use `finish`. On Windows cancel from the starting session. See the launch reference for lock, process, sandbox, and failure details.
-
-Complete authorized work, including pending commands and helpers, within the deadline. Use stated assumptions for nonblocking ambiguity; otherwise report concrete blockers and uncovered scope. Keep output concise and evidence-backed, and repeat checks only when changes, failures, or unresolved claims justify them.
+If evidence changes, inspect a new revision from `finish`; never refresh an old judgment's hashes. `cancel` handles an explicit stop after process quiescence.

@@ -146,25 +146,26 @@ def _read_workspace_guards_unlocked(repo_root: Path) -> tuple[Path, dict[str, di
         if not isinstance(parsed["owner_token"], str) or re.fullmatch(r"[0-9a-f]{32}", parsed["owner_token"]) is None:
             raise SystemExit(f"invalid owner token for {run_id!r} in workspace guard at {path}")
         if not isinstance(parsed["run_id"], str) or not CONFIG.is_safe_run_id(parsed["run_id"]) or parsed["run_id"] != run_id:
-            raise SystemExit(f"invalid active Agent Collab run_id in workspace guard at {path}")
-        if parsed["host"] not in CONFIG.ORIGINS or parsed["phase"] not in {"starting", "peer_running", "ready_for_synthesis"}:
-            raise SystemExit(f"invalid active Agent Collab host/phase in workspace guard at {path}")
+            raise SystemExit(f"invalid active Agent Collab run_id for {run_id!r} in workspace guard at {path}")
+        if (not isinstance(parsed["host"], str) or not isinstance(parsed["phase"], str)
+                or parsed["host"] not in CONFIG.ORIGINS or parsed["phase"] not in {"starting", "peer_running", "ready_for_synthesis"}):
+            raise SystemExit(f"invalid active Agent Collab host/phase for {run_id!r} in workspace guard at {path}")
         if not isinstance(parsed["repo_root"], str) or Path(parsed["repo_root"]).resolve() != repo_root.resolve():
-            raise SystemExit(f"active Agent Collab workspace guard repo_root mismatch at {path}")
+            raise SystemExit(f"active Agent Collab workspace guard repo_root mismatch for {run_id!r} at {path}")
         if not isinstance(parsed["run_dir"], str) or not parsed["run_dir"]:
-            raise SystemExit(f"invalid active Agent Collab run_dir in workspace guard at {path}")
+            raise SystemExit(f"invalid active Agent Collab run_dir for {run_id!r} in workspace guard at {path}")
         if ARTIFACTS.parse_utc_timestamp(parsed["created_at"]) is None:
-            raise SystemExit(f"invalid active Agent Collab created_at in workspace guard at {path}")
+            raise SystemExit(f"invalid active Agent Collab created_at for {run_id!r} in workspace guard at {path}")
         try:
             validate_guard_identity(parsed["launcher_identity"])
             if parsed["peer_identity"] is not None:
                 validate_guard_identity(parsed["peer_identity"])
-        except ValueError as exc:
+        except (ValueError, TypeError) as exc:
             raise SystemExit(f"invalid process identity for {run_id!r} in workspace guard at {path}: {exc}") from exc
         if parsed["phase"] == "starting" and parsed["peer_identity"] is not None:
-            raise SystemExit(f"starting Agent Collab guard must not contain peer_identity at {path}")
+            raise SystemExit(f"starting Agent Collab guard must not contain peer_identity for {run_id!r} at {path}")
         if parsed["phase"] != "starting" and parsed["peer_identity"] is None:
-            raise SystemExit(f"active Agent Collab guard is missing peer_identity at {path}")
+            raise SystemExit(f"active Agent Collab guard is missing peer_identity for {run_id!r} at {path}")
     return path, registry["runs"]
 
 

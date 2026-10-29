@@ -1,6 +1,184 @@
 {
-  "type": "object",
   "additionalProperties": false,
+  "properties": {
+    "claims": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "claim": {
+            "type": "string"
+          },
+          "evidence": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "confirmed",
+              "plausible_unverified",
+              "rejected",
+              "product_decision",
+              "needs_human_input"
+            ]
+          }
+        },
+        "required": [
+          "claim",
+          "status",
+          "evidence"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "error": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "details": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "message",
+            "details"
+          ],
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "findings": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "confidence": {
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ]
+          },
+          "details": {
+            "type": "string"
+          },
+          "files": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 0,
+            "type": "array"
+          },
+          "recommendation": {
+            "type": "string"
+          },
+          "severity": {
+            "enum": [
+              "critical",
+              "high",
+              "medium",
+              "low",
+              "info"
+            ]
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "severity",
+          "title",
+          "details",
+          "files",
+          "recommendation",
+          "confidence"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "host": {
+      "enum": [
+        "claude",
+        "codex"
+      ]
+    },
+    "limitations": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "mode": {
+      "enum": [
+        "review",
+        "research",
+        "design",
+        "plan",
+        "debug"
+      ]
+    },
+    "next_actions": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "origin": {
+      "enum": [
+        "claude",
+        "codex"
+      ]
+    },
+    "peer": {
+      "enum": [
+        "claude",
+        "codex"
+      ]
+    },
+    "run_id": {
+      "pattern": "^[A-Za-z0-9._-]+$",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "2.0"
+    },
+    "status": {
+      "enum": [
+        "ok",
+        "peer_failed"
+      ]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "target": {
+      "type": "string"
+    },
+    "verdict": {
+      "enum": [
+        "pass",
+        "pass_with_concerns",
+        "changes_recommended",
+        "ready",
+        "needs_revision",
+        "blocked",
+        "informational"
+      ]
+    }
+  },
   "required": [
     "schema_version",
     "run_id",
@@ -18,80 +196,5 @@
     "next_actions",
     "error"
   ],
-  "properties": {
-    "schema_version": {"const": "2.0"},
-    "run_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
-    "origin": {"enum": ["claude", "codex"]},
-    "host": {"enum": ["claude", "codex"]},
-    "peer": {"enum": ["claude", "codex"]},
-    "mode": {"enum": ["review", "research", "design", "plan", "debug"]},
-    "target": {"type": "string"},
-    "status": {"enum": ["ok", "peer_failed"]},
-    "verdict": {
-      "enum": [
-        "pass",
-        "pass_with_concerns",
-        "changes_recommended",
-        "ready",
-        "needs_revision",
-        "blocked",
-        "informational"
-      ]
-    },
-    "summary": {"type": "string"},
-    "findings": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["severity", "title", "details", "files", "recommendation", "confidence"],
-        "properties": {
-          "severity": {"enum": ["critical", "high", "medium", "low", "info"]},
-          "title": {"type": "string"},
-          "details": {"type": "string"},
-          "files": {"type": "array", "items": {"type": "string"}, "minItems": 0},
-          "recommendation": {"type": "string"},
-          "confidence": {"enum": ["high", "medium", "low"]}
-        }
-      }
-    },
-    "claims": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["claim", "status", "evidence"],
-        "properties": {
-          "claim": {"type": "string"},
-          "status": {
-            "enum": [
-              "confirmed",
-              "plausible_unverified",
-              "rejected",
-              "product_decision",
-              "needs_human_input"
-            ]
-          },
-          "evidence": {"type": "string"}
-        }
-      }
-    },
-    "limitations": {"type": "array", "items": {"type": "string"}},
-    "next_actions": {"type": "array", "items": {"type": "string"}},
-    "error": {
-      "anyOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["kind", "message", "details"],
-          "properties": {
-            "kind": {"type": "string"},
-            "message": {"type": "string"},
-            "details": {"type": ["string", "null"]}
-          }
-        },
-        {"type": "null"}
-      ]
-    }
-  }
+  "type": "object"
 }

@@ -101,6 +101,23 @@ class RegistryOwnershipTests(TestCase):
                     host.REGISTRY.release_workspace_guard(root, 'one', owner=owner)
                 self.assertFalse((root / 'guard.json').exists())
 
+    def test_wrongly_typed_registry_entry_is_named_and_preserved(self):
+        host = fixtures.load_host()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / 'guard.json'
+            with mock.patch.object(host.REGISTRY, 'workspace_guard_path', return_value=path):
+                host.REGISTRY.acquire_workspace_guard(root, 'named-entry', 'codex', root / 'run')
+                original = host.ARTIFACTS.load_json(path)
+                for field in ('host', 'phase'):
+                    value = json.loads(json.dumps(original))
+                    value['runs']['named-entry'][field] = []
+                    host.write_json(path, value)
+                    before = path.read_bytes()
+                    with self.assertRaisesRegex(SystemExit, 'named-entry'):
+                        host.REGISTRY.read_workspace_guards(root)
+                    self.assertEqual(path.read_bytes(), before)
+
     def test_start_validation_does_not_probe_other_launchers(self):
         host = fixtures.load_host()
         with tempfile.TemporaryDirectory() as tmp:
@@ -165,6 +182,7 @@ class CompactWorkflowTests(TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.host = fixtures.load_host()
+        self.capture_mutation = self.host.record_host_workspace_mutation
         self.run = self.root / 'runs' / fixtures.request()['run_id']
         self.guard = self.root / 'guard.json'
         for patch in (
@@ -233,6 +251,26 @@ class CompactWorkflowTests(TestCase):
             self.invoke('complete', '--synthesis', authored)
         self.invoke('complete', '--synthesis', self.author(new))
 
+    def test_workspace_drift_requires_a_new_reviewed_draft(self):
+        result = self.finish()
+        authored = self.author(result)
+        changed = self.root / 'workspace.txt'
+        changed.write_text('before')
+        self.host.run_snapshot(self.root, self.run / 'before.snapshot', ignored_paths=[self.run])
+        changed.write_text('after')
+        mutation = self.capture_mutation(self.root, self.run, fixtures.request())
+        self.assertIsNotNone(mutation)
+        with mock.patch.object(self.host, 'record_host_workspace_mutation', return_value=mutation):
+            with self.assertRaisesRegex(SystemExit, 'mutation evidence changed'):
+                self.invoke('complete', '--synthesis', authored)
+            self.assertFalse((self.run / 'host-synthesis.json').exists())
+            self.assertTrue(self.guard.exists())
+            revision = self.finish()
+            self.assertNotEqual(result['review_dir'], revision['review_dir'])
+            with self.assertRaisesRegex(ValueError, 'stale review'):
+                self.invoke('complete', '--synthesis', authored)
+            self.invoke('complete', '--synthesis', self.author(revision))
+
     def test_wrong_run_and_modified_receipt_are_rejected(self):
         result = self.finish()
         authored = self.author(result)
@@ -270,3 +308,44 @@ class CompactWorkflowTests(TestCase):
         saved = self.host.ARTIFACTS.load_json(self.run / 'adjudicator-report.json')
         self.assertEqual(saved['summary'], payload['summary'])
         self.invoke('complete', '--synthesis', self.author(second))
+
+
+class ProviderProjectionTests(TestCase):
+    def test_projection_preserves_report_structure_and_rejects_new_constraints(self):
+        import copy
+        module = fixtures.load_module(fixtures.RUNTIME_ROOT / 'scripts' / 'provider_schema.py', 'provider_schema_test')
+        schema = json.loads(fixtures.CANONICAL_PEER_SCHEMA.read_text())
+        projected = module.provider_schema(schema)
+        self.assertEqual(projected, json.loads(fixtures.PEER_SCHEMA.read_text()))
+        self.assertEqual(projected['required'], schema['required'])
+        self.assertEqual(set(projected['properties']), set(schema['properties']))
+        for mutate in (
+            lambda value: value['properties']['summary'].update({'maxLength':10}),
+            lambda value: value['properties']['target'].update({'minLength':2}),
+            lambda value: value['allOf'].append({'required':['invented']}),
+        ):
+            changed = copy.deepcopy(schema)
+            mutate(changed)
+            with self.assertRaisesRegex(ValueError, 'unreviewed'):
+                module.provider_schema(changed)
+
+    def test_check_does_not_rewrite_the_schema(self):
+        before = fixtures.PEER_SCHEMA.stat().st_mtime_ns
+        result = subprocess.run([sys.executable, str(fixtures.RUNTIME_ROOT / 'scripts' / 'provider_schema.py'), '--check'], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(fixtures.PEER_SCHEMA.stat().st_mtime_ns, before)
+
+    def test_package_sync_uses_the_selected_python_for_generation(self):
+        import os
+        with tempfile.TemporaryDirectory() as tmp:
+            wrapper = Path(tmp) / 'selected-python'
+            log = Path(tmp) / 'calls.jsonl'
+            wrapper.write_text('#!' + sys.executable + '\nimport json,os,sys\n'
+                + 'with open(' + repr(str(log)) + ', "a") as out: out.write(json.dumps(sys.argv[1:])+"\\n")\n'
+                + 'os.execv(' + repr(sys.executable) + ', [' + repr(sys.executable) + ', *sys.argv[1:]])\n')
+            wrapper.chmod(0o700)
+            result = subprocess.run([str(fixtures.REPO_ROOT / 'scripts/sync-packages.sh'), '--check'],
+                capture_output=True, text=True, env={**os.environ, 'PYTHON':str(wrapper)})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            calls = [json.loads(line) for line in log.read_text().splitlines()]
+            self.assertTrue(any('provider_schema.py' in command[0] and '--check' in command for command in calls))

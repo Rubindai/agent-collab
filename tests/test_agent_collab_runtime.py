@@ -3347,8 +3347,8 @@ class PackageTests(TestCase):
             self.assertTrue((CODEX_SKILL_ROOT / "references" / reference).is_file())
         commands = re.findall(r'scripts/host\.py" (start|finish|complete)', codex)
         self.assertEqual(commands, ["start", "finish", "complete"])
-        for artifact in ("host-first-pass.json", "host-synthesis.json", "host-result.json"):
-            self.assertIn(artifact, codex)
+        for interface in ("--first-pass", "--adjudicator", "--synthesis", "review_dir", "synthesis_input"):
+            self.assertIn(interface, codex)
         self.assertIn("peer did not run", codex)
         self.assertIn("Never retry a fallback", codex)
         for token in ("claude-fable-5", "helper_policy_unavailable", "sandbox_unavailable"):
