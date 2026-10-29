@@ -350,6 +350,10 @@ def load_isolation_runtime() -> Any:
     return _load_sibling("isolation.py", "agent_collab_isolation_host")
 
 
+def load_review_runtime() -> Any:
+    return _load_sibling("review.py", "agent_collab_review_runtime")
+
+
 def load_state_runtime() -> Any:
     return _load_sibling("state.py", "agent_collab_state")
 
@@ -2395,7 +2399,7 @@ def load_json(path: Path) -> dict[str, Any]:
     except (OSError, ValueError) as exc:
         raise ArtifactValidationError(f"invalid artifact {path}: {exc}") from exc
     if not isinstance(data, dict):
-        raise ValueError(f"{path} must contain a JSON object")
+        raise ArtifactValidationError(f"{path} must contain a JSON object")
     return data
 
 
@@ -2716,7 +2720,11 @@ def load_helper_evidence(
     path = run_dir / "helper-reports.json"
     if not path.exists():
         return [], None
-    data = STRICT_JSON.load(path, max_bytes=16 * 1024 * 1024)
+    data = load_json(path)
+    return validate_helper_evidence(data, request)
+
+
+def validate_helper_evidence(data: dict[str, Any], request: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
     required = {"schema_version", "run_id", "reports"}
     if not isinstance(data, dict) or set(data) != required:
         raise ArtifactValidationError(f"helper-reports must contain exactly {sorted(required)}")
@@ -2918,10 +2926,45 @@ def valid_terminal_peer_report(
     return True
 
 
+def review_documents(run_dir: Path) -> dict[str, Any]:
+    return {name: read_json_if_exists(run_dir / name) for name in load_review_runtime().EVIDENCE_FILES}
+
+
+def ingest_finish_inputs(args: argparse.Namespace, run_dir: Path, request: dict[str, Any], process_info: dict[str, Any]) -> None:
+    inputs = [("first_pass", "host-first-pass.json", {"summary", "claims"}, validate_host_first_pass),
+              ("helpers", "helper-reports.json", {"reports"}, validate_helper_evidence),
+              ("adjudicator", "adjudicator-report.json", {"status", "summary", "false_positives",
+                  "claims_needing_verification", "recommended_verdict", "claims"}, validate_adjudicator_report)]
+    supplied = [item for item in inputs if getattr(args, item[0], None) is not None]
+    if not supplied:
+        return
+    with run_operation_lock(run_dir):
+        require_workspace_guard_owner(Path(process_info["repo_root"]), request["run_id"], owner=process_info)
+        current = read_json_if_exists(run_dir / "host-result.json")
+        if (run_dir / "cancel-result.json").exists() or (current and current.get("phase") == "done"):
+            raise ArtifactValidationError("cannot replace evidence of a terminal run")
+        pending = []
+        for option, filename, allowed, validate in supplied:
+            value = load_json(getattr(args, option))
+            required = allowed - ({"claims"} if option == "adjudicator" else set())
+            if not required <= set(value) <= allowed:
+                raise ArtifactValidationError(f"{option} input keys must be {sorted(allowed)}; only adjudicator claims are optional")
+            if option == "adjudicator" and (not request["adjudicator_enabled"] or value.get("status") == "advisory_pending"):
+                raise ArtifactValidationError("adjudicator input requires enabled adjudication and an actual report, not advisory_pending")
+            artifact = {"schema_version": ARTIFACT_SCHEMA_VERSION, "run_id": request["run_id"], **value}
+            validate(artifact, request)
+            pending.append((run_dir / filename, artifact))
+        for path, artifact in pending:
+            write_json(path, artifact)
+
+
 def finish(args: argparse.Namespace) -> int:
     _, run_root, run_dir = resolve_run_context(args)
     state = load_state_runtime()
     request = require_run_request(run_dir)
+    process_info = load_json(run_dir / "peer-process.json")
+    validate_peer_process(process_info, request, run_dir)
+    ingest_finish_inputs(args, run_dir, request, process_info)
     host_first_pass = run_dir / "host-first-pass.json"
     if not host_first_pass.exists():
         raise SystemExit(f"missing required independent host analysis: {host_first_pass}")
@@ -2930,11 +2973,6 @@ def finish(args: argparse.Namespace) -> int:
         validate_host_first_pass(host_report, request)
     except ArtifactValidationError as exc:
         raise SystemExit(f"invalid independent host analysis {host_first_pass}: {exc}") from exc
-    process_info = load_json(run_dir / "peer-process.json")
-    try:
-        validate_peer_process(process_info, request, run_dir)
-    except ArtifactValidationError as exc:
-        raise SystemExit(f"invalid peer-process artifact in {run_dir}: {exc}") from exc
     repo_root = Path(process_info["repo_root"]).resolve()
     _, active_guard = require_workspace_guard_owner(repo_root, request["run_id"], owner=process_info)
     wrapper_quiescence_proven = bool(
@@ -3190,7 +3228,8 @@ def _finish_after_wait_locked(
         peer_identity=process_info["process_identity"],
     )
     write_json(run_dir / "host-result.json", ready_result)
-    print(json.dumps(ready_result, ensure_ascii=False, indent=2, sort_keys=True))
+    review_paths = load_review_runtime().prepare(run_dir, process_info, review_documents(run_dir))
+    print(json.dumps({**ready_result, **review_paths}, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
 
 
@@ -3323,8 +3362,7 @@ def _complete_locked(args: argparse.Namespace, context: tuple[Path, Path, Path])
             write_json(host_result_path, host_result)
             raise SystemExit(
                 "workspace mutation evidence changed after finish; host-result.json was refreshed. "
-                "Inspect the diagnostic, resynthesize, copy its workspace_mutation_sha256 into "
-                "host-synthesis.json, and rerun complete."
+                "Run finish, inspect the new review revision, and resynthesize before completing."
             )
     elif phase == "done":
         _, active_guard = read_workspace_guard(repo_root, request["run_id"])
@@ -3348,6 +3386,18 @@ def _complete_locked(args: argparse.Namespace, context: tuple[Path, Path, Path])
                 raise SystemExit(
                     f"completed run guard cannot be released while provider state is unproven: {exc}"
                 ) from exc
+
+    if getattr(args, "synthesis", None) is not None:
+        judgments = load_review_runtime().judgments(run_dir, args.synthesis, process_info, review_documents(run_dir))
+        synthesis = {"schema_version": ARTIFACT_SCHEMA_VERSION, "run_id": request["run_id"],
+                     **judgments, "claim_matrix_sha256": host_result["claim_matrix_sha256"],
+                     "workspace_mutation_sha256": host_result["workspace_mutation_sha256"], "final_answer_ready": True}
+        validate_host_synthesis(synthesis, request)
+        if phase == "done":
+            if load_json(run_dir / "host-synthesis.json") != synthesis:
+                raise ArtifactValidationError("cannot rewrite a completed synthesis")
+        else:
+            write_json(run_dir / "host-synthesis.json", synthesis)
 
     peer_runtime = load_peer_runtime()
     try:
@@ -3465,6 +3515,19 @@ def result(args: argparse.Namespace) -> int:
     repo_root = (args.repo_root or default_repo_root()).resolve()
     run_root = (args.run_root or default_run_root(repo_root)).resolve()
     run_dir = resolve_run_reference(repo_root, args.run, run_root)
+    if getattr(args, "format", "json") == "markdown":
+        if args.review is None:
+            raise SystemExit("result --format markdown requires --review DIR from finish")
+        with run_operation_lock(run_dir):
+            process_info = load_json(run_dir / "peer-process.json")
+            validate_peer_process(process_info, require_run_request(run_dir), run_dir)
+            documents = review_documents(run_dir)
+            review = load_review_runtime()
+            review.verify(run_dir, args.review, process_info, documents)
+            print(review.markdown(documents))
+        return 0
+    if getattr(args, "review", None) is not None:
+        raise SystemExit("--review requires --format markdown")
     process_info = read_json_if_exists(run_dir / "peer-process.json")
     output = {
         "run": summarize_run(run_dir),
@@ -4581,6 +4644,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     finish_parser = sub.add_parser("finish", help="Validate peer output and write synthesis support artifacts.")
     finish_parser.add_argument("run", help="Run ID, unique prefix, or run directory.")
+    finish_parser.add_argument("--first-pass", type=Path, help="Semantic JSON with summary and claims.")
+    finish_parser.add_argument("--helpers", type=Path, help="Semantic JSON with a reports array.")
+    finish_parser.add_argument("--adjudicator", type=Path, help="Semantic JSON adjudicator judgments without run metadata.")
     finish_parser.add_argument("--timeout-seconds", type=cli_number, default=None)
     finish_parser.add_argument("--run-root", type=Path)
     finish_parser.add_argument("--repo-root", type=Path)
@@ -4588,6 +4654,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     complete_parser = sub.add_parser("complete", help="Close a synthesized run and release the run guard.")
     complete_parser.add_argument("run", help="Run ID, unique prefix, or run directory.")
+    complete_parser.add_argument("--synthesis", type=Path, help="Edited synthesis.json generated by finish; metadata is filled automatically.")
     complete_parser.add_argument("--run-root", type=Path)
     complete_parser.add_argument("--repo-root", type=Path)
     complete_parser.set_defaults(func=complete)
@@ -4605,6 +4672,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     result_parser = sub.add_parser("result", help="Print complete stored output for a run.")
     result_parser.add_argument("run", help="Explicit run ID or run directory.")
+    result_parser.add_argument("--format", choices=["json", "markdown"], default="json")
+    result_parser.add_argument("--review", type=Path, help="Evidence revision directory returned by finish.")
     result_parser.add_argument("--run-root", type=Path)
     result_parser.add_argument("--repo-root", type=Path)
     result_parser.set_defaults(func=result)

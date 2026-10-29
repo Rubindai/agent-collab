@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Accept compact first-pass, helper, and adjudicator judgments through `finish` flags. Generate revision-bound synthesis inputs and fill canonical metadata and evidence hashes through `complete --synthesis`; render pinned evidence with `result --format markdown --review`.
+
 - Bind registry mutations to exact run instances, reserve lifecycle capacity before admission, and replace startup-wide recovery scans with targeted recovery. Add `status --active` and `recover RUN_ID`; `result` now requires an explicit run.
 - Report malformed artifact filenames without a traceback and reject authored judgments disguised as the reserved adjudication placeholder.
 

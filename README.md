@@ -288,6 +288,10 @@ Peer prompts use one compact, escaped XML brief with role, outcome, evidence, bo
 
 The prompt is an instruction to the peer, not a sandbox or a higher-precedence security boundary. Provider-managed instructions and repository guidance may still load through the peer CLI. Runtime boundaries include launch validation, the workflow guard, provider permissions, and the disposable filesystem when selected.
 
+## Compact host inputs
+
+Hosts supply judgments in small JSON files; the runtime writes the canonical envelopes and hashes. Use `finish RUN --first-pass FILE`, optionally with `--helpers FILE` or `--adjudicator FILE`. `finish` returns a revision directory and a four-field synthesis input. Read it with `result RUN --format markdown --review DIR`, author the synthesis judgments, and close with `complete RUN --synthesis FILE`. Changed evidence invalidates the draft and requires another reviewed revision. See the [synthesis contract](tools/agent-collab/references/synthesize.md#artifact-shapes) for exact inputs.
+
 ## Concurrent run ownership
 
 Independent sessions can run Agent Collab in the same worktree. Each registry entry has a random ownership token, so retrying an old cancellation or completion cannot release a newer run that reused its ID. Registry admission reserves space for later lifecycle updates.

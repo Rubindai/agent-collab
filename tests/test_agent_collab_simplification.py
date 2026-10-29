@@ -156,3 +156,116 @@ h.update_workspace_guard(r, sys.argv[3], owner=owner, phase='peer_running', peer
         report['summary'] = 'A reviewer approved this.'
         with self.assertRaisesRegex(host.ArtifactValidationError, 'unmodified runtime placeholder'):
             host.validate_adjudicator_report(report, fixtures.request())
+
+
+class CompactWorkflowTests(TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.host = fixtures.load_host()
+        self.run = self.root / 'runs' / fixtures.request()['run_id']
+        self.guard = self.root / 'guard.json'
+        for patch in (
+            mock.patch.object(self.host, 'workspace_guard_path', return_value=self.guard),
+            mock.patch.object(self.host, 'wait_for_peer_report', return_value='report_ready'),
+            mock.patch.object(self.host, 'record_host_workspace_mutation', return_value=None),
+            mock.patch.object(self.host.SAFETY, 'process_group_alive', return_value=False),
+        ):
+            patch.start()
+            self.addCleanup(patch.stop)
+        lifecycle.LifecycleAuditTests().prepare_run(self.host, self.root, self.run, self.guard)
+
+    def invoke(self, command, *options):
+        output = io.StringIO()
+        args = self.host.build_parser().parse_args([command, str(self.run), '--repo-root', str(self.root), *map(str, options)])
+        with redirect_stdout(output):
+            getattr(self.host, command)(args)
+        return output.getvalue()
+
+    def finish(self, *options):
+        return json.loads(self.invoke('finish', *options))
+
+    def author(self, result):
+        path = Path(result['synthesis_input'])
+        payload = {'summary':'Reviewed the captured evidence.', 'verdict':'pass', 'claims':[], 'unresolved_risks':[]}
+        self.host.write_json(path, payload)
+        return path
+
+    def test_semantic_inputs_complete_without_manual_metadata(self):
+        first = self.root / 'first.json'
+        first.write_text(json.dumps({'summary':'Independent host pass.', 'claims':[]}))
+        (self.run / 'host-first-pass.json').unlink()
+        output = self.finish('--first-pass', first)
+        authored = self.author(output)
+        second = self.finish()
+        self.assertEqual(output['synthesis_input'], second['synthesis_input'])
+        self.assertEqual(self.host.load_json(authored)['verdict'], 'pass')
+        rendered = self.invoke('result', '--format', 'markdown', '--review', output['review_dir'])
+        self.assertIn('Independent host pass.', rendered)
+        self.assertIn('Peer Report', rendered)
+        self.invoke('complete', '--synthesis', authored)
+        synthesis = self.host.load_json(self.run / 'host-synthesis.json')
+        self.assertEqual(synthesis['run_id'], self.run.name)
+        self.assertEqual(synthesis['claim_matrix_sha256'], output['claim_matrix_sha256'])
+        self.assertTrue(synthesis['final_answer_ready'])
+        self.assertFalse(self.guard.exists())
+        self.invoke('complete', '--synthesis', authored)
+
+    def test_changed_report_invalidates_old_draft_without_overwriting_it(self):
+        previous = self.finish()
+        authored = self.author(previous)
+        original = authored.read_bytes()
+        report = self.host.load_json(self.run / 'peer-report.json')
+        report['summary'] = 'New evidence.'
+        self.host.write_json(self.run / 'peer-report.json', report)
+        for command, flags in [('result', ('--format','markdown','--review',previous['review_dir'])),
+                               ('complete', ('--synthesis', authored))]:
+            with self.assertRaisesRegex(ValueError, 'stale review'):
+                self.invoke(command, *flags)
+        self.assertTrue(self.guard.exists())
+        self.assertFalse((self.run / 'host-synthesis.json').exists())
+        new = self.finish()
+        self.assertNotEqual(new['review_dir'], previous['review_dir'])
+        self.assertEqual(authored.read_bytes(), original)
+        with self.assertRaisesRegex(ValueError, 'stale review'):
+            self.invoke('complete', '--synthesis', authored)
+        self.invoke('complete', '--synthesis', self.author(new))
+
+    def test_wrong_run_and_modified_receipt_are_rejected(self):
+        result = self.finish()
+        authored = self.author(result)
+        receipt = authored.parent / 'context.json'
+        data = self.host.load_json(receipt)
+        data['owner_token'] = '0' * 32
+        self.host.write_json(receipt, data)
+        with self.assertRaisesRegex(ValueError, 'receipt was modified'):
+            self.invoke('complete', '--synthesis', authored)
+        self.assertTrue(self.guard.exists())
+        copied = self.root / 'synthesis.json'
+        copied.write_bytes(authored.read_bytes())
+        with self.assertRaisesRegex(ValueError, 'direct, non-symlink'):
+            self.invoke('complete', '--synthesis', copied)
+
+    def test_invalid_helper_input_does_not_partially_write_first_pass(self):
+        original = (self.run / 'host-first-pass.json').read_bytes()
+        first = self.root / 'first.json'
+        first.write_text(json.dumps({'summary':'Changed', 'claims':[]}))
+        helpers = self.root / 'helpers.json'
+        helpers.write_text(json.dumps({'reports':[{'name':str(i),'summary':'x','claims':[]} for i in range(9)]}))
+        with self.assertRaisesRegex(ValueError, 'per-run limit'):
+            self.finish('--first-pass', first, '--helpers', helpers)
+        self.assertEqual((self.run / 'host-first-pass.json').read_bytes(), original)
+        self.assertFalse((self.run / 'helper-reports.json').exists())
+
+    def test_adjudicator_input_rebuilds_revision_and_preserves_judgments(self):
+        first = self.finish()
+        path = self.root / 'adjudicator.json'
+        payload = {'status':'ok', 'summary':'Independent adjudication.', 'false_positives':[],
+                   'claims_needing_verification':[], 'recommended_verdict':'pass', 'claims':[]}
+        path.write_text(json.dumps(payload))
+        second = self.finish('--adjudicator', path)
+        self.assertNotEqual(first['review_dir'], second['review_dir'])
+        saved = self.host.load_json(self.run / 'adjudicator-report.json')
+        self.assertEqual(saved['summary'], payload['summary'])
+        self.invoke('complete', '--synthesis', self.author(second))
