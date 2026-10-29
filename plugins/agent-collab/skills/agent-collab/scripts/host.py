@@ -1315,77 +1315,84 @@ def workspace_guard_transaction(repo_root: Path):
         os.close(descriptor)
 
 
-def _read_workspace_guard_unlocked(repo_root: Path) -> tuple[Path, dict[str, Any] | None]:
+def _read_workspace_guards_unlocked(repo_root: Path) -> tuple[Path, dict[str, dict[str, Any]]]:
     path = workspace_guard_path(repo_root)
     if path.is_symlink():
         raise SystemExit(f"Agent Collab workspace guard must not be a symlink: {path}")
     if not path.exists():
-        return path, None
+        return path, {}
     try:
-        parsed = STRICT_JSON.load(path, max_bytes=1_000_000)
+        registry = STRICT_JSON.load(path, max_bytes=1_000_000)
     except (OSError, ValueError) as exc:
         raise SystemExit(f"invalid active Agent Collab workspace guard at {path}: {exc}") from exc
-    if (
-        not isinstance(parsed, dict)
-        or set(parsed) != WORKSPACE_GUARD_KEYS
-        or parsed.get("schema_version") != WORKSPACE_GUARD_SCHEMA_VERSION
-    ):
-        raise SystemExit(f"invalid active Agent Collab workspace guard at {path}; manual inspection is required")
-    if not isinstance(parsed["run_id"], str) or not is_safe_run_id(parsed["run_id"]):
-        raise SystemExit(f"invalid active Agent Collab run_id in workspace guard at {path}")
-    if parsed["host"] not in ORIGINS or parsed["phase"] not in {"starting", "peer_running", "ready_for_synthesis"}:
-        raise SystemExit(f"invalid active Agent Collab host/phase in workspace guard at {path}")
-    if not isinstance(parsed["repo_root"], str) or Path(parsed["repo_root"]).resolve() != repo_root.resolve():
-        raise SystemExit(f"active Agent Collab workspace guard repo_root mismatch at {path}")
-    if not isinstance(parsed["run_dir"], str) or not parsed["run_dir"]:
-        raise SystemExit(f"invalid active Agent Collab run_dir in workspace guard at {path}")
-    if parse_utc_timestamp(parsed["created_at"]) is None:
-        raise SystemExit(f"invalid active Agent Collab created_at in workspace guard at {path}")
-    try:
-        SAFETY.validate_process_identity(parsed["launcher_identity"])
-        if parsed["peer_identity"] is not None:
-            SAFETY.validate_process_identity(parsed["peer_identity"])
-    except ValueError as exc:
-        raise SystemExit(f"invalid process identity in workspace guard at {path}: {exc}") from exc
-    if parsed["phase"] == "starting" and parsed["peer_identity"] is not None:
-        raise SystemExit(f"starting Agent Collab guard must not contain peer_identity at {path}")
-    if parsed["phase"] != "starting" and parsed["peer_identity"] is None:
-        raise SystemExit(f"active Agent Collab guard is missing peer_identity at {path}")
-    return path, parsed
+    if (not isinstance(registry, dict) or set(registry) != {"schema_version", "runs"}
+            or registry.get("schema_version") != WORKSPACE_GUARD_SCHEMA_VERSION
+            or not isinstance(registry.get("runs"), dict)):
+        raise SystemExit(f"invalid or legacy active Agent Collab workspace guard at {path}; close active runs with the version that started them")
+    for run_id, parsed in registry["runs"].items():
+        if (not isinstance(parsed, dict) or set(parsed) != WORKSPACE_GUARD_KEYS
+                or parsed.get("schema_version") != WORKSPACE_GUARD_SCHEMA_VERSION):
+            raise SystemExit(f"invalid active Agent Collab workspace guard at {path}; manual inspection is required")
+        if not isinstance(parsed["run_id"], str) or not is_safe_run_id(parsed["run_id"]) or parsed["run_id"] != run_id:
+            raise SystemExit(f"invalid active Agent Collab run_id in workspace guard at {path}")
+        if parsed["host"] not in ORIGINS or parsed["phase"] not in {"starting", "peer_running", "ready_for_synthesis"}:
+            raise SystemExit(f"invalid active Agent Collab host/phase in workspace guard at {path}")
+        if not isinstance(parsed["repo_root"], str) or Path(parsed["repo_root"]).resolve() != repo_root.resolve():
+            raise SystemExit(f"active Agent Collab workspace guard repo_root mismatch at {path}")
+        if not isinstance(parsed["run_dir"], str) or not parsed["run_dir"]:
+            raise SystemExit(f"invalid active Agent Collab run_dir in workspace guard at {path}")
+        if parse_utc_timestamp(parsed["created_at"]) is None:
+            raise SystemExit(f"invalid active Agent Collab created_at in workspace guard at {path}")
+        try:
+            SAFETY.validate_process_identity(parsed["launcher_identity"])
+            if parsed["peer_identity"] is not None:
+                SAFETY.validate_process_identity(parsed["peer_identity"])
+        except ValueError as exc:
+            raise SystemExit(f"invalid process identity in workspace guard at {path}: {exc}") from exc
+        if parsed["phase"] == "starting" and parsed["peer_identity"] is not None:
+            raise SystemExit(f"starting Agent Collab guard must not contain peer_identity at {path}")
+        if parsed["phase"] != "starting" and parsed["peer_identity"] is None:
+            raise SystemExit(f"active Agent Collab guard is missing peer_identity at {path}")
+    return path, registry["runs"]
 
 
-def read_workspace_guard(repo_root: Path) -> tuple[Path, dict[str, Any] | None]:
-    with workspace_guard_transaction(repo_root):
-        return _read_workspace_guard_unlocked(repo_root)
-
-
-def _require_workspace_guard_available_unlocked(repo_root: Path) -> None:
-    path, active = _read_workspace_guard_unlocked(repo_root)
-    if active is None:
-        return
-    if (
-        active["phase"] == "starting"
-        and SAFETY.process_identity_state(active["launcher_identity"]) == "dead_or_replaced"
-    ):
-        # A launcher that died before it could create a peer cannot complete or
-        # cancel its workflow. This narrow stale-start recovery prevents a
-        # permanent worktree wedge without unlocking a running/synthesis run.
+def _write_workspace_guards_unlocked(path: Path, runs: dict[str, dict[str, Any]]) -> None:
+    if runs:
+        registry = {"schema_version": WORKSPACE_GUARD_SCHEMA_VERSION, "runs": runs}
+        if len((STRICT_JSON.dumps(registry) + "\n").encode("utf-8")) > 1_000_000:
+            raise SystemExit("Agent Collab workspace guard registry exceeds the 1 MB limit")
+        STRICT_JSON.write(path, registry)
+    else:
         path.unlink(missing_ok=True)
-        return
-    raise SystemExit(
-        "nested or concurrent Agent Collab start refused by the workspace recursion guard; "
-        f"active run={active['run_id']} guard={path}"
-    )
+
+
+def read_workspace_guard(repo_root: Path, run_id: str) -> tuple[Path, dict[str, Any] | None]:
+    with workspace_guard_transaction(repo_root):
+        path, runs = _read_workspace_guards_unlocked(repo_root)
+        return path, runs.get(run_id)
+
+
+def read_workspace_guards(repo_root: Path) -> tuple[Path, dict[str, dict[str, Any]]]:
+    with workspace_guard_transaction(repo_root):
+        return _read_workspace_guards_unlocked(repo_root)
 
 
 def require_workspace_guard_available(repo_root: Path) -> None:
+    # Recover only starting entries whose launcher is proven gone. Keep the
+    # lock throughout the read, identity check and write, including no-ops.
     with workspace_guard_transaction(repo_root):
-        _require_workspace_guard_available_unlocked(repo_root)
+        path, runs = _read_workspace_guards_unlocked(repo_root)
+        stale = [run_id for run_id, active in runs.items()
+                 if active["phase"] == "starting"
+                 and SAFETY.process_identity_state(active["launcher_identity"]) == "dead_or_replaced"]
+        if stale:
+            for run_id in stale:
+                del runs[run_id]
+            _write_workspace_guards_unlocked(path, runs)
 
 
 def acquire_workspace_guard(repo_root: Path, run_id: str, host: str, run_dir: Path) -> Path:
-    path = workspace_guard_path(repo_root)
-    STRICT_JSON.ensure_private_directory(path.parent)
+    require_safe_run_id(run_id)
     payload = {
         "schema_version": WORKSPACE_GUARD_SCHEMA_VERSION,
         "run_id": run_id,
@@ -1398,9 +1405,14 @@ def acquire_workspace_guard(repo_root: Path, run_id: str, host: str, run_dir: Pa
         "peer_identity": None,
     }
     with workspace_guard_transaction(repo_root):
-        _require_workspace_guard_available_unlocked(repo_root)
-        if not write_json_once(path, payload):
-            raise SystemExit(f"could not acquire Agent Collab workspace guard: {path}")
+        path, runs = _read_workspace_guards_unlocked(repo_root)
+        active = runs.get(run_id)
+        if active is not None:
+            if active["phase"] != "starting" or SAFETY.process_identity_state(active["launcher_identity"]) != "dead_or_replaced":
+                raise SystemExit(f"Agent Collab run ID is already active: {run_id} guard={path}")
+            # Recover only the exact stale starting entry while holding the lock.
+        runs[run_id] = payload
+        _write_workspace_guards_unlocked(path, runs)
     return path
 
 
@@ -1414,22 +1426,20 @@ def update_workspace_guard(
     if phase not in {"peer_running", "ready_for_synthesis"}:
         raise ValueError("workspace guard update phase is invalid")
     with workspace_guard_transaction(repo_root):
-        path, active = _read_workspace_guard_unlocked(repo_root)
-        if active is None or active["run_id"] != run_id:
-            raise SystemExit(f"cannot update missing or foreign Agent Collab workspace guard for {run_id}")
+        path, runs = _read_workspace_guards_unlocked(repo_root)
+        active = runs.get(run_id)
+        if active is None:
+            raise SystemExit(f"cannot update missing Agent Collab workspace guard for {run_id}")
         SAFETY.validate_process_identity(peer_identity)
-        STRICT_JSON.write(path, {**active, "phase": phase, "peer_identity": peer_identity})
+        runs[run_id] = {**active, "phase": phase, "peer_identity": peer_identity}
+        _write_workspace_guards_unlocked(path, runs)
     return path
 
 
 def _require_workspace_guard_owner_unlocked(repo_root: Path, run_id: str) -> Path:
-    path, active = _read_workspace_guard_unlocked(repo_root)
-    if active is None:
+    path, runs = _read_workspace_guards_unlocked(repo_root)
+    if run_id not in runs:
         raise SystemExit(f"active Agent Collab workspace guard is missing for run {run_id}")
-    if active["run_id"] != run_id:
-        raise SystemExit(
-            f"Agent Collab workspace guard belongs to run {active['run_id']}, not {run_id}; refusing to release it"
-        )
     return path
 
 
@@ -1440,8 +1450,11 @@ def require_workspace_guard_owner(repo_root: Path, run_id: str) -> Path:
 
 def release_workspace_guard(repo_root: Path, run_id: str) -> Path:
     with workspace_guard_transaction(repo_root):
-        path = _require_workspace_guard_owner_unlocked(repo_root, run_id)
-        path.unlink()
+        path, runs = _read_workspace_guards_unlocked(repo_root)
+        if run_id not in runs:
+            raise SystemExit(f"active Agent Collab workspace guard is missing for run {run_id}")
+        del runs[run_id]
+        _write_workspace_guards_unlocked(path, runs)
     return path
 
 
@@ -1684,7 +1697,7 @@ def guarded_run_dir(repo_root: Path, run_id: str) -> Path | None:
     if not is_safe_run_id(run_id):
         return None
     try:
-        _, active = read_workspace_guard(repo_root)
+        _, active = read_workspace_guard(repo_root, run_id)
     except (OSError, ValueError, RuntimeError, SystemExit):
         return None
     if active is None or active.get("run_id") != run_id:
@@ -2868,7 +2881,7 @@ def finish(args: argparse.Namespace) -> int:
         raise SystemExit(f"invalid peer-process artifact in {run_dir}: {exc}") from exc
     repo_root = Path(process_info["repo_root"]).resolve()
     require_workspace_guard_owner(repo_root, request["run_id"])
-    _, active_guard = read_workspace_guard(repo_root)
+    _, active_guard = read_workspace_guard(repo_root, request["run_id"])
     wrapper_quiescence_proven = bool(
         active_guard is not None
         and active_guard["phase"] == "ready_for_synthesis"
@@ -2937,7 +2950,7 @@ def _finish_after_wait_locked(
         raise SystemExit("run is already complete; finish will not rewrite terminal evidence")
 
     require_workspace_guard_owner(repo_root, request["run_id"])
-    _, active_guard = read_workspace_guard(repo_root)
+    _, active_guard = read_workspace_guard(repo_root, request["run_id"])
     wrapper_quiescence_proven = bool(
         active_guard is not None
         and active_guard["phase"] == "ready_for_synthesis"
@@ -3216,7 +3229,7 @@ def _complete_locked(args: argparse.Namespace, context: tuple[Path, Path, Path])
         raise SystemExit("run is not ready to complete; run finish and synthesize the evidence first")
     if phase == "ready_for_synthesis":
         require_workspace_guard_owner(repo_root, request["run_id"])
-        _, active_guard = read_workspace_guard(repo_root)
+        _, active_guard = read_workspace_guard(repo_root, request["run_id"])
         if (
             active_guard is None
             or active_guard["phase"] != "ready_for_synthesis"
@@ -3260,7 +3273,7 @@ def _complete_locked(args: argparse.Namespace, context: tuple[Path, Path, Path])
                 "host-synthesis.json, and rerun complete."
             )
     elif phase == "done":
-        _, active_guard = read_workspace_guard(repo_root)
+        _, active_guard = read_workspace_guard(repo_root, request["run_id"])
         if active_guard is not None:
             if active_guard["run_id"] != request["run_id"]:
                 raise SystemExit(
@@ -3310,7 +3323,7 @@ def _complete_locked(args: argparse.Namespace, context: tuple[Path, Path, Path])
     )
 
     if phase == "done":
-        guard_path, active = read_workspace_guard(repo_root)
+        guard_path, active = read_workspace_guard(repo_root, request["run_id"])
         if active is None:
             output = {
                 "schema_version": ARTIFACT_SCHEMA_VERSION,
@@ -3512,11 +3525,9 @@ def build_clear_history_output(args: argparse.Namespace, default_retained: int =
     state_runtime = load_state_runtime()
     active_statuses = state_runtime.ACTIVE_STATUSES
     candidates = history_candidates(run_root, state_runtime)
-    _, active_guard = read_workspace_guard(repo_root)
-    guarded_run_id = str(active_guard["run_id"]) if active_guard is not None else None
-    guarded_run_dir = (
-        str(Path(str(active_guard["run_dir"])).resolve()) if active_guard is not None else None
-    )
+    _, active_guards = read_workspace_guards(repo_root)
+    guarded_run_ids = set(active_guards)
+    guarded_run_dirs = {str(Path(str(guard["run_dir"])).resolve()) for guard in active_guards.values()}
 
     owner_guards: dict[str, Any] = {}
 
@@ -3541,19 +3552,17 @@ def build_clear_history_output(args: argparse.Namespace, default_retained: int =
             return age < ORPHAN_STARTUP_GRACE_SECONDS
         if owner not in owner_guards:
             try:
-                owner_guards[owner] = read_workspace_guard(Path(owner))[1]
+                owner_guards[owner] = read_workspace_guards(Path(owner))[1]
             except (OSError, ValueError, RuntimeError, SystemExit):
                 owner_guards[owner] = "indeterminate"
         guard = owner_guards[owner]
         if guard == "indeterminate":
             return True
-        return bool(guard is not None and guard.get("run_id") == candidate["run_id"])
+        return candidate["run_id"] in guard
 
     def is_guarded(candidate: dict[str, Any]) -> bool:
-        if active_guard is not None and (
-            candidate["run_id"] == guarded_run_id
-            or str(Path(candidate["run_dir"]).resolve()) == guarded_run_dir
-        ):
+        if (candidate["run_id"] in guarded_run_ids
+                or str(Path(candidate["run_dir"]).resolve()) in guarded_run_dirs):
             return True
         return owner_guard_holds(candidate)
 
@@ -3800,7 +3809,7 @@ def _cancel_locked(args: argparse.Namespace, context: tuple[Path, Path, Path]) -
             raise SystemExit(
                 "preserved run evidence changed after cancellation; refusing an idempotent guard transition"
             )
-        guard_path, active_guard = read_workspace_guard(peer_repo_root)
+        guard_path, active_guard = read_workspace_guard(peer_repo_root, request["run_id"])
         released: str | None = None
         if active_guard is not None:
             if active_guard["run_id"] != request["run_id"]:
@@ -3855,7 +3864,7 @@ def _cancel_locked(args: argparse.Namespace, context: tuple[Path, Path, Path]) -
         return 0
 
     require_workspace_guard_owner(peer_repo_root, request["run_id"])
-    _, active_guard = read_workspace_guard(peer_repo_root)
+    _, active_guard = read_workspace_guard(peer_repo_root, request["run_id"])
     if active_guard is None or active_guard["run_id"] != request["run_id"]:
         raise SystemExit("active Agent Collab workspace guard disappeared during cancellation")
     wrapper_quiescence_proven = bool(
@@ -4519,7 +4528,7 @@ def build_parser() -> argparse.ArgumentParser:
     finish_parser.add_argument("--repo-root", type=Path)
     finish_parser.set_defaults(func=finish)
 
-    complete_parser = sub.add_parser("complete", help="Close a synthesized run and release the workspace recursion guard.")
+    complete_parser = sub.add_parser("complete", help="Close a synthesized run and release the run guard.")
     complete_parser.add_argument("run", help="Run ID, unique prefix, or run directory.")
     complete_parser.add_argument("--run-root", type=Path)
     complete_parser.add_argument("--repo-root", type=Path)

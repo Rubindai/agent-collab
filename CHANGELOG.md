@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Breaking:** allow independent Agent Collab runs in the same worktree, tracking each run in a shared guard registry. Finish active runs before upgrading; older and newer runtimes cannot share an active guard. Recursion controls are no longer a hard worktree-wide boundary.
+
 ## 6.0.1 — 2026-10-25
 
 - License the project under MIT and include the license, package README, and SVG listing/composer icons in the synchronized dual-host package.

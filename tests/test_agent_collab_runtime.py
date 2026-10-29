@@ -2104,6 +2104,11 @@ class HostV2Tests(TestCase):
                 redirect_stdout(io.StringIO()),
             ):
                 self.assertEqual(host.start(args), 0)
+                args.run_id = "another-session"
+                self.assertEqual(host.start(args), 0)
+                self.assertEqual(set(host.read_workspace_guards(root)[1]), {"override", "another-session"})
+                self.assertEqual({job["id"] for job in host.load_state_runtime().list_jobs(run_root)},
+                                 {"override", "another-session"})
             sandbox_preflight.assert_not_called()
             saved = json.loads((run_root / "override" / "host-request.json").read_text())
             process = json.loads((run_root / "override" / "peer-process.json").read_text())
@@ -2178,24 +2183,27 @@ class HostV2Tests(TestCase):
             self.assertFalse(guard.exists())
             self.assertFalse((run_root / "strict-state").exists())
 
-    def test_workspace_guard_blocks_helpers_and_concurrent_starts(self):
+    def test_independent_runs_share_registry_and_release_only_their_own_entry(self):
         host = load_host()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             guard = root / "active-v2.json"
             with mock.patch.object(host, "workspace_guard_path", return_value=guard):
-                host.acquire_workspace_guard(root, "outer", "codex", root / "runs" / "outer")
-                with self.assertRaises(SystemExit) as raised:
-                    host.acquire_workspace_guard(root, "inner", "codex", root / "runs" / "inner")
-                self.assertIn("active run=outer", str(raised.exception))
-                args = host.build_parser().parse_args([
-                    "start", "--host", "codex", "--target", "diff", "--brief", "review",
-                    "--run-id", "inner", "--run-root", str(root / "runs"), "--repo-root", str(root),
-                ])
-                with self.assertRaises(SystemExit):
-                    host.start(args)
-                self.assertFalse((root / "runs" / "inner").exists())
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    futures = [executor.submit(host.acquire_workspace_guard, root, run_id, origin,
+                                               root / "runs" / run_id)
+                               for run_id, origin in (("outer", "codex"), ("other", "claude"))]
+                    for future in futures:
+                        future.result(timeout=5)
+                self.assertEqual(set(host.read_workspace_guards(root)[1]), {"outer", "other"})
+                with self.assertRaisesRegex(SystemExit, "already active"):
+                    host.acquire_workspace_guard(root, "outer", "codex", root / "runs" / "outer")
+                host.update_workspace_guard(root, "other", phase="peer_running", peer_identity=valid_process_identity())
                 host.release_workspace_guard(root, "outer")
+                self.assertEqual(host.read_workspace_guard(root, "other")[1]["phase"], "peer_running")
+                with self.assertRaisesRegex(SystemExit, "missing"):
+                    host.release_workspace_guard(root, "outer")
+                host.release_workspace_guard(root, "other")
                 self.assertFalse(guard.exists())
 
     def test_workspace_guard_lock_wait_is_bounded(self):
@@ -2210,37 +2218,52 @@ class HostV2Tests(TestCase):
                 host.workspace_guard_transaction(root),
                 ThreadPoolExecutor(max_workers=1) as executor,
             ):
-                blocked = executor.submit(host.read_workspace_guard, root)
+                blocked = executor.submit(host.read_workspace_guards, root)
                 with self.assertRaisesRegex(RuntimeError, "timed out acquiring"):
                     blocked.result(timeout=1)
 
-    def test_workspace_guard_only_auto_clears_a_dead_starting_launcher(self):
+    def test_stale_start_recovery_is_scoped_to_the_same_run_id(self):
         host = load_host()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             guard = root / "active-v2.json"
             with mock.patch.object(host, "workspace_guard_path", return_value=guard):
                 host.acquire_workspace_guard(root, "stale", "codex", root / "runs" / "stale")
+                host.acquire_workspace_guard(root, "other", "claude", root / "runs" / "other")
+                with mock.patch.object(host.SAFETY, "process_identity_state", return_value="dead_or_replaced"):
+                    host.acquire_workspace_guard(root, "stale", "codex", root / "new" / "stale")
+                self.assertEqual(set(host.read_workspace_guards(root)[1]), {"stale", "other"})
+                self.assertEqual(host.read_workspace_guard(root, "stale")[1]["run_dir"], str(root / "new" / "stale"))
+                host.update_workspace_guard(root, "stale", phase="peer_running", peer_identity=valid_process_identity())
+                with mock.patch.object(host.SAFETY, "process_identity_state", return_value="dead_or_replaced"):
+                    with self.assertRaisesRegex(SystemExit, "already active"):
+                        host.acquire_workspace_guard(root, "stale", "codex", root / "runs" / "stale")
+
+    def test_stale_start_sweep_preserves_other_runs(self):
+        host = load_host()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.object(host, "workspace_guard_path", return_value=root / "guard.json"):
+                host.acquire_workspace_guard(root, "stale", "codex", root / "stale")
+                host.acquire_workspace_guard(root, "live", "claude", root / "live")
+                host.update_workspace_guard(root, "live", phase="peer_running", peer_identity=valid_process_identity())
                 with mock.patch.object(host.SAFETY, "process_identity_state", return_value="dead_or_replaced"):
                     host.require_workspace_guard_available(root)
-                self.assertFalse(guard.exists())
+                self.assertEqual(set(host.read_workspace_guards(root)[1]), {"live"})
 
-                host.acquire_workspace_guard(root, "active", "codex", root / "runs" / "active")
-                host.update_workspace_guard(
-                    root,
-                    "active",
-                    phase="peer_running",
-                    peer_identity=valid_process_identity(),
-                )
-                with (
-                    mock.patch.object(host.SAFETY, "process_identity_matches", return_value=False),
-                    self.assertRaises(SystemExit),
-                ):
+    def test_legacy_single_guard_is_rejected_without_overwriting_it(self):
+        host = load_host()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            guard = root / "guard.json"
+            guard.write_text('{"schema_version":"2.0","run_id":"old"}')
+            original = guard.read_bytes()
+            with mock.patch.object(host, "workspace_guard_path", return_value=guard):
+                with self.assertRaisesRegex(SystemExit, "legacy"):
                     host.require_workspace_guard_available(root)
-                self.assertTrue(guard.exists())
-                host.release_workspace_guard(root, "active")
+            self.assertEqual(guard.read_bytes(), original)
 
-    def test_stale_start_guard_recovery_serializes_replacement(self):
+    def test_stale_start_recovery_serializes_other_registry_updates(self):
         host = load_host()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2249,36 +2272,20 @@ class HostV2Tests(TestCase):
                 host.acquire_workspace_guard(root, "stale", "codex", root / "runs" / "stale")
                 identity_checked = threading.Event()
                 allow_recovery = threading.Event()
-
                 def dead_launcher(_identity):
                     identity_checked.set()
                     self.assertTrue(allow_recovery.wait(timeout=2))
                     return "dead_or_replaced"
-
-                with (
-                    mock.patch.object(
-                        host.SAFETY, "process_identity_state", side_effect=dead_launcher
-                    ),
-                    ThreadPoolExecutor(max_workers=2) as executor,
-                ):
-                    recovery = executor.submit(host.require_workspace_guard_available, root)
+                with mock.patch.object(host.SAFETY, "process_identity_state", side_effect=dead_launcher), ThreadPoolExecutor(max_workers=2) as executor:
+                    recovery = executor.submit(host.acquire_workspace_guard, root, "stale", "codex", root / "new" / "stale")
                     self.assertTrue(identity_checked.wait(timeout=2))
-                    replacement = executor.submit(
-                        host.acquire_workspace_guard,
-                        root,
-                        "replacement",
-                        "codex",
-                        root / "runs" / "replacement",
-                    )
+                    other = executor.submit(host.acquire_workspace_guard, root, "other", "claude", root / "runs" / "other")
                     time.sleep(0.05)
-                    self.assertFalse(replacement.done())
+                    self.assertFalse(other.done())
                     allow_recovery.set()
                     recovery.result(timeout=2)
-                    replacement.result(timeout=2)
-
-                active = json.loads(guard.read_text(encoding="utf-8"))
-                self.assertEqual(active["run_id"], "replacement")
-                host.release_workspace_guard(root, "replacement")
+                    other.result(timeout=2)
+                self.assertEqual(set(host.read_workspace_guards(root)[1]), {"stale", "other"})
 
     def test_clear_history_never_deletes_the_guarded_orphan_run(self):
         host = load_host()
@@ -2289,9 +2296,13 @@ class HostV2Tests(TestCase):
             run_dir = run_root / "guarded-orphan"
             run_dir.mkdir(parents=True)
             (run_dir / "host-request.json").write_text("{}")
+            other_dir = run_root / "other-orphan"
+            other_dir.mkdir()
+            (other_dir / "host-request.json").write_text("{}")
             guard = base / "active-v2.json"
             with mock.patch.object(host, "workspace_guard_path", return_value=guard):
                 host.acquire_workspace_guard(root, "guarded-orphan", "codex", run_dir)
+                host.acquire_workspace_guard(root, "other-orphan", "claude", other_dir)
                 args = host.build_parser().parse_args([
                     "clear-history", "--all", "--yes", "--run-root", str(run_root),
                     "--repo-root", str(root),
@@ -2299,8 +2310,9 @@ class HostV2Tests(TestCase):
                 status, output = host.build_clear_history_output(args)
             self.assertEqual(status, 0)
             self.assertEqual(output["deleted"], [])
-            self.assertEqual([item["run_id"] for item in output["active_preserved"]], ["guarded-orphan"])
+            self.assertEqual({item["run_id"] for item in output["active_preserved"]}, {"guarded-orphan", "other-orphan"})
             self.assertTrue(run_dir.exists())
+            self.assertTrue(other_dir.exists())
             self.assertTrue(guard.exists())
 
     def test_failed_start_rolls_back_guard_and_new_run_directory(self):
@@ -3355,11 +3367,11 @@ class PackageTests(TestCase):
             self.assertIn("report that gap to the host", text, path.name)
             self.assertIn("Do not spawn or delegate to other helpers", text, path.name)
             self.assertIn("Do not invoke Agent Collab", text, path.name)
-            self.assertIn("hard recursion boundary", text, path.name)
+            self.assertIn("not a hard recursion boundary", text, path.name)
 
     def test_agents_claude_and_readme_document_current_contract(self):
         agents = (REPO_ROOT / "AGENTS.md").read_text()
-        for token in ("gpt-6-astra", "claude-opus-5-5", "schema 2.0", "active-workflow guard"):
+        for token in ("gpt-6-astra", "claude-opus-5-5", "schema 2.0", "guard entry for each active run"):
             self.assertIn(token, agents)
         self.assertEqual((REPO_ROOT / "CLAUDE.md").read_text(), "@AGENTS.md\n")
         readme = (REPO_ROOT / "README.md").read_text()

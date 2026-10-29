@@ -50,11 +50,11 @@ Agent Collab launches an independent opposite-product peer, then the host verifi
 
 ### Lifecycle and deadlines
 
-- Hold one atomic active-workflow guard per Git worktree from `start` through validated `host-synthesis.json` and `complete`, or through `cancel`.
+- Hold an atomic guard entry for each active run from `start` through validated `host-synthesis.json` and `complete`, or through `cancel`. Allow independent sessions in the same worktree.
 - Serialize every guard check, stale-start recovery, acquisition, update, and release with one stable per-worktree OS file lock and a bounded wait. Never unlink a guard based on an unlocked stale read.
 - Serialize terminal `finish`, `complete`, and `cancel` transitions with a separate bounded per-run lock; do not hold it while waiting for a live provider.
 - Gate the wrapper's peer work and the provider launch on committing their exact process artifacts. Release the guard only after tracked groups are terminal and quiescent. Rebuild the claim matrix from current admitted artifacts before completion so stale synthesis cannot release it.
-- The worktree guard is the hard cross-product recursion boundary. Peer depth markers and host-CLI shadows are defense in depth.
+- Peer depth markers, host-CLI shadows, and helper instructions deter nested workflows; they do not prevent a peer from deliberately clearing its environment or using other launch surfaces. Do not claim a hard cross-product recursion boundary.
 - Require a finite absolute peer deadline, default 2700 seconds. At expiry terminate with a structured timeout result. Never support indefinite waits. Claude has no default turn cap; `--claude-max-turns` is an explicit per-run override, and reaching it is distinct from timeout.
 
 ## Prompt maintenance

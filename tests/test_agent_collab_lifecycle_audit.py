@@ -70,13 +70,14 @@ class LifecycleAuditTests(TestCase):
                     with (
                         self.subTest(state=state),
                         mock.patch.object(host.SAFETY, "process_identity_state", return_value=state),
-                        self.assertRaisesRegex(SystemExit, "workspace recursion guard"),
+                        self.assertRaisesRegex(SystemExit, "already active"),
                     ):
-                        host.require_workspace_guard_available(root)
+                        host.acquire_workspace_guard(root, "active", "codex", root / "run")
                     self.assertEqual(guard.read_bytes(), original)
                 with mock.patch.object(host.SAFETY, "process_identity_state", return_value="dead_or_replaced"):
-                    host.require_workspace_guard_available(root)
-                self.assertFalse(guard.exists())
+                    host.acquire_workspace_guard(root, "active", "codex", root / "run")
+                self.assertTrue(guard.exists())
+                host.release_workspace_guard(root, "active")
 
     def prepare_run(self, host, root, run_dir, guard):
         req = fixtures.request()
@@ -122,6 +123,37 @@ class LifecycleAuditTests(TestCase):
                 host.write_json(run_dir / "host-synthesis.json", synthesis)
                 self.assertEqual(host.complete(complete_args), 0)
                 self.assertFalse(guard.exists())
+
+    def test_complete_one_run_preserves_another_hosts_active_run(self):
+        host = fixtures.load_host()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_root = root / "runs"
+            run_dir = run_root / fixtures.request()["run_id"]
+            other_dir = root / "other-host-runs" / "other-run"
+            other_dir.mkdir(parents=True)
+            (other_dir / "host-request.json").write_text("{}")
+            guard = root / "active-v2.json"
+            with (
+                mock.patch.object(host, "workspace_guard_path", return_value=guard),
+                mock.patch.object(host, "wait_for_peer_report", return_value="report_ready"),
+                mock.patch.object(host, "record_host_workspace_mutation", return_value=None),
+                mock.patch.object(host.SAFETY, "process_group_alive", return_value=False),
+                redirect_stdout(io.StringIO()),
+            ):
+                self.prepare_run(host, root, run_dir, guard)
+                host.acquire_workspace_guard(root, "other-run", "claude", other_dir)
+                self.assertEqual(host.resolve_run_reference(root, "other-run", run_root), other_dir)
+                common = [str(run_dir), "--run-root", str(run_root), "--repo-root", str(root)]
+                self.assertEqual(host.finish(host.build_parser().parse_args(["finish", *common])), 0)
+                synthesis = fixtures.valid_host_synthesis(run_dir=run_dir)
+                host.write_json(run_dir / "host-synthesis.json", synthesis)
+                self.assertEqual(host.complete(host.build_parser().parse_args(["complete", *common])), 0)
+                self.assertEqual(set(host.read_workspace_guards(root)[1]), {"other-run"})
+                # Repeating completion must leave the other host's entry intact.
+                self.assertEqual(host.complete(host.build_parser().parse_args(["complete", *common])), 0)
+                self.assertEqual(set(host.read_workspace_guards(root)[1]), {"other-run"})
+                host.release_workspace_guard(root, "other-run")
 
     def test_changed_helper_claims_require_new_synthesis_after_finish(self):
         self.assert_report_change_requires_resynthesis("helper-reports.json", {

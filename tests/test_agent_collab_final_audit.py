@@ -109,10 +109,10 @@ class FinalAuditTests(TestCase):
             with mock.patch.object(host, 'workspace_guard_path', return_value=guard):
                 host.acquire_workspace_guard(root, '123', 'codex', root / 'run')
                 data = host.STRICT_JSON.load(guard)
-                data['run_id'] = 123
+                data['runs']['123']['run_id'] = 123
                 host.STRICT_JSON.write(guard, data)
                 with self.assertRaisesRegex(SystemExit, 'run_id'):
-                    host.read_workspace_guard(root)
+                    host.read_workspace_guard(root, '123')
 
     def test_request_rejects_boolean_helper_limit_and_numeric_digest(self):
         peer = fixtures.load_peer()

@@ -478,7 +478,7 @@ class WorkspaceGuardPathTests(TestCase):
             self.assertEqual(host.workspace_guard_path(repo), guard)
             self.assertEqual(host.workspace_guard_lock_path(repo).parent, guard.parent)
             with self.assertRaisesRegex(SystemExit, "must not be a symlink"):
-                host.read_workspace_guard(repo)
+                host.read_workspace_guards(repo)
             self.assertFalse(outside.exists())
 
     def test_git_probes_ignore_inherited_git_variables(self):

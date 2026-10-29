@@ -47,6 +47,6 @@ The absolute peer deadline is finite, 2700 seconds by default. Do not cancel or 
 python3 "<skill-root>/scripts/host.py" complete "<run-dir>"
 ```
 
-Only the host calls `complete`. The atomic per-worktree guard remains held through validated synthesis and quiescence; it is the hard cross-product recursion boundary. Explicit cancellation uses `cancel`; if it reports `already_terminal`, preserve the report and use `finish`. On Windows cancel from the starting session. See the launch reference for lock, process, sandbox, and failure details.
+Only the host calls `complete`. Each run keeps its own guard entry through validated synthesis and quiescence. Separate sessions may run concurrently in the same worktree. Peer depth markers and CLI shadows deter nested runs but are not a hard recursion boundary. Explicit cancellation uses `cancel`; if it reports `already_terminal`, preserve the report and use `finish`. On Windows cancel from the starting session. See the launch reference for lock, process, sandbox, and failure details.
 
 Complete authorized work, including pending commands and helpers, within the deadline. Use stated assumptions for nonblocking ambiguity; otherwise report concrete blockers and uncovered scope. Keep output concise and evidence-backed, and repeat checks only when changes, failures, or unresolved claims justify them.
