@@ -392,6 +392,8 @@ def valid_peer_process(run_dir, repo_root, guard_path, **overrides):
         "peer_timeout_seconds": 2700,
         "peer_cli_version": "2.1.257",
         "workspace_guard": str(guard_path),
+        "owner_token": (json.loads(guard_path.read_text())["runs"][req["run_id"]]["owner_token"]
+                        if guard_path.exists() else "a" * 32),
         "settings": {"local": "local.json", "global": "global.json"},
         "peer_report": str(run_dir / "peer-report.json"),
         "peer_raw": str(run_dir / "peer.raw.json"),
@@ -2198,12 +2200,12 @@ class HostV2Tests(TestCase):
                 self.assertEqual(set(host.read_workspace_guards(root)[1]), {"outer", "other"})
                 with self.assertRaisesRegex(SystemExit, "already active"):
                     host.acquire_workspace_guard(root, "outer", "codex", root / "runs" / "outer")
-                host.update_workspace_guard(root, "other", phase="peer_running", peer_identity=valid_process_identity())
-                host.release_workspace_guard(root, "outer")
+                host.update_workspace_guard(root, "other", owner=host.read_workspace_guard(root, "other")[1], phase="peer_running", peer_identity=valid_process_identity())
+                host.release_workspace_guard(root, "outer", owner=host.read_workspace_guard(root, "outer")[1])
                 self.assertEqual(host.read_workspace_guard(root, "other")[1]["phase"], "peer_running")
                 with self.assertRaisesRegex(SystemExit, "missing"):
-                    host.release_workspace_guard(root, "outer")
-                host.release_workspace_guard(root, "other")
+                    host.release_workspace_guard(root, "outer", owner=host.read_workspace_guard(root, "outer")[1])
+                host.release_workspace_guard(root, "other", owner=host.read_workspace_guard(root, "other")[1])
                 self.assertFalse(guard.exists())
 
     def test_workspace_guard_lock_wait_is_bounded(self):
@@ -2234,21 +2236,21 @@ class HostV2Tests(TestCase):
                     host.acquire_workspace_guard(root, "stale", "codex", root / "new" / "stale")
                 self.assertEqual(set(host.read_workspace_guards(root)[1]), {"stale", "other"})
                 self.assertEqual(host.read_workspace_guard(root, "stale")[1]["run_dir"], str(root / "new" / "stale"))
-                host.update_workspace_guard(root, "stale", phase="peer_running", peer_identity=valid_process_identity())
+                host.update_workspace_guard(root, "stale", owner=host.read_workspace_guard(root, "stale")[1], phase="peer_running", peer_identity=valid_process_identity())
                 with mock.patch.object(host.SAFETY, "process_identity_state", return_value="dead_or_replaced"):
                     with self.assertRaisesRegex(SystemExit, "already active"):
                         host.acquire_workspace_guard(root, "stale", "codex", root / "runs" / "stale")
 
-    def test_stale_start_sweep_preserves_other_runs(self):
+    def test_targeted_stale_start_recovery_preserves_other_runs(self):
         host = load_host()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             with mock.patch.object(host, "workspace_guard_path", return_value=root / "guard.json"):
                 host.acquire_workspace_guard(root, "stale", "codex", root / "stale")
                 host.acquire_workspace_guard(root, "live", "claude", root / "live")
-                host.update_workspace_guard(root, "live", phase="peer_running", peer_identity=valid_process_identity())
+                host.update_workspace_guard(root, "live", owner=host.read_workspace_guard(root, "live")[1], phase="peer_running", peer_identity=valid_process_identity())
                 with mock.patch.object(host.SAFETY, "process_identity_state", return_value="dead_or_replaced"):
-                    host.require_workspace_guard_available(root)
+                    host.recover_workspace_guard(root, "stale")
                 self.assertEqual(set(host.read_workspace_guards(root)[1]), {"live"})
 
     def test_legacy_single_guard_is_rejected_without_overwriting_it(self):
@@ -2545,14 +2547,14 @@ class HostV2Tests(TestCase):
                 host.acquire_workspace_guard(root, request()["run_id"], "codex", run_dir)
                 host.update_workspace_guard(
                     root,
-                    request()["run_id"],
+                    request()["run_id"], owner=host.read_workspace_guard(root, request()["run_id"])[1],
                     phase="peer_running",
                     peer_identity=valid_process_identity(),
                 )
-                with self.assertRaisesRegex(SystemExit, "wrapper-quiescence proof"):
+                with self.assertRaisesRegex(SystemExit, "owner mismatch"):
                     host.complete(complete_args)
                 self.assertTrue(guard.exists())
-                host.release_workspace_guard(root, request()["run_id"])
+                host.release_workspace_guard(root, request()["run_id"], owner=host.read_workspace_guard(root, request()["run_id"])[1])
                 (run_dir / "host-synthesis.json").write_text(
                     json.dumps({**valid_host_synthesis(run_dir=run_dir), "final_answer_ready": False})
                 )

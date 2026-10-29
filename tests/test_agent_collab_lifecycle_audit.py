@@ -77,7 +77,7 @@ class LifecycleAuditTests(TestCase):
                 with mock.patch.object(host.SAFETY, "process_identity_state", return_value="dead_or_replaced"):
                     host.acquire_workspace_guard(root, "active", "codex", root / "run")
                 self.assertTrue(guard.exists())
-                host.release_workspace_guard(root, "active")
+                host.release_workspace_guard(root, "active", owner=host.read_workspace_guard(root, "active")[1])
 
     def prepare_run(self, host, root, run_dir, guard):
         req = fixtures.request()
@@ -153,7 +153,7 @@ class LifecycleAuditTests(TestCase):
                 # Repeating completion must leave the other host's entry intact.
                 self.assertEqual(host.complete(host.build_parser().parse_args(["complete", *common])), 0)
                 self.assertEqual(set(host.read_workspace_guards(root)[1]), {"other-run"})
-                host.release_workspace_guard(root, "other-run")
+                host.release_workspace_guard(root, "other-run", owner=host.read_workspace_guard(root, "other-run")[1])
 
     def test_changed_helper_claims_require_new_synthesis_after_finish(self):
         self.assert_report_change_requires_resynthesis("helper-reports.json", {

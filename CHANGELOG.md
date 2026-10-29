@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Bind registry mutations to exact run instances, reserve lifecycle capacity before admission, and replace startup-wide recovery scans with targeted recovery. Add `status --active` and `recover RUN_ID`; `result` now requires an explicit run.
+- Report malformed artifact filenames without a traceback and reject authored judgments disguised as the reserved adjudication placeholder.
+
 - **Breaking:** allow independent Agent Collab runs in the same worktree, tracking each run in a shared guard registry. Finish active runs before upgrading; older and newer runtimes cannot share an active guard. Recursion controls are no longer a hard worktree-wide boundary.
 
 ## 6.0.1 — 2026-10-25

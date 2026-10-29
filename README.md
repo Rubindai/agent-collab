@@ -288,6 +288,12 @@ Peer prompts use one compact, escaped XML brief with role, outcome, evidence, bo
 
 The prompt is an instruction to the peer, not a sandbox or a higher-precedence security boundary. Provider-managed instructions and repository guidance may still load through the peer CLI. Runtime boundaries include launch validation, the workflow guard, provider permissions, and the disposable filesystem when selected.
 
+## Concurrent run ownership
+
+Independent sessions can run Agent Collab in the same worktree. Each registry entry has a random ownership token, so retrying an old cancellation or completion cannot release a newer run that reused its ID. Registry admission reserves space for later lifecycle updates.
+
+Use `host.py status --active --repo-root PATH` to list all active owners, including other run roots. `result` requires an explicit run ID or directory. Startup no longer scans every other launcher's process identity. Use `host.py recover RUN_ID --repo-root PATH` for an abandoned **starting** entry: recovery requires a proven dead launcher, preserves artifacts, and refuses running entries or unknown identity evidence. Finish or cancel established runs normally.
+
 ## Permissions and recursion
 
 Full capability is the configured default. On Linux, the default disposable workspace lets the peer write temporarily to an overlay of the repository and HOME; those writes are discarded after the run. The rest of the host filesystem is mounted read-only, except a private temporary directory for provider outputs and the peer product's credential file (`auth.json` under `CODEX_HOME`, default `~/.codex`, or `.credentials.json` under `CLAUDE_CONFIG_DIR`, default `~/.claude`), which is bound through so a rotated refresh token persists and the host stays logged in. A symlinked credential file is not bound, so a token refreshed during the run is discarded with the overlay. `/tmp` and `/var/tmp` are fresh empty tmpfs mounts, `/dev` holds only the minimal device set, and the peer runs in its own PID namespace. Host-owned run artifacts are not writable from the sandbox. On macOS and native Windows, fresh settings default to direct host access with before/after mutation snapshots. These snapshots detect included changes after the fact; they do not prevent or undo edits.

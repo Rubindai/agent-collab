@@ -51,6 +51,7 @@ Agent Collab launches an independent opposite-product peer, then the host verifi
 ### Lifecycle and deadlines
 
 - Hold an atomic guard entry for each active run from `start` through validated `host-synthesis.json` and `complete`, or through `cancel`. Allow independent sessions in the same worktree.
+- Bind every guard update and release to its random run-instance token, canonical run directory, repository, and host; a reused run ID is not ownership. Reserve lifecycle growth before registry admission. Recover abandoned starting entries only with proven dead launcher identity.
 - Serialize every guard check, stale-start recovery, acquisition, update, and release with one stable per-worktree OS file lock and a bounded wait. Never unlink a guard based on an unlocked stale read.
 - Serialize terminal `finish`, `complete`, and `cancel` transitions with a separate bounded per-run lock; do not hold it while waiting for a live provider.
 - Gate the wrapper's peer work and the provider launch on committing their exact process artifacts. Release the guard only after tracked groups are terminal and quiescent. Rebuild the claim matrix from current admitted artifacts before completion so stale synthesis cannot release it.
