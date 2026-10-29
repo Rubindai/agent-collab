@@ -20,47 +20,47 @@ class SettingsParsingTests(TestCase):
     def test_empty_boolean_environment_value_is_rejected_not_false(self):
         host = fixtures.load_host()
         with self.assertRaisesRegex(ValueError, "expected boolean"):
-            host.normalize_settings({"safe_mode": ""}, "environment AGENT_COLLAB_SAFE_MODE")
+            host.CONFIG.normalize_settings({"safe_mode": ""}, "environment AGENT_COLLAB_SAFE_MODE")
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             with (
-                mock.patch.object(host, "default_global_settings_path", return_value=root / "g"),
-                mock.patch.object(host, "default_local_settings_path", return_value=root / "l"),
+                mock.patch.object(host.CONFIG, "default_global_settings_path", return_value=root / "g"),
+                mock.patch.object(host.CONFIG, "default_local_settings_path", return_value=root / "l"),
             ):
-                resolved = host.resolve_settings(root, {"AGENT_COLLAB_SAFE_MODE": ""})
+                resolved = host.CONFIG.resolve_settings(root, {"AGENT_COLLAB_SAFE_MODE": ""})
         self.assertTrue(resolved["environment_errors"])
         self.assertEqual(resolved["sources"]["safe_mode"], "builtin")
 
     def test_integer_settings_accept_only_ascii_digits(self):
         host = fixtures.load_host()
-        self.assertEqual(host.normalize_settings({"max_local_subagents": "8"}, "env")["max_local_subagents"], 8)
+        self.assertEqual(host.CONFIG.normalize_settings({"max_local_subagents": "8"}, "env")["max_local_subagents"], 8)
         for value in ("٨", "8.0", "-1", True, " "):
             with self.subTest(value=value), self.assertRaises(ValueError):
-                host.normalize_settings({"max_local_subagents": value}, "env")
+                host.CONFIG.normalize_settings({"max_local_subagents": value}, "env")
         with self.assertRaises(ValueError):
-            host.normalize_settings({"history_retained_runs": "٥"}, "env")
+            host.CONFIG.normalize_settings({"history_retained_runs": "٥"}, "env")
 
     def test_timeout_and_cli_numbers_accept_only_ascii_decimals(self):
         host = fixtures.load_host()
-        self.assertEqual(host.normalize_timeout("2700"), 2700)
-        self.assertEqual(host.normalize_timeout(" 90.5 "), 90.5)
+        self.assertEqual(host.CONFIG.normalize_timeout("2700"), 2700)
+        self.assertEqual(host.CONFIG.normalize_timeout(" 90.5 "), 90.5)
         for value in ("٢٧٠٠", "２７００", "2_700", "2.7e3", "inf", "nan", True):
             with self.subTest(value=value), self.assertRaises(ValueError):
-                host.normalize_timeout(value)
-        self.assertEqual(host.cli_integer("8"), 8)
-        self.assertEqual(host.cli_number("90.5"), 90.5)
-        for parse, value in ((host.cli_integer, "٨"), (host.cli_integer, "1_0"), (host.cli_number, "2.7e3")):
+                host.CONFIG.normalize_timeout(value)
+        self.assertEqual(host.CONFIG.cli_integer("8"), 8)
+        self.assertEqual(host.CONFIG.cli_number("90.5"), 90.5)
+        for parse, value in ((host.CONFIG.cli_integer, "٨"), (host.CONFIG.cli_integer, "1_0"), (host.CONFIG.cli_number, "2.7e3")):
             with self.subTest(value=value), self.assertRaises(host.argparse.ArgumentTypeError):
                 parse(value)
 
     def test_claude_tools_sentinel_must_be_lowercase_default(self):
         host = fixtures.load_host()
         peer = fixtures.load_peer()
-        self.assertEqual(host.validate_claude_tools("default", "test"), "default")
+        self.assertEqual(host.CONFIG.validate_claude_tools("default", "test"), "default")
         for value in ("DEFAULT", "Default"):
             with self.subTest(value=value):
                 with self.assertRaisesRegex(ValueError, "lowercase literal"):
-                    host.validate_claude_tools(value, "test")
+                    host.CONFIG.validate_claude_tools(value, "test")
                 with self.assertRaisesRegex(peer.RequestValidationError, "lowercase literal"):
                     peer.validate_request(fixtures.request(claude_tools=value))
 
@@ -74,8 +74,8 @@ class StateRootTests(TestCase):
             env = {"CLAUDE_PLUGIN_DATA": str(foreign), "XDG_STATE_HOME": str(xdg)}
             with mock.patch.dict(os.environ, env, clear=False):
                 os.environ.pop("AGENT_COLLAB_STATE_HOME", None)
-                with mock.patch.object(host, "resource_root", return_value=Path(tmp) / "elsewhere"):
-                    self.assertEqual(host.default_state_root(), xdg / "agent-collab")
+                with mock.patch.object(host.CONFIG, "resource_root", return_value=Path(tmp) / "elsewhere"):
+                    self.assertEqual(host.CONFIG.default_state_root(), xdg / "agent-collab")
 
     def test_active_run_is_found_through_the_worktree_guard_from_another_run_root(self):
         host = fixtures.load_host()
@@ -88,7 +88,7 @@ class StateRootTests(TestCase):
             run_dir.mkdir(parents=True)
             (run_dir / "host-request.json").write_text("{}")
             guard = {"run_id": "agent-collab-test", "run_dir": str(run_dir)}
-            with mock.patch.object(host, "read_workspace_guard", return_value=(root / "guard", guard)):
+            with mock.patch.object(host.REGISTRY, "read_workspace_guard", return_value=(root / "guard", guard)):
                 self.assertEqual(host.guarded_run_dir(repo, "agent-collab-test"), run_dir.resolve())
                 self.assertIsNone(host.guarded_run_dir(repo, "agent-collab-other"))
                 resolved = host.resolve_run_reference(repo, "agent-collab-test", root / "my-runs")
@@ -99,7 +99,7 @@ class StateRootTests(TestCase):
 
 class IsolationBoundaryTests(TestCase):
     def isolation(self):
-        return fixtures.load_host().load_isolation_runtime()
+        return fixtures.load_host().CONFIG.load_isolation_runtime()
 
     def test_sandbox_command_does_not_bind_the_run_directory_writable(self):
         isolation = self.isolation()
@@ -236,7 +236,7 @@ def _all_claim_status_enums(node):
 
 class SchemaRuntimeParityTests(TestCase):
     def test_codex_config_schema_pattern_matches_owned_keys(self):
-        safety = fixtures.load_host().SAFETY
+        safety = fixtures.load_host().CONFIG.SAFETY
         owned = sorted(safety.AGENT_COLLAB_OWNED_CODEX_CONFIG_KEYS)
         expected = "^(?!(?:" + "|".join(owned) + ")(?:\\.|=))[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*="
         settings = _schema("settings.schema.json")
@@ -273,17 +273,17 @@ class SchemaRuntimeParityTests(TestCase):
             with self.subTest(model=model):
                 self.assertEqual(
                     schema_accepts(settings_props["claude_model"], model),
-                    not host.is_fable_model(model),
+                    not host.CONFIG.is_fable_model(model),
                 )
         for tools in ("default", "DEFAULT", "Default", "Read,Grep", "default,Bash", "Read Default"):
             with self.subTest(tools=tools):
-                runtime = runtime_accepts(host.validate_claude_tools, tools, "test")
+                runtime = runtime_accepts(host.CONFIG.validate_claude_tools, tools, "test")
                 self.assertEqual(schema_accepts(settings_props["claude_tools"], tools), runtime)
                 self.assertEqual(schema_accepts(request_props["claude_tools"], tools), runtime)
         for entry in ("foo=true", "mcp_servers.x.enabled=false", "model_provider=\"x\"", "profiles.a.model=\"m\"",
                       "openai_base_url=\"u\"", "tools.web_search.context_size=\"low\"", "agents=\"x\""):
             with self.subTest(entry=entry):
-                runtime = runtime_accepts(host.normalize_codex_config, [entry], "test")
+                runtime = runtime_accepts(host.CONFIG.normalize_codex_config, [entry], "test")
                 self.assertEqual(schema_accepts(settings_props["codex_config"]["items"], entry), runtime)
 
     def test_claim_status_and_mode_enums_match_runtime_constants(self):
@@ -296,16 +296,16 @@ class SchemaRuntimeParityTests(TestCase):
                 enums = _all_claim_status_enums(_schema(name))
                 self.assertTrue(enums)
                 for enum in enums:
-                    self.assertEqual(enum, set(host.CLAIM_STATUSES))
+                    self.assertEqual(enum, set(host.ARTIFACTS.CLAIM_STATUSES))
                     self.assertEqual(enum, set(peer.CLAIM_STATUSES))
-        self.assertEqual(set(host.MODES), set(peer.MODES))
-        self.assertEqual(set(host.MODES), set(state.MODES))
-        self.assertEqual(set(_schema("host-request.schema.json")["properties"]["mode"]["enum"]), set(host.MODES))
-        self.assertEqual(host.ORIGINS, peer.ORIGINS)
-        self.assertEqual(host.ORIGINS, state.ORIGINS)
+        self.assertEqual(set(host.CONFIG.MODES), set(peer.MODES))
+        self.assertEqual(set(host.CONFIG.MODES), set(state.MODES))
+        self.assertEqual(set(_schema("host-request.schema.json")["properties"]["mode"]["enum"]), set(host.CONFIG.MODES))
+        self.assertEqual(host.CONFIG.ORIGINS, peer.ORIGINS)
+        self.assertEqual(host.CONFIG.ORIGINS, state.ORIGINS)
         self.assertEqual(
             set(_schema("adjudicator-report.schema.json")["properties"]["recommended_verdict"]["enum"]),
-            set(host.RECOMMENDED_VERDICTS),
+            set(host.ARTIFACTS.RECOMMENDED_VERDICTS),
         )
 
 
@@ -433,7 +433,7 @@ class SnapshotCoverageTests(TestCase):
         self.assertEqual(data["sections"]["tracked_count"], 3)
 
     def test_non_utf8_filenames_serialize_in_git_and_filesystem_modes(self):
-        strict_json = fixtures.load_host().STRICT_JSON
+        strict_json = fixtures.load_host().CONFIG.STRICT_JSON
         name = os.fsdecode(b"bad-\xff.txt")
         try:
             (self.repo / name).write_text("x")
@@ -455,7 +455,7 @@ class SnapshotCoverageTests(TestCase):
 
 class StrictJSONEdgeTests(TestCase):
     def test_lone_surrogates_and_huge_integers_raise_strict_errors(self):
-        strict_json = fixtures.load_host().STRICT_JSON
+        strict_json = fixtures.load_host().CONFIG.STRICT_JSON
         for text in ('"\\ud800"', '{"\\udfff": 1}', "1" * 5000):
             with self.subTest(text=text[:20]), self.assertRaises(strict_json.StrictJSONError):
                 strict_json.loads(text)
@@ -471,14 +471,14 @@ class WorkspaceGuardPathTests(TestCase):
             repo = Path(tmp) / "repo"
             repo.mkdir()
             _git(repo, "init", "-q")
-            guard = host.workspace_guard_path(repo)
+            guard = host.REGISTRY.workspace_guard_path(repo)
             guard.parent.mkdir(parents=True, exist_ok=True)
             outside = Path(tmp) / "outside.json"
             guard.symlink_to(outside)
-            self.assertEqual(host.workspace_guard_path(repo), guard)
-            self.assertEqual(host.workspace_guard_lock_path(repo).parent, guard.parent)
+            self.assertEqual(host.REGISTRY.workspace_guard_path(repo), guard)
+            self.assertEqual(host.REGISTRY.workspace_guard_lock_path(repo).parent, guard.parent)
             with self.assertRaisesRegex(SystemExit, "must not be a symlink"):
-                host.read_workspace_guards(repo)
+                host.REGISTRY.read_workspace_guards(repo)
             self.assertFalse(outside.exists())
 
     def test_git_probes_ignore_inherited_git_variables(self):
@@ -489,7 +489,7 @@ class WorkspaceGuardPathTests(TestCase):
                 path.mkdir()
                 _git(path, "init", "-q")
             with mock.patch.dict(os.environ, {"GIT_DIR": str(other / ".git")}):
-                guard = host.workspace_guard_path(repo)
+                guard = host.REGISTRY.workspace_guard_path(repo)
             self.assertEqual(guard.parent, (repo / ".git" / "agent-collab").resolve())
 
 
@@ -562,8 +562,8 @@ class SharedHistoryCleanupTests(TestCase):
             (owned / "peer-process.json").write_text(json.dumps({"repo_root": str(repo_a)}))
             os.utime(old, (1, 1))
             guards = {repo_a.resolve(): base / "guard-a.json", repo_b.resolve(): base / "guard-b.json"}
-            with mock.patch.object(host, "workspace_guard_path", side_effect=lambda root: guards[root.resolve()]):
-                host.acquire_workspace_guard(repo_a, "run-a", "codex", owned)
+            with mock.patch.object(host.REGISTRY, "workspace_guard_path", side_effect=lambda root: guards[root.resolve()]):
+                host.REGISTRY.acquire_workspace_guard(repo_a, "run-a", "codex", owned)
                 status, output = self.run_clear(host, repo_b, run_root)
             self.assertEqual(status, 0)
             self.assertEqual([item["run_id"] for item in output["deleted"]], ["stale-orphan"])

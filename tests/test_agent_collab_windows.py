@@ -225,11 +225,11 @@ class CrossPlatformIdentityTests(TestCase):
             run_dir.mkdir()
             request = fixtures.request()
             data = fixtures.valid_peer_process(run_dir, Path(tmp), Path(tmp) / "guard.json")
-            host.validate_peer_process(data, request, run_dir)
-            kind = next(iter(host.SAFETY.PROCESS_IDENTITY_KINDS - {host.SAFETY.local_identity_kind()}))
+            host.ARTIFACTS.validate_peer_process(data, request, run_dir)
+            kind = next(iter(host.CONFIG.SAFETY.PROCESS_IDENTITY_KINDS - {host.CONFIG.SAFETY.local_identity_kind()}))
             data["process_identity"] = {**data["process_identity"], "kind": kind}
-            with self.assertRaisesRegex(host.ArtifactValidationError, "started on another platform"):
-                host.validate_peer_process(data, request, run_dir)
+            with self.assertRaisesRegex(host.ARTIFACTS.ArtifactValidationError, "started on another platform"):
+                host.ARTIFACTS.validate_peer_process(data, request, run_dir)
 
     def test_unknown_identities_never_release_the_guard(self):
         host = fixtures.load_host()
@@ -240,13 +240,13 @@ class CrossPlatformIdentityTests(TestCase):
             provider = {"status": "running", "cleanup_outcome": None, "pgid": 4243,
                         "process_identity": {"kind": "linux_proc"}}
             with (
-                mock.patch.object(host, "load_provider_process", return_value=provider),
-                mock.patch.object(host.SAFETY, "process_identity_state", return_value="unknown"),
-                mock.patch.object(host.SAFETY, "process_group_alive", return_value=False),
-                mock.patch.object(host.SAFETY, "terminate_process_group") as terminate,
+                mock.patch.object(host.ARTIFACTS, "load_provider_process", return_value=provider),
+                mock.patch.object(host.CONFIG.SAFETY, "process_identity_state", return_value="unknown"),
+                mock.patch.object(host.CONFIG.SAFETY, "process_group_alive", return_value=False),
+                mock.patch.object(host.CONFIG.SAFETY, "terminate_process_group") as terminate,
             ):
                 cleanup = host.terminate_tracked_process_tree(process_info, run_dir, request)
-                with self.assertRaisesRegex(host.ArtifactValidationError, "cannot be verified"):
+                with self.assertRaisesRegex(host.ARTIFACTS.ArtifactValidationError, "cannot be verified"):
                     host.require_process_tree_quiescent(process_info, run_dir, request)
             terminate.assert_not_called()
             self.assertFalse(cleanup["quiescent"])
@@ -329,10 +329,10 @@ class GitOptionalTests(TestCase):
             folder = Path(tmp) / "project"
             folder.mkdir()
             with mock.patch.dict(os.environ, {"PATH": str(empty_bin), "XDG_STATE_HOME": str(Path(tmp) / "state")}):
-                self.assertIn("workspace-guards", str(host.workspace_guard_path(folder)))
+                self.assertIn("workspace-guards", str(host.REGISTRY.workspace_guard_path(folder)))
                 (Path(tmp) / ".git").mkdir()
                 with self.assertRaisesRegex(SystemExit, "git is required"):
-                    host.workspace_guard_path(folder)
+                    host.REGISTRY.workspace_guard_path(folder)
 
 
 class WindowsStdioTests(TestCase):

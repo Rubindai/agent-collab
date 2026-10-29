@@ -19,6 +19,8 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "tools" / "agent-collab" / "scri
 
 
 def load(name):
+    if str(SCRIPTS) not in sys.path:
+        sys.path.insert(0, str(SCRIPTS))
     spec = importlib.util.spec_from_file_location(f"agent_collab_{name}_windows_check", SCRIPTS / f"{name}.py")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -216,6 +218,34 @@ class JobSupervisionChecks(unittest.TestCase):
 
 @unittest.skipUnless(os.name == "nt", "Windows only")
 class PortableFileChecks(unittest.TestCase):
+    def test_registry_owner_survives_historical_release(self):
+        host = load("host")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with unittest.mock.patch.object(host.REGISTRY, "workspace_guard_path", return_value=root / "guard.json"):
+                host.REGISTRY.acquire_workspace_guard(root, "reused", "codex", root / "run")
+                old = host.REGISTRY.read_workspace_guard(root, "reused")[1]
+                host.REGISTRY.release_workspace_guard(root, "reused", owner=old)
+                host.REGISTRY.acquire_workspace_guard(root, "reused", "codex", root / "run")
+                original = (root / "guard.json").read_bytes()
+                with self.assertRaisesRegex(SystemExit, "owner mismatch"):
+                    host.REGISTRY.release_workspace_guard(root, "reused", owner=old)
+                self.assertEqual((root / "guard.json").read_bytes(), original)
+
+    def test_review_receipt_uses_native_paths_and_utf8(self):
+        host = load("host")
+        review = host.CONFIG.load_review_runtime()
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp).resolve()
+            owner = {"run_id":"run", "host":"codex", "owner_token":"a" * 32,
+                     "run_dir":str(run), "repo_root":str(run)}
+            documents = {name:None for name in review.EVIDENCE_FILES}
+            documents["host-first-pass.json"] = {"summary":"Unicode: 中文", "claims":[]}
+            paths = review.prepare(run, owner, documents)
+            review.verify(run, Path(paths["review_dir"]), owner, documents)
+            self.assertIn("中文", review.markdown(documents))
+            self.assertNotIn(b"\r\n", Path(paths["synthesis_input"]).read_bytes())
+
     def test_locks_exclude_other_processes_until_released(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "guard.lock"

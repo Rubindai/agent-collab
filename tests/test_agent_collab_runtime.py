@@ -80,6 +80,11 @@ def process_state(pid):
 
 
 def load_module(path, name):
+    if path.name == "host.py":
+        for dependency in ("host_config", "artifacts", "registry"):
+            sys.modules.pop(dependency, None)
+    if str(path.parent) not in sys.path:
+        sys.path.insert(0, str(path.parent))
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -224,7 +229,7 @@ def valid_report(**overrides):
 
 
 def complete_settings(host, **overrides):
-    data = {key: list(value) if isinstance(value, list) else value for key, value in host.SETTING_DEFAULTS.items()}
+    data = {key: list(value) if isinstance(value, list) else value for key, value in host.CONFIG.SETTING_DEFAULTS.items()}
     data["workspace_mode"] = "direct"
     data.update(overrides)
     return data
@@ -234,7 +239,7 @@ class IsolatedWorkspaceTests(TestCase):
     def test_isolation_is_default_and_fails_before_run_creation(self):
         with mock.patch.object(sys, "platform", "linux"), tempfile.TemporaryDirectory() as temporary:
             host = load_host()
-            self.assertEqual(host.SETTING_DEFAULTS["workspace_mode"], "isolated")
+            self.assertEqual(host.CONFIG.SETTING_DEFAULTS["workspace_mode"], "isolated")
             root = Path(temporary)
             run_root = root / "runs"
             args = host.build_parser().parse_args([
@@ -243,10 +248,10 @@ class IsolatedWorkspaceTests(TestCase):
             ])
             unavailable = {"status": "sandbox_unavailable", "backend": "linux_fuse_overlay_bwrap", "details": "FUSE unavailable"}
             with (
-                mock.patch.object(host, "require_workspace_guard_available"),
-                mock.patch.object(host, "load_isolation_runtime", return_value=SimpleNamespace(preflight=lambda _root: unavailable)),
-                mock.patch.object(host, "require_peer_cli_version") as cli,
-                mock.patch.object(host, "acquire_workspace_guard") as guard,
+                mock.patch.object(host.REGISTRY, "require_workspace_guard_available"),
+                mock.patch.object(host.CONFIG, "load_isolation_runtime", return_value=SimpleNamespace(preflight=lambda _root: unavailable)),
+                mock.patch.object(host.CONFIG, "require_peer_cli_version") as cli,
+                mock.patch.object(host.REGISTRY, "acquire_workspace_guard") as guard,
                 self.assertRaises(SystemExit) as raised,
             ):
                 host.start(args)
@@ -258,7 +263,7 @@ class IsolatedWorkspaceTests(TestCase):
     def test_macos_defaults_to_direct_without_isolation_fallback(self):
         with mock.patch.object(sys, "platform", "darwin"), tempfile.TemporaryDirectory() as temporary:
             host = load_host()
-            self.assertEqual(host.SETTING_DEFAULTS["workspace_mode"], "direct")
+            self.assertEqual(host.CONFIG.SETTING_DEFAULTS["workspace_mode"], "direct")
             root = Path(temporary)
             run_root = root / "runs"
             args = host.build_parser().parse_args([
@@ -266,13 +271,13 @@ class IsolatedWorkspaceTests(TestCase):
                 "--repo-root", str(root), "--run-root", str(run_root),
             ])
             with (
-                mock.patch.object(host, "require_workspace_guard_available"),
-                mock.patch.object(host, "load_settings_layers", return_value={
+                mock.patch.object(host.REGISTRY, "require_workspace_guard_available"),
+                mock.patch.object(host.CONFIG, "load_settings_layers", return_value={
                     "global": {"settings": {}, "error": None},
                     "local": {"settings": {}, "error": None},
                 }),
-                mock.patch.object(host, "load_isolation_runtime", side_effect=AssertionError("unexpected isolation preflight")),
-                mock.patch.object(host, "require_peer_cli_version", side_effect=SystemExit("version probe reached")),
+                mock.patch.object(host.CONFIG, "load_isolation_runtime", side_effect=AssertionError("unexpected isolation preflight")),
+                mock.patch.object(host.CONFIG, "require_peer_cli_version", side_effect=SystemExit("version probe reached")),
                 self.assertRaisesRegex(SystemExit, "version probe reached"),
             ):
                 host.start(args)
@@ -291,11 +296,11 @@ class IsolatedWorkspaceTests(TestCase):
 
     def test_isolated_snapshot_does_not_scan_repo(self):
         host = load_host()
-        snapshot = host.load_snapshot_runtime()
+        snapshot = host.CONFIG.load_snapshot_runtime()
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             with (
-                mock.patch.object(host, "load_snapshot_runtime", return_value=snapshot),
+                mock.patch.object(host.CONFIG, "load_snapshot_runtime", return_value=snapshot),
                 mock.patch.object(snapshot, "mutation_snapshot", side_effect=AssertionError("content scan")),
             ):
                 result = host.run_snapshot(root, root / "before.snapshot", workspace_mode="isolated")
@@ -303,7 +308,7 @@ class IsolatedWorkspaceTests(TestCase):
             self.assertIn("no content scan", (root / "before.snapshot").read_text())
 
     def test_isolation_cleanup_rejects_untrusted_scratch_path(self):
-        isolation = load_host().load_isolation_runtime()
+        isolation = load_host().CONFIG.load_isolation_runtime()
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             victim = root / "agent-collab-cow-victim"
@@ -320,7 +325,7 @@ class IsolatedWorkspaceTests(TestCase):
             self.assertEqual((victim / "keep").read_text(), "untouched")
 
     def test_isolation_state_writer_rejects_symlink_destination(self):
-        isolation = load_host().load_isolation_runtime()
+        isolation = load_host().CONFIG.load_isolation_runtime()
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             victim = root / "victim"
@@ -1164,11 +1169,11 @@ class PeerV2Tests(TestCase):
             )
             metadata = json.loads(normalization.read_text(encoding="utf-8"))
             host = load_host()
-            host.validate_peer_normalization(metadata)
+            host.ARTIFACTS.validate_peer_normalization(metadata)
             host.write_json(tmp / 'peer-report.json', result)
-            host.normalize_peer_report_from_artifacts(peer, tmp, req)
+            host.ARTIFACTS.normalize_peer_report_from_artifacts(peer, tmp, req)
             rebuilt = json.loads(normalization.read_text(encoding='utf-8'))
-            host.validate_peer_normalization(rebuilt)
+            host.ARTIFACTS.validate_peer_normalization(rebuilt)
             self.assertEqual(rebuilt['artifact_source'], 'peer_report')
             self.assertIn('target_xml_entities_canonicalized', rebuilt['warnings'])
         self.assertEqual(result["status"], "ok")
@@ -1741,45 +1746,45 @@ class HostV2Tests(TestCase):
                 self.subTest(os_name=os_name, platform=platform),
                 mock.patch.object(host.os, "name", os_name),
                 mock.patch.object(host.sys, "platform", platform),
-                mock.patch.object(host, "load_state_runtime") as state,
+                mock.patch.object(host.CONFIG, "load_state_runtime") as state,
                 self.assertRaisesRegex(SystemExit, "requires Linux, macOS, or Windows"),
             ):
                 host.start(args)
             state.assert_not_called()
         for os_name, platform in (("posix", "linux"), ("posix", "darwin"), ("nt", "win32")):
             with mock.patch.object(host.os, "name", os_name), mock.patch.object(host.sys, "platform", platform):
-                self.assertTrue(host.is_supported_platform())
-        self.assertEqual(host.platform_default_workspace_mode("linux"), "isolated")
-        self.assertEqual(host.platform_default_workspace_mode("darwin"), "direct")
-        self.assertEqual(host.platform_default_workspace_mode("win32"), "direct")
+                self.assertTrue(host.CONFIG.is_supported_platform())
+        self.assertEqual(host.CONFIG.platform_default_workspace_mode("linux"), "isolated")
+        self.assertEqual(host.CONFIG.platform_default_workspace_mode("darwin"), "direct")
+        self.assertEqual(host.CONFIG.platform_default_workspace_mode("win32"), "direct")
 
     def test_current_defaults_and_removed_settings(self):
         host = load_host()
-        self.assertEqual(host.SETTINGS_SCHEMA_VERSION, "2.0")
-        self.assertEqual(host.SETTING_DEFAULTS["codex_model"], "gpt-6-astra")
-        self.assertEqual(host.SETTING_DEFAULTS["codex_effort"], "xhigh")
-        self.assertEqual(host.SETTING_DEFAULTS["claude_model"], "claude-opus-5-5")
-        self.assertEqual(host.SETTING_DEFAULTS["claude_effort"], "xhigh")
-        self.assertIs(host.SETTING_DEFAULTS["online_research"], True)
-        self.assertIs(host.SETTING_DEFAULTS["adjudicator_enabled"], True)
-        self.assertEqual(host.SETTING_DEFAULTS["agent_timeout_seconds"], 2700)
-        self.assertNotIn("profile", host.SETTING_DEFAULTS)
-        self.assertNotIn("claude_max_turns", host.SETTING_DEFAULTS)
-        self.assertNotIn("claude_max_budget_usd", host.SETTING_DEFAULTS)
-        self.assertNotIn("web_research", host.SETTING_DEFAULTS)
+        self.assertEqual(host.CONFIG.SETTINGS_SCHEMA_VERSION, "2.0")
+        self.assertEqual(host.CONFIG.SETTING_DEFAULTS["codex_model"], "gpt-6-astra")
+        self.assertEqual(host.CONFIG.SETTING_DEFAULTS["codex_effort"], "xhigh")
+        self.assertEqual(host.CONFIG.SETTING_DEFAULTS["claude_model"], "claude-opus-5-5")
+        self.assertEqual(host.CONFIG.SETTING_DEFAULTS["claude_effort"], "xhigh")
+        self.assertIs(host.CONFIG.SETTING_DEFAULTS["online_research"], True)
+        self.assertIs(host.CONFIG.SETTING_DEFAULTS["adjudicator_enabled"], True)
+        self.assertEqual(host.CONFIG.SETTING_DEFAULTS["agent_timeout_seconds"], 2700)
+        self.assertNotIn("profile", host.CONFIG.SETTING_DEFAULTS)
+        self.assertNotIn("claude_max_turns", host.CONFIG.SETTING_DEFAULTS)
+        self.assertNotIn("claude_max_budget_usd", host.CONFIG.SETTING_DEFAULTS)
+        self.assertNotIn("web_research", host.CONFIG.SETTING_DEFAULTS)
 
     def test_settings_are_exact_v2_with_env_local_global_precedence(self):
         host = load_host()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             global_path, local_path = root / "global.json", root / "local.json"
-            host.write_settings_file(global_path, complete_settings(host, claude_model="global"))
-            host.write_settings_file(local_path, complete_settings(host, claude_model="local"))
+            host.CONFIG.write_settings_file(global_path, complete_settings(host, claude_model="global"))
+            host.CONFIG.write_settings_file(local_path, complete_settings(host, claude_model="local"))
             with (
-                mock.patch.object(host, "default_global_settings_path", return_value=global_path),
-                mock.patch.object(host, "default_local_settings_path", return_value=local_path),
+                mock.patch.object(host.CONFIG, "default_global_settings_path", return_value=global_path),
+                mock.patch.object(host.CONFIG, "default_local_settings_path", return_value=local_path),
             ):
-                resolved = host.resolve_settings(
+                resolved = host.CONFIG.resolve_settings(
                     root, {"CLAUDE_AGENT_COLLAB_MODEL": "env", "AGENT_COLLAB_ONLINE_RESEARCH": "0"}
                 )
         self.assertEqual(resolved["settings"]["claude_model"], "env")
@@ -1794,13 +1799,13 @@ class HostV2Tests(TestCase):
                 host, codex_model="gpt-5.6-sol", codex_effort="max",
                 claude_model="claude-opus-5", claude_effort="max",
             )
-            host.write_settings_file(local_path, original)
+            host.CONFIG.write_settings_file(local_path, original)
             original_bytes = local_path.read_bytes()
             with (
-                mock.patch.object(host, "default_global_settings_path", return_value=global_path),
-                mock.patch.object(host, "default_local_settings_path", return_value=local_path),
+                mock.patch.object(host.CONFIG, "default_global_settings_path", return_value=global_path),
+                mock.patch.object(host.CONFIG, "default_local_settings_path", return_value=local_path),
             ):
-                resolved = host.resolve_settings(root, {})
+                resolved = host.CONFIG.resolve_settings(root, {})
             self.assertEqual(resolved["settings"], original)
             self.assertEqual(local_path.read_bytes(), original_bytes)
 
@@ -1809,10 +1814,10 @@ class HostV2Tests(TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "settings.json"
             path.write_text(json.dumps({"schema_version": "1.0", "updated_at": "x", "settings": {}}))
-            _, error = host.load_settings_file(path, "test")
+            _, error = host.CONFIG.load_settings_file(path, "test")
             self.assertIn("legacy settings", error)
             path.write_text(json.dumps({"schema_version": "2.0", "updated_at": "x", "settings": {"safe_mode": False}}))
-            _, error = host.load_settings_file(path, "test")
+            _, error = host.CONFIG.load_settings_file(path, "test")
             self.assertIn("match v2 exactly", error)
 
     def test_persisted_settings_reject_legacy_type_coercion(self):
@@ -1831,7 +1836,7 @@ class HostV2Tests(TestCase):
                 path.write_text(json.dumps({
                     "schema_version": "2.0", "updated_at": "2026-07-18T00:00:00Z", "settings": settings,
                 }))
-                loaded, error = host.load_settings_file(path, "test")
+                loaded, error = host.CONFIG.load_settings_file(path, "test")
                 self.assertEqual(loaded, {})
                 self.assertIn(expected, error)
 
@@ -1840,10 +1845,10 @@ class HostV2Tests(TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             with (
-                mock.patch.object(host, "default_global_settings_path", return_value=root / "g"),
-                mock.patch.object(host, "default_local_settings_path", return_value=root / "l"),
+                mock.patch.object(host.CONFIG, "default_global_settings_path", return_value=root / "g"),
+                mock.patch.object(host.CONFIG, "default_local_settings_path", return_value=root / "l"),
             ):
-                resolved = host.resolve_settings(root, {"AGENT_COLLAB_WEB_RESEARCH": "disabled"})
+                resolved = host.CONFIG.resolve_settings(root, {"AGENT_COLLAB_WEB_RESEARCH": "disabled"})
         self.assertIs(resolved["settings"]["online_research"], True)
 
     def test_parser_accepts_user_model_effort_and_research(self):
@@ -1875,17 +1880,17 @@ class HostV2Tests(TestCase):
     def test_fable_is_rejected_from_persisted_or_environment_defaults(self):
         host = load_host()
         with self.assertRaisesRegex(ValueError, "cannot persist Fable"):
-            host.normalize_settings({"claude_model": "claude-fable-5"}, "test")
+            host.CONFIG.normalize_settings({"claude_model": "claude-fable-5"}, "test")
         settings = complete_settings(host, claude_model="claude-fable-5")
         with self.assertRaisesRegex(ValueError, "cannot persist Fable"):
-            host.validate_v2_settings_types(settings, "test")
+            host.CONFIG.validate_v2_settings_types(settings, "test")
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             with (
-                mock.patch.object(host, "default_global_settings_path", return_value=root / "g"),
-                mock.patch.object(host, "default_local_settings_path", return_value=root / "l"),
+                mock.patch.object(host.CONFIG, "default_global_settings_path", return_value=root / "g"),
+                mock.patch.object(host.CONFIG, "default_local_settings_path", return_value=root / "l"),
             ):
-                resolved = host.resolve_settings(
+                resolved = host.CONFIG.resolve_settings(
                     root,
                     {"CLAUDE_AGENT_COLLAB_MODEL": "claude-fable-5"},
                 )
@@ -1894,24 +1899,24 @@ class HostV2Tests(TestCase):
 
     def test_cli_version_parser_and_floor(self):
         host = load_host()
-        self.assertEqual(host.parse_cli_version("codex-cli 0.144.5"), (0, 144, 5))
-        self.assertEqual(host.parse_cli_version("2.1.212 (Claude Code)"), (2, 1, 212))
-        self.assertEqual(host.MIN_CLI_VERSIONS["codex"], (0, 163, 0))
-        self.assertEqual(host.MIN_CLI_VERSIONS["claude"], (2, 1, 295))
+        self.assertEqual(host.CONFIG.parse_cli_version("codex-cli 0.144.5"), (0, 144, 5))
+        self.assertEqual(host.CONFIG.parse_cli_version("2.1.212 (Claude Code)"), (2, 1, 212))
+        self.assertEqual(host.CONFIG.MIN_CLI_VERSIONS["codex"], (0, 163, 0))
+        self.assertEqual(host.CONFIG.MIN_CLI_VERSIONS["claude"], (2, 1, 295))
         old = SimpleNamespace(returncode=0, stdout="codex-cli 0.162.99", stderr="")
         with (
             mock.patch.object(host.shutil, "which", return_value="/usr/bin/codex"),
             mock.patch.object(host.subprocess, "run", return_value=old),
             self.assertRaises(SystemExit),
         ):
-            host.require_peer_cli_version("codex")
+            host.CONFIG.require_peer_cli_version("codex")
         old_claude = SimpleNamespace(returncode=0, stdout="2.1.294 (Claude Code)", stderr="")
         with (
             mock.patch.object(host.shutil, "which", return_value="/usr/bin/claude"),
             mock.patch.object(host.subprocess, "run", return_value=old_claude),
             self.assertRaises(SystemExit),
         ):
-            host.require_peer_cli_version("claude")
+            host.CONFIG.require_peer_cli_version("claude")
 
     def test_check_availability_prints_one_strict_json_result(self):
         host = load_host()
@@ -1923,8 +1928,8 @@ class HostV2Tests(TestCase):
         ])
         stream = io.StringIO()
         with (
-            mock.patch.object(host, "load_availability_runtime", return_value=availability),
-            mock.patch.object(host, "require_peer_cli_version", return_value="2.1.257"),
+            mock.patch.object(host.CONFIG, "load_availability_runtime", return_value=availability),
+            mock.patch.object(host.CONFIG, "require_peer_cli_version", return_value="2.1.257"),
             mock.patch.object(availability, "check", return_value=output) as check,
             redirect_stdout(stream),
         ):
@@ -1965,11 +1970,11 @@ class HostV2Tests(TestCase):
             )
             availability_runtime = SimpleNamespace(check=lambda *args, **kwargs: unknown)
             with (
-                mock.patch.object(host, "workspace_guard_path", return_value=guard),
-                mock.patch.object(host, "resolve_settings", return_value=resolved),
-                mock.patch.object(host, "require_peer_cli_version", return_value="2.1.257"),
-                mock.patch.object(host, "load_availability_runtime", return_value=availability_runtime),
-                mock.patch.object(host, "acquire_workspace_guard") as acquire,
+                mock.patch.object(host.REGISTRY, "workspace_guard_path", return_value=guard),
+                mock.patch.object(host.CONFIG, "resolve_settings", return_value=resolved),
+                mock.patch.object(host.CONFIG, "require_peer_cli_version", return_value="2.1.257"),
+                mock.patch.object(host.CONFIG, "load_availability_runtime", return_value=availability_runtime),
+                mock.patch.object(host.REGISTRY, "acquire_workspace_guard") as acquire,
                 mock.patch.object(host.subprocess, "Popen") as popen,
                 self.assertRaises(SystemExit) as raised,
             ):
@@ -2017,10 +2022,10 @@ class HostV2Tests(TestCase):
 
             availability_runtime = SimpleNamespace(check=check)
             with (
-                mock.patch.object(host, "resolve_settings", return_value=resolved),
-                mock.patch.object(host, "require_peer_cli_version", return_value="2.1.257"),
-                mock.patch.object(host, "load_availability_runtime", return_value=availability_runtime),
-                mock.patch.object(host, "acquire_workspace_guard") as acquire,
+                mock.patch.object(host.CONFIG, "resolve_settings", return_value=resolved),
+                mock.patch.object(host.CONFIG, "require_peer_cli_version", return_value="2.1.257"),
+                mock.patch.object(host.CONFIG, "load_availability_runtime", return_value=availability_runtime),
+                mock.patch.object(host.REGISTRY, "acquire_workspace_guard") as acquire,
                 self.assertRaises(SystemExit),
             ):
                 host.start(args)
@@ -2051,12 +2056,12 @@ class HostV2Tests(TestCase):
                 "details": "user namespace unavailable",
             }
             with (
-                mock.patch.object(host, "workspace_guard_path", return_value=guard),
-                mock.patch.object(host, "resolve_settings", return_value=resolved),
-                mock.patch.object(host.SAFETY, "sandbox_preflight", return_value=sandbox),
-                mock.patch.object(host, "require_peer_cli_version") as cli_version,
-                mock.patch.object(host, "load_availability_runtime") as availability,
-                mock.patch.object(host, "acquire_workspace_guard") as acquire,
+                mock.patch.object(host.REGISTRY, "workspace_guard_path", return_value=guard),
+                mock.patch.object(host.CONFIG, "resolve_settings", return_value=resolved),
+                mock.patch.object(host.CONFIG.SAFETY, "sandbox_preflight", return_value=sandbox),
+                mock.patch.object(host.CONFIG, "require_peer_cli_version") as cli_version,
+                mock.patch.object(host.CONFIG, "load_availability_runtime") as availability,
+                mock.patch.object(host.REGISTRY, "acquire_workspace_guard") as acquire,
                 mock.patch.object(host.subprocess, "Popen") as popen,
                 self.assertRaises(SystemExit) as raised,
             ):
@@ -2095,21 +2100,21 @@ class HostV2Tests(TestCase):
                 validate_result=lambda *args, **kwargs: None,
             )
             with (
-                mock.patch.object(host, "resolve_settings", return_value=resolved),
-                mock.patch.object(host, "require_peer_cli_version", return_value="2.1.257"),
-                mock.patch.object(host, "load_availability_runtime", return_value=availability_runtime),
+                mock.patch.object(host.CONFIG, "resolve_settings", return_value=resolved),
+                mock.patch.object(host.CONFIG, "require_peer_cli_version", return_value="2.1.257"),
+                mock.patch.object(host.CONFIG, "load_availability_runtime", return_value=availability_runtime),
                 mock.patch.object(host, "run_snapshot"),
-                mock.patch.object(host, "workspace_guard_path", return_value=root / "active-v2.json"),
-                mock.patch.object(host.SAFETY, "sandbox_preflight") as sandbox_preflight,
-                mock.patch.object(host.SAFETY, "process_identity", return_value=valid_process_identity()),
+                mock.patch.object(host.REGISTRY, "workspace_guard_path", return_value=root / "active-v2.json"),
+                mock.patch.object(host.CONFIG.SAFETY, "sandbox_preflight") as sandbox_preflight,
+                mock.patch.object(host.CONFIG.SAFETY, "process_identity", return_value=valid_process_identity()),
                 mock.patch.object(host.subprocess, "Popen", return_value=FakePopen()),
                 redirect_stdout(io.StringIO()),
             ):
                 self.assertEqual(host.start(args), 0)
                 args.run_id = "another-session"
                 self.assertEqual(host.start(args), 0)
-                self.assertEqual(set(host.read_workspace_guards(root)[1]), {"override", "another-session"})
-                self.assertEqual({job["id"] for job in host.load_state_runtime().list_jobs(run_root)},
+                self.assertEqual(set(host.REGISTRY.read_workspace_guards(root)[1]), {"override", "another-session"})
+                self.assertEqual({job["id"] for job in host.CONFIG.load_state_runtime().list_jobs(run_root)},
                                  {"override", "another-session"})
             sandbox_preflight.assert_not_called()
             saved = json.loads((run_root / "override" / "host-request.json").read_text())
@@ -2171,8 +2176,8 @@ class HostV2Tests(TestCase):
                 "--run-id", "strict-state", "--run-root", str(run_root), "--repo-root", str(root),
             ])
             with (
-                mock.patch.object(host, "workspace_guard_path", return_value=guard),
-                mock.patch.object(host, "acquire_workspace_guard") as acquire,
+                mock.patch.object(host.REGISTRY, "workspace_guard_path", return_value=guard),
+                mock.patch.object(host.REGISTRY, "acquire_workspace_guard") as acquire,
                 mock.patch.object(host.subprocess, "Popen") as popen,
                 self.assertRaises(SystemExit) as raised,
             ):
@@ -2190,22 +2195,22 @@ class HostV2Tests(TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             guard = root / "active-v2.json"
-            with mock.patch.object(host, "workspace_guard_path", return_value=guard):
+            with mock.patch.object(host.REGISTRY, "workspace_guard_path", return_value=guard):
                 with ThreadPoolExecutor(max_workers=2) as executor:
-                    futures = [executor.submit(host.acquire_workspace_guard, root, run_id, origin,
+                    futures = [executor.submit(host.REGISTRY.acquire_workspace_guard, root, run_id, origin,
                                                root / "runs" / run_id)
                                for run_id, origin in (("outer", "codex"), ("other", "claude"))]
                     for future in futures:
                         future.result(timeout=5)
-                self.assertEqual(set(host.read_workspace_guards(root)[1]), {"outer", "other"})
+                self.assertEqual(set(host.REGISTRY.read_workspace_guards(root)[1]), {"outer", "other"})
                 with self.assertRaisesRegex(SystemExit, "already active"):
-                    host.acquire_workspace_guard(root, "outer", "codex", root / "runs" / "outer")
-                host.update_workspace_guard(root, "other", owner=host.read_workspace_guard(root, "other")[1], phase="peer_running", peer_identity=valid_process_identity())
-                host.release_workspace_guard(root, "outer", owner=host.read_workspace_guard(root, "outer")[1])
-                self.assertEqual(host.read_workspace_guard(root, "other")[1]["phase"], "peer_running")
+                    host.REGISTRY.acquire_workspace_guard(root, "outer", "codex", root / "runs" / "outer")
+                host.REGISTRY.update_workspace_guard(root, "other", owner=host.REGISTRY.read_workspace_guard(root, "other")[1], phase="peer_running", peer_identity=valid_process_identity())
+                host.REGISTRY.release_workspace_guard(root, "outer", owner=host.REGISTRY.read_workspace_guard(root, "outer")[1])
+                self.assertEqual(host.REGISTRY.read_workspace_guard(root, "other")[1]["phase"], "peer_running")
                 with self.assertRaisesRegex(SystemExit, "missing"):
-                    host.release_workspace_guard(root, "outer", owner=host.read_workspace_guard(root, "outer")[1])
-                host.release_workspace_guard(root, "other", owner=host.read_workspace_guard(root, "other")[1])
+                    host.REGISTRY.release_workspace_guard(root, "outer", owner=host.REGISTRY.read_workspace_guard(root, "outer")[1])
+                host.REGISTRY.release_workspace_guard(root, "other", owner=host.REGISTRY.read_workspace_guard(root, "other")[1])
                 self.assertFalse(guard.exists())
 
     def test_workspace_guard_lock_wait_is_bounded(self):
@@ -2214,13 +2219,13 @@ class HostV2Tests(TestCase):
             root = Path(tmp)
             guard = root / "active-v2.json"
             with (
-                mock.patch.object(host, "workspace_guard_path", return_value=guard),
-                mock.patch.object(host, "WORKSPACE_GUARD_LOCK_TIMEOUT_SECONDS", 0.05),
-                mock.patch.object(host, "WORKSPACE_GUARD_LOCK_POLL_SECONDS", 0.005),
-                host.workspace_guard_transaction(root),
+                mock.patch.object(host.REGISTRY, "workspace_guard_path", return_value=guard),
+                mock.patch.object(host.REGISTRY, "WORKSPACE_GUARD_LOCK_TIMEOUT_SECONDS", 0.05),
+                mock.patch.object(host.REGISTRY, "WORKSPACE_GUARD_LOCK_POLL_SECONDS", 0.005),
+                host.REGISTRY.workspace_guard_transaction(root),
                 ThreadPoolExecutor(max_workers=1) as executor,
             ):
-                blocked = executor.submit(host.read_workspace_guards, root)
+                blocked = executor.submit(host.REGISTRY.read_workspace_guards, root)
                 with self.assertRaisesRegex(RuntimeError, "timed out acquiring"):
                     blocked.result(timeout=1)
 
@@ -2229,29 +2234,29 @@ class HostV2Tests(TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             guard = root / "active-v2.json"
-            with mock.patch.object(host, "workspace_guard_path", return_value=guard):
-                host.acquire_workspace_guard(root, "stale", "codex", root / "runs" / "stale")
-                host.acquire_workspace_guard(root, "other", "claude", root / "runs" / "other")
-                with mock.patch.object(host.SAFETY, "process_identity_state", return_value="dead_or_replaced"):
-                    host.acquire_workspace_guard(root, "stale", "codex", root / "new" / "stale")
-                self.assertEqual(set(host.read_workspace_guards(root)[1]), {"stale", "other"})
-                self.assertEqual(host.read_workspace_guard(root, "stale")[1]["run_dir"], str(root / "new" / "stale"))
-                host.update_workspace_guard(root, "stale", owner=host.read_workspace_guard(root, "stale")[1], phase="peer_running", peer_identity=valid_process_identity())
-                with mock.patch.object(host.SAFETY, "process_identity_state", return_value="dead_or_replaced"):
+            with mock.patch.object(host.REGISTRY, "workspace_guard_path", return_value=guard):
+                host.REGISTRY.acquire_workspace_guard(root, "stale", "codex", root / "runs" / "stale")
+                host.REGISTRY.acquire_workspace_guard(root, "other", "claude", root / "runs" / "other")
+                with mock.patch.object(host.CONFIG.SAFETY, "process_identity_state", return_value="dead_or_replaced"):
+                    host.REGISTRY.acquire_workspace_guard(root, "stale", "codex", root / "new" / "stale")
+                self.assertEqual(set(host.REGISTRY.read_workspace_guards(root)[1]), {"stale", "other"})
+                self.assertEqual(host.REGISTRY.read_workspace_guard(root, "stale")[1]["run_dir"], str(root / "new" / "stale"))
+                host.REGISTRY.update_workspace_guard(root, "stale", owner=host.REGISTRY.read_workspace_guard(root, "stale")[1], phase="peer_running", peer_identity=valid_process_identity())
+                with mock.patch.object(host.CONFIG.SAFETY, "process_identity_state", return_value="dead_or_replaced"):
                     with self.assertRaisesRegex(SystemExit, "already active"):
-                        host.acquire_workspace_guard(root, "stale", "codex", root / "runs" / "stale")
+                        host.REGISTRY.acquire_workspace_guard(root, "stale", "codex", root / "runs" / "stale")
 
     def test_targeted_stale_start_recovery_preserves_other_runs(self):
         host = load_host()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            with mock.patch.object(host, "workspace_guard_path", return_value=root / "guard.json"):
-                host.acquire_workspace_guard(root, "stale", "codex", root / "stale")
-                host.acquire_workspace_guard(root, "live", "claude", root / "live")
-                host.update_workspace_guard(root, "live", owner=host.read_workspace_guard(root, "live")[1], phase="peer_running", peer_identity=valid_process_identity())
-                with mock.patch.object(host.SAFETY, "process_identity_state", return_value="dead_or_replaced"):
-                    host.recover_workspace_guard(root, "stale")
-                self.assertEqual(set(host.read_workspace_guards(root)[1]), {"live"})
+            with mock.patch.object(host.REGISTRY, "workspace_guard_path", return_value=root / "guard.json"):
+                host.REGISTRY.acquire_workspace_guard(root, "stale", "codex", root / "stale")
+                host.REGISTRY.acquire_workspace_guard(root, "live", "claude", root / "live")
+                host.REGISTRY.update_workspace_guard(root, "live", owner=host.REGISTRY.read_workspace_guard(root, "live")[1], phase="peer_running", peer_identity=valid_process_identity())
+                with mock.patch.object(host.CONFIG.SAFETY, "process_identity_state", return_value="dead_or_replaced"):
+                    host.REGISTRY.recover_workspace_guard(root, "stale")
+                self.assertEqual(set(host.REGISTRY.read_workspace_guards(root)[1]), {"live"})
 
     def test_legacy_single_guard_is_rejected_without_overwriting_it(self):
         host = load_host()
@@ -2260,9 +2265,9 @@ class HostV2Tests(TestCase):
             guard = root / "guard.json"
             guard.write_text('{"schema_version":"2.0","run_id":"old"}')
             original = guard.read_bytes()
-            with mock.patch.object(host, "workspace_guard_path", return_value=guard):
+            with mock.patch.object(host.REGISTRY, "workspace_guard_path", return_value=guard):
                 with self.assertRaisesRegex(SystemExit, "legacy"):
-                    host.require_workspace_guard_available(root)
+                    host.REGISTRY.require_workspace_guard_available(root)
             self.assertEqual(guard.read_bytes(), original)
 
     def test_stale_start_recovery_serializes_other_registry_updates(self):
@@ -2270,24 +2275,24 @@ class HostV2Tests(TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             guard = root / "active-v2.json"
-            with mock.patch.object(host, "workspace_guard_path", return_value=guard):
-                host.acquire_workspace_guard(root, "stale", "codex", root / "runs" / "stale")
+            with mock.patch.object(host.REGISTRY, "workspace_guard_path", return_value=guard):
+                host.REGISTRY.acquire_workspace_guard(root, "stale", "codex", root / "runs" / "stale")
                 identity_checked = threading.Event()
                 allow_recovery = threading.Event()
                 def dead_launcher(_identity):
                     identity_checked.set()
                     self.assertTrue(allow_recovery.wait(timeout=2))
                     return "dead_or_replaced"
-                with mock.patch.object(host.SAFETY, "process_identity_state", side_effect=dead_launcher), ThreadPoolExecutor(max_workers=2) as executor:
-                    recovery = executor.submit(host.acquire_workspace_guard, root, "stale", "codex", root / "new" / "stale")
+                with mock.patch.object(host.CONFIG.SAFETY, "process_identity_state", side_effect=dead_launcher), ThreadPoolExecutor(max_workers=2) as executor:
+                    recovery = executor.submit(host.REGISTRY.acquire_workspace_guard, root, "stale", "codex", root / "new" / "stale")
                     self.assertTrue(identity_checked.wait(timeout=2))
-                    other = executor.submit(host.acquire_workspace_guard, root, "other", "claude", root / "runs" / "other")
+                    other = executor.submit(host.REGISTRY.acquire_workspace_guard, root, "other", "claude", root / "runs" / "other")
                     time.sleep(0.05)
                     self.assertFalse(other.done())
                     allow_recovery.set()
                     recovery.result(timeout=2)
                     other.result(timeout=2)
-                self.assertEqual(set(host.read_workspace_guards(root)[1]), {"stale", "other"})
+                self.assertEqual(set(host.REGISTRY.read_workspace_guards(root)[1]), {"stale", "other"})
 
     def test_clear_history_never_deletes_the_guarded_orphan_run(self):
         host = load_host()
@@ -2302,9 +2307,9 @@ class HostV2Tests(TestCase):
             other_dir.mkdir()
             (other_dir / "host-request.json").write_text("{}")
             guard = base / "active-v2.json"
-            with mock.patch.object(host, "workspace_guard_path", return_value=guard):
-                host.acquire_workspace_guard(root, "guarded-orphan", "codex", run_dir)
-                host.acquire_workspace_guard(root, "other-orphan", "claude", other_dir)
+            with mock.patch.object(host.REGISTRY, "workspace_guard_path", return_value=guard):
+                host.REGISTRY.acquire_workspace_guard(root, "guarded-orphan", "codex", run_dir)
+                host.REGISTRY.acquire_workspace_guard(root, "other-orphan", "claude", other_dir)
                 args = host.build_parser().parse_args([
                     "clear-history", "--all", "--yes", "--run-root", str(run_root),
                     "--repo-root", str(root),
@@ -2339,10 +2344,10 @@ class HostV2Tests(TestCase):
                 validate_result=lambda *args, **kwargs: None,
             )
             with (
-                mock.patch.object(host, "workspace_guard_path", return_value=guard),
-                mock.patch.object(host, "resolve_settings", return_value=resolved),
-                mock.patch.object(host, "require_peer_cli_version", return_value="2.1.257"),
-                mock.patch.object(host, "load_availability_runtime", return_value=availability_runtime),
+                mock.patch.object(host.REGISTRY, "workspace_guard_path", return_value=guard),
+                mock.patch.object(host.CONFIG, "resolve_settings", return_value=resolved),
+                mock.patch.object(host.CONFIG, "require_peer_cli_version", return_value="2.1.257"),
+                mock.patch.object(host.CONFIG, "load_availability_runtime", return_value=availability_runtime),
                 mock.patch.object(host, "run_snapshot"),
                 mock.patch.object(host.subprocess, "Popen", side_effect=OSError("launch failed")),
                 self.assertRaises(OSError),
@@ -2385,19 +2390,19 @@ class HostV2Tests(TestCase):
                 validate_result=lambda *args, **kwargs: None,
             )
             with (
-                mock.patch.object(host, "workspace_guard_path", return_value=guard),
-                mock.patch.object(host, "resolve_settings", return_value=resolved),
-                mock.patch.object(host, "require_peer_cli_version", return_value="2.1.257"),
-                mock.patch.object(host, "load_availability_runtime", return_value=availability_runtime),
+                mock.patch.object(host.REGISTRY, "workspace_guard_path", return_value=guard),
+                mock.patch.object(host.CONFIG, "resolve_settings", return_value=resolved),
+                mock.patch.object(host.CONFIG, "require_peer_cli_version", return_value="2.1.257"),
+                mock.patch.object(host.CONFIG, "load_availability_runtime", return_value=availability_runtime),
                 mock.patch.object(host, "run_snapshot"),
                 mock.patch.object(host.subprocess, "Popen", return_value=SpawnedProcess()),
                 mock.patch.object(
-                    host.SAFETY,
+                    host.CONFIG.SAFETY,
                     "process_identity",
                     side_effect=[valid_process_identity(os.getpid(), os.getpgrp()), RuntimeError("identity failed")],
                 ),
                 mock.patch.object(
-                    host.SAFETY,
+                    host.CONFIG.SAFETY,
                     "terminate_process_group",
                     return_value={"outcome": "cleanup_failed", "quiescent": False, "pgid": 43210},
                 ),
@@ -2418,14 +2423,14 @@ class HostV2Tests(TestCase):
             run_dir = root / "runs" / request()["run_id"]
             run_dir.mkdir(parents=True)
             process = valid_peer_process(run_dir, root, root / "guard")
-            host.validate_peer_process(process, request(), run_dir)
+            host.ARTIFACTS.validate_peer_process(process, request(), run_dir)
             for changed in (
                 {**process, "extra": True},
                 {**process, "pid": "43210"},
                 {**process, "run_id": "wrong"},
             ):
-                with self.assertRaises(host.ArtifactValidationError):
-                    host.validate_peer_process(changed, request(), run_dir)
+                with self.assertRaises(host.ARTIFACTS.ArtifactValidationError):
+                    host.ARTIFACTS.validate_peer_process(changed, request(), run_dir)
 
     def test_helper_reports_require_one_strict_v2_envelope(self):
         host = load_host()
@@ -2441,22 +2446,22 @@ class HostV2Tests(TestCase):
                 }],
             }
             path.write_text(json.dumps(payload))
-            claims = host.load_helper_evidence(run_dir, request())[0]
+            claims = host.ARTIFACTS.load_helper_evidence(run_dir, request())[0]
             self.assertEqual(claims[0]["source"], "helper")
             duplicate = {**payload, "reports": payload["reports"] * 2}
             path.write_text(json.dumps(duplicate))
-            with self.assertRaisesRegex(host.ArtifactValidationError, "duplicate helper"):
-                host.load_helper_evidence(run_dir, request())[0]
+            with self.assertRaisesRegex(host.ARTIFACTS.ArtifactValidationError, "duplicate helper"):
+                host.ARTIFACTS.load_helper_evidence(run_dir, request())[0]
             path.write_text(json.dumps(payload))
-            with self.assertRaisesRegex(host.ArtifactValidationError, "resolved per-run limit is 0"):
-                host.load_helper_evidence(
+            with self.assertRaisesRegex(host.ARTIFACTS.ArtifactValidationError, "resolved per-run limit is 0"):
+                host.ARTIFACTS.load_helper_evidence(
                     run_dir,
                     request(local_subagents_allowed=False, max_local_subagents=8),
                 )
             for legacy in ([payload["reports"][0]], {"claims": payload["reports"][0]["claims"]}):
                 path.write_text(json.dumps(legacy))
-                with self.assertRaises(host.ArtifactValidationError):
-                    host.load_helper_evidence(run_dir, request())[0]
+                with self.assertRaises(host.ARTIFACTS.ArtifactValidationError):
+                    host.ARTIFACTS.load_helper_evidence(run_dir, request())[0]
 
     def test_finish_then_complete_holds_and_releases_workspace_guard(self):
         host = load_host()
@@ -2465,8 +2470,8 @@ class HostV2Tests(TestCase):
             run_dir = run_root / request()["run_id"]
             run_dir.mkdir(parents=True)
             guard = root / "active-v2.json"
-            with mock.patch.object(host, "workspace_guard_path", return_value=guard):
-                host.acquire_workspace_guard(root, request()["run_id"], "codex", run_dir)
+            with mock.patch.object(host.REGISTRY, "workspace_guard_path", return_value=guard):
+                host.REGISTRY.acquire_workspace_guard(root, request()["run_id"], "codex", run_dir)
                 (run_dir / "host-request.json").write_text(json.dumps(request()))
                 (run_dir / "peer-process.json").write_text(json.dumps(valid_peer_process(run_dir, root, guard)))
                 (run_dir / "provider-process.json").write_text(json.dumps(valid_provider_process()))
@@ -2483,12 +2488,12 @@ class HostV2Tests(TestCase):
                     self.assertEqual(host.finish(finish_args), 0)
                 self.assertTrue(guard.exists())
                 self.assertEqual(json.loads((run_dir / "host-result.json").read_text())["phase"], "ready_for_synthesis")
-                self.assertEqual(host.load_state_runtime().find_job(run_root, request()["run_id"])["status"], "synthesizing")
+                self.assertEqual(host.CONFIG.load_state_runtime().find_job(run_root, request()["run_id"])["status"], "synthesizing")
                 with (
                     mock.patch.object(host, "wait_for_peer_report", return_value="report_ready"),
                     mock.patch.object(host, "record_host_workspace_mutation", return_value=None),
                     mock.patch.object(
-                        host.SAFETY,
+                        host.CONFIG.SAFETY,
                         "process_group_alive",
                         side_effect=AssertionError("historical PGID must not be rechecked"),
                     ),
@@ -2535,26 +2540,26 @@ class HostV2Tests(TestCase):
                     self.assertEqual(host.complete(complete_args), 0)
                 self.assertFalse(guard.exists())
                 self.assertEqual(json.loads((run_dir / "host-result.json").read_text())["phase"], "done")
-                self.assertEqual(host.load_state_runtime().find_job(run_root, request()["run_id"])["status"], "completed")
+                self.assertEqual(host.CONFIG.load_state_runtime().find_job(run_root, request()["run_id"])["status"], "completed")
                 with self.assertRaises(SystemExit):
                     host.finish(finish_args)
                 self.assertEqual(
-                    host.load_state_runtime().find_job(run_root, request()["run_id"])["status"],
+                    host.CONFIG.load_state_runtime().find_job(run_root, request()["run_id"])["status"],
                     "completed",
                 )
                 with redirect_stdout(io.StringIO()):
                     self.assertEqual(host.complete(complete_args), 0)
-                host.acquire_workspace_guard(root, request()["run_id"], "codex", run_dir)
-                host.update_workspace_guard(
+                host.REGISTRY.acquire_workspace_guard(root, request()["run_id"], "codex", run_dir)
+                host.REGISTRY.update_workspace_guard(
                     root,
-                    request()["run_id"], owner=host.read_workspace_guard(root, request()["run_id"])[1],
+                    request()["run_id"], owner=host.REGISTRY.read_workspace_guard(root, request()["run_id"])[1],
                     phase="peer_running",
                     peer_identity=valid_process_identity(),
                 )
                 with self.assertRaisesRegex(SystemExit, "owner mismatch"):
                     host.complete(complete_args)
                 self.assertTrue(guard.exists())
-                host.release_workspace_guard(root, request()["run_id"], owner=host.read_workspace_guard(root, request()["run_id"])[1])
+                host.REGISTRY.release_workspace_guard(root, request()["run_id"], owner=host.REGISTRY.read_workspace_guard(root, request()["run_id"])[1])
                 (run_dir / "host-synthesis.json").write_text(
                     json.dumps({**valid_host_synthesis(run_dir=run_dir), "final_answer_ready": False})
                 )
@@ -2572,8 +2577,8 @@ class HostV2Tests(TestCase):
             run_dir = run_root / request()["run_id"]
             run_dir.mkdir(parents=True)
             guard = base / "active-v2.json"
-            with mock.patch.object(host, "workspace_guard_path", return_value=guard):
-                host.acquire_workspace_guard(root, request()["run_id"], "codex", run_dir)
+            with mock.patch.object(host.REGISTRY, "workspace_guard_path", return_value=guard):
+                host.REGISTRY.acquire_workspace_guard(root, request()["run_id"], "codex", run_dir)
                 (run_dir / "host-request.json").write_text(json.dumps(request()))
                 (run_dir / "peer-process.json").write_text(
                     json.dumps(valid_peer_process(run_dir, root, guard))
@@ -2587,7 +2592,7 @@ class HostV2Tests(TestCase):
                 ])
                 with (
                     mock.patch.object(host, "wait_for_peer_report", return_value="report_ready"),
-                    mock.patch.object(host.SAFETY, "process_group_alive", return_value=False),
+                    mock.patch.object(host.CONFIG.SAFETY, "process_group_alive", return_value=False),
                     redirect_stdout(io.StringIO()),
                 ):
                     self.assertEqual(host.finish(finish_args), 0)
@@ -2616,8 +2621,8 @@ class HostV2Tests(TestCase):
             run_dir = run_root / request()["run_id"]
             run_dir.mkdir(parents=True)
             guard = root / "active-v2.json"
-            with mock.patch.object(host, "workspace_guard_path", return_value=guard):
-                host.acquire_workspace_guard(root, request()["run_id"], "codex", run_dir)
+            with mock.patch.object(host.REGISTRY, "workspace_guard_path", return_value=guard):
+                host.REGISTRY.acquire_workspace_guard(root, request()["run_id"], "codex", run_dir)
                 (run_dir / "host-request.json").write_text(json.dumps(request()))
                 (run_dir / "peer-process.json").write_text(json.dumps(valid_peer_process(run_dir, root, guard)))
                 (run_dir / "provider-process.json").write_text(json.dumps(valid_provider_process()))
@@ -2629,14 +2634,14 @@ class HostV2Tests(TestCase):
                     mock.patch.object(host, "process_identity_matches", return_value=True),
                     mock.patch.object(host, "process_alive", return_value=False),
                     mock.patch.object(
-                        host.SAFETY,
+                        host.CONFIG.SAFETY,
                         "terminate_process_group",
                         return_value={"outcome": "not_running", "quiescent": True, "pgid": 43210},
                     ),
                     mock.patch.object(
                         host,
                         "record_cancel_workspace_mutation",
-                        side_effect=host.ArtifactValidationError("post-cancel snapshot failed"),
+                        side_effect=host.ARTIFACTS.ArtifactValidationError("post-cancel snapshot failed"),
                     ),
                     self.assertRaises(SystemExit),
                 ):
@@ -2648,7 +2653,7 @@ class HostV2Tests(TestCase):
                     mock.patch.object(host, "process_identity_matches", return_value=True),
                     mock.patch.object(host, "process_alive", return_value=False),
                     mock.patch.object(
-                        host.SAFETY,
+                        host.CONFIG.SAFETY,
                         "terminate_process_group",
                         return_value={"outcome": "not_running", "quiescent": True, "pgid": 43210},
                     ),
@@ -2657,7 +2662,7 @@ class HostV2Tests(TestCase):
                 ):
                     self.assertEqual(host.cancel(args), 0)
                 self.assertFalse(guard.exists())
-                self.assertEqual(host.load_state_runtime().find_job(run_root, request()["run_id"])["status"], "cancelled")
+                self.assertEqual(host.CONFIG.load_state_runtime().find_job(run_root, request()["run_id"])["status"], "cancelled")
                 self.assertEqual((run_dir / "peer-report.json").read_text(), "{malformed")
                 cancelled = json.loads((run_dir / "cancel-result.json").read_text())
                 self.assertEqual(cancelled["status"], "cancelled")
@@ -2679,8 +2684,8 @@ class HostV2Tests(TestCase):
             run_dir = run_root / request()["run_id"]
             run_dir.mkdir(parents=True)
             guard = root / "active-v2.json"
-            with mock.patch.object(host, "workspace_guard_path", return_value=guard):
-                host.acquire_workspace_guard(root, request()["run_id"], "codex", run_dir)
+            with mock.patch.object(host.REGISTRY, "workspace_guard_path", return_value=guard):
+                host.REGISTRY.acquire_workspace_guard(root, request()["run_id"], "codex", run_dir)
                 (run_dir / "host-request.json").write_text(json.dumps(request()))
                 (run_dir / "peer-process.json").write_text(
                     json.dumps(valid_peer_process(run_dir, root, guard))
@@ -2691,7 +2696,7 @@ class HostV2Tests(TestCase):
                     "cancel", str(run_dir), "--run-root", str(run_root), "--repo-root", str(root),
                 ])
                 with (
-                    mock.patch.object(host.SAFETY, "process_group_alive", return_value=False),
+                    mock.patch.object(host.CONFIG.SAFETY, "process_group_alive", return_value=False),
                     mock.patch.object(host, "record_cancel_workspace_mutation") as mutation,
                     redirect_stdout(io.StringIO()) as stdout,
                 ):
@@ -2720,18 +2725,18 @@ class HostV2Tests(TestCase):
                 return "peer_exited"
 
             with (
-                mock.patch.object(host, "workspace_guard_path", return_value=guard),
+                mock.patch.object(host.REGISTRY, "workspace_guard_path", return_value=guard),
                 mock.patch.object(host, "wait_for_peer_report", side_effect=wait_then_exit),
                 mock.patch.object(host, "process_identity_matches", return_value=True),
                 mock.patch.object(host, "process_alive", return_value=False),
                 mock.patch.object(
-                    host.SAFETY,
+                    host.CONFIG.SAFETY,
                     "terminate_process_group",
                     return_value={"outcome": "not_running", "quiescent": True, "pgid": 43210},
                 ),
                 mock.patch.object(host, "record_cancel_workspace_mutation", return_value=None),
             ):
-                host.acquire_workspace_guard(root, request()["run_id"], "codex", run_dir)
+                host.REGISTRY.acquire_workspace_guard(root, request()["run_id"], "codex", run_dir)
                 (run_dir / "host-request.json").write_text(json.dumps(request()))
                 (run_dir / "peer-process.json").write_text(
                     json.dumps(valid_peer_process(run_dir, root, guard))
@@ -2767,7 +2772,7 @@ class HostV2Tests(TestCase):
             self.assertTrue((run_dir / "cancel-result.json").exists())
             self.assertFalse((run_dir / "host-result.json").exists())
             self.assertEqual(
-                host.load_state_runtime().find_job(run_root, request()["run_id"])["status"],
+                host.CONFIG.load_state_runtime().find_job(run_root, request()["run_id"])["status"],
                 "cancelled",
             )
 
@@ -2778,8 +2783,8 @@ class HostV2Tests(TestCase):
             run_dir = run_root / request()["run_id"]
             run_dir.mkdir(parents=True)
             guard = root / "active-v2.json"
-            with mock.patch.object(host, "workspace_guard_path", return_value=guard):
-                host.acquire_workspace_guard(root, request()["run_id"], "codex", run_dir)
+            with mock.patch.object(host.REGISTRY, "workspace_guard_path", return_value=guard):
+                host.REGISTRY.acquire_workspace_guard(root, request()["run_id"], "codex", run_dir)
                 (run_dir / "host-request.json").write_text(json.dumps(request()))
                 (run_dir / "peer-process.json").write_text(
                     json.dumps(valid_peer_process(run_dir, root, guard))
@@ -2834,7 +2839,7 @@ class HostV2Tests(TestCase):
             self.assertIn("already terminal", str(finish_errors[0]))
             self.assertFalse(guard.exists())
             self.assertEqual(
-                host.load_state_runtime().find_job(run_root, request()["run_id"])["status"],
+                host.CONFIG.load_state_runtime().find_job(run_root, request()["run_id"])["status"],
                 "completed",
             )
 
@@ -2854,7 +2859,7 @@ class HostV2Tests(TestCase):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        identity = host.SAFETY.process_identity(process.pid)
+        identity = host.CONFIG.SAFETY.process_identity(process.pid)
         process.wait(timeout=2)
         try:
             with tempfile.TemporaryDirectory() as tmp_name:
@@ -2878,7 +2883,7 @@ class HostV2Tests(TestCase):
                     request(),
                 )
             self.assertIs(cleanup["quiescent"], False)
-            self.assertTrue(host.SAFETY.process_group_alive(identity["pgid"]))
+            self.assertTrue(host.CONFIG.SAFETY.process_group_alive(identity["pgid"]))
         finally:
             try:
                 os.killpg(identity["pgid"], signal.SIGKILL)
@@ -2900,8 +2905,8 @@ class HostV2Tests(TestCase):
             }
             with (
                 mock.patch.object(host, "process_identity_matches", return_value=False),
-                mock.patch.object(host.SAFETY, "process_identity_matches", return_value=False),
-                mock.patch.object(host.SAFETY, "process_group_alive", return_value=False),
+                mock.patch.object(host.CONFIG.SAFETY, "process_identity_matches", return_value=False),
+                mock.patch.object(host.CONFIG.SAFETY, "process_group_alive", return_value=False),
             ):
                 cleanup = host.terminate_tracked_process_tree(process_info, run_dir, request())
             self.assertIs(cleanup["quiescent"], True)
@@ -2917,12 +2922,12 @@ class HostV2Tests(TestCase):
             host.write_json(run_dir / "provider-process.json", null_identity)
             with (
                 mock.patch.object(host, "process_identity_matches", return_value=False),
-                mock.patch.object(host.SAFETY, "process_group_alive", return_value=False),
+                mock.patch.object(host.CONFIG.SAFETY, "process_group_alive", return_value=False),
             ):
                 cleanup = host.terminate_tracked_process_tree(process_info, run_dir, request())
             self.assertIs(cleanup["quiescent"], True)
             terminal = json.loads((run_dir / "provider-process.json").read_text())
-            host.validate_provider_process(terminal, request())
+            host.ARTIFACTS.validate_provider_process(terminal, request())
             self.assertIsNone(terminal["process_identity"])
             self.assertEqual(terminal["cleanup_outcome"], "identity_mismatch_group_empty")
 
@@ -2933,9 +2938,9 @@ class HostV2Tests(TestCase):
 
             with (
                 mock.patch.object(host, "process_identity_matches", return_value=False),
-                mock.patch.object(host.SAFETY, "process_identity_matches", return_value=False),
-                mock.patch.object(host.SAFETY, "process_group_alive", side_effect=group_alive),
-                mock.patch.object(host.SAFETY, "terminate_process_group") as terminate,
+                mock.patch.object(host.CONFIG.SAFETY, "process_identity_matches", return_value=False),
+                mock.patch.object(host.CONFIG.SAFETY, "process_group_alive", side_effect=group_alive),
+                mock.patch.object(host.CONFIG.SAFETY, "terminate_process_group") as terminate,
             ):
                 cleanup = host.terminate_tracked_process_tree(process_info, run_dir, request())
             self.assertIs(cleanup["quiescent"], False)
@@ -2949,8 +2954,8 @@ class HostV2Tests(TestCase):
             host.write_json(run_dir / "provider-process.json", escaped_tracker)
             with (
                 mock.patch.object(host, "process_identity_matches", return_value=False),
-                mock.patch.object(host.SAFETY, "process_identity_matches", return_value=False),
-                mock.patch.object(host.SAFETY, "process_group_alive", return_value=False),
+                mock.patch.object(host.CONFIG.SAFETY, "process_identity_matches", return_value=False),
+                mock.patch.object(host.CONFIG.SAFETY, "process_group_alive", return_value=False),
             ):
                 cleanup = host.terminate_tracked_process_tree(process_info, run_dir, request())
             self.assertIs(cleanup["quiescent"], False)
@@ -2977,13 +2982,13 @@ class HostV2Tests(TestCase):
         )
         self.assertEqual(actual_wait, 0.0)
         self.assertEqual(hard_deadline, 2830.0)
-        with self.assertRaises(host.ArtifactValidationError):
-            host.validate_host_first_pass(
+        with self.assertRaises(host.ARTIFACTS.ArtifactValidationError):
+            host.ARTIFACTS.validate_host_first_pass(
                 {"schema_version": "1.0", "run_id": "x", "summary": "x", "claims": []},
                 request(run_id="x"),
             )
-        with self.assertRaises(host.ArtifactValidationError):
-            host.validate_host_first_pass(
+        with self.assertRaises(host.ARTIFACTS.ArtifactValidationError):
+            host.ARTIFACTS.validate_host_first_pass(
                 {"schema_version": "2.0", "run_id": "x", "summary": "x", "claims": [], "extra": True},
                 request(run_id="x"),
             )
@@ -3007,9 +3012,9 @@ class HostV2Tests(TestCase):
                 "workspace_mutation_sha256": hashlib.sha256(b"null").hexdigest(),
                 "claim_matrix_sha256": "0" * 64,
             }
-            host.validate_host_result(result, disabled_request, run_dir)
-            with self.assertRaisesRegex(host.ArtifactValidationError, "must be null"):
-                host.validate_host_result(
+            host.ARTIFACTS.validate_host_result(result, disabled_request, run_dir)
+            with self.assertRaisesRegex(host.ARTIFACTS.ArtifactValidationError, "must be null"):
+                host.ARTIFACTS.validate_host_result(
                     {**result, "adjudicator_report": str(run_dir / "adjudicator-report.json")},
                     disabled_request,
                     run_dir,
@@ -3022,8 +3027,8 @@ class HostV2Tests(TestCase):
             run_dir = run_root / request()["run_id"]
             run_dir.mkdir(parents=True)
             guard = root / "active-v2.json"
-            with mock.patch.object(host, "workspace_guard_path", return_value=guard):
-                host.acquire_workspace_guard(root, request()["run_id"], "codex", run_dir)
+            with mock.patch.object(host.REGISTRY, "workspace_guard_path", return_value=guard):
+                host.REGISTRY.acquire_workspace_guard(root, request()["run_id"], "codex", run_dir)
                 (run_dir / "host-request.json").write_text(json.dumps(request()))
                 (run_dir / "peer-process.json").write_text(
                     json.dumps(
@@ -3055,7 +3060,7 @@ class HostV2Tests(TestCase):
                 }
                 with (
                     mock.patch.object(host, "wait_for_peer_report", return_value="peer_exited"),
-                    mock.patch.object(host, "require_process_tree_quiescent", side_effect=host.ArtifactValidationError("provider running")),
+                    mock.patch.object(host, "require_process_tree_quiescent", side_effect=host.ARTIFACTS.ArtifactValidationError("provider running")),
                     mock.patch.object(host, "terminate_tracked_process_tree", return_value=cleanup) as terminate,
                     mock.patch.object(host, "record_host_workspace_mutation", return_value=None),
                     redirect_stdout(io.StringIO()),
@@ -3103,7 +3108,7 @@ class HostV2Tests(TestCase):
             (run_dir / "peer-report.json").write_text('{"schema_version":')
             with (
                 mock.patch.object(host, "process_identity_matches", return_value=False),
-                mock.patch.object(host.SAFETY, "process_group_alive", return_value=False),
+                mock.patch.object(host.CONFIG.SAFETY, "process_group_alive", return_value=False),
             ):
                 summary = host.summarize_run(run_dir)
             self.assertIs(summary["peer_alive"], True)
@@ -3114,7 +3119,7 @@ class HostV2Tests(TestCase):
             (run_dir / "provider-process.json").write_text(json.dumps(valid_provider_process()))
             with (
                 mock.patch.object(host, "process_identity_matches", return_value=False),
-                mock.patch.object(host.SAFETY, "process_group_alive", return_value=False),
+                mock.patch.object(host.CONFIG.SAFETY, "process_group_alive", return_value=False),
                 self.assertRaises(SystemExit),
             ):
                 host.summarize_run(run_dir)
@@ -3126,7 +3131,7 @@ class HostV2Tests(TestCase):
             run_dir = Path(tmp)
             (run_dir / "peer-report.json").write_text("not-json")
             (run_dir / "peer.raw.json").write_text(json.dumps(valid_report()))
-            report, status = host.normalize_peer_report_from_artifacts(peer, run_dir, request())
+            report, status = host.ARTIFACTS.normalize_peer_report_from_artifacts(peer, run_dir, request())
             metadata = json.loads((run_dir / "peer-normalization.json").read_text())
         self.assertEqual(status, "invalid_json")
         self.assertEqual(report["status"], "peer_failed")
@@ -3142,7 +3147,7 @@ class HostV2Tests(TestCase):
                 handle.write(b"{")
                 handle.seek(17 * 1024 * 1024)
                 handle.write(b"}")
-            report, status = host.normalize_peer_report_from_artifacts(
+            report, status = host.ARTIFACTS.normalize_peer_report_from_artifacts(
                 peer,
                 run_dir,
                 request(),
@@ -3157,7 +3162,7 @@ class HostV2Tests(TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp)
             (run_dir / "peer-report.json").write_text(json.dumps({"structured_output": valid_report()}))
-            report, status = host.normalize_peer_report_from_artifacts(peer, run_dir, request())
+            report, status = host.ARTIFACTS.normalize_peer_report_from_artifacts(peer, run_dir, request())
             metadata = json.loads((run_dir / "peer-normalization.json").read_text())
         self.assertEqual(status, "noncanonical_output")
         self.assertEqual(report["error"]["kind"], "noncanonical_output")
@@ -3414,19 +3419,19 @@ class PackageTests(TestCase):
                 else json.dumps(value, separators=(",", ":")) if isinstance(value, list)
                 else str(value)
             )
-            for key, value in host.SETTING_DEFAULTS.items()
+            for key, value in host.CONFIG.SETTING_DEFAULTS.items()
         }
         self.assertEqual(documented_defaults, expected_defaults)
 
         schema = json.loads((RUNTIME_ROOT / "schemas/settings.schema.json").read_text())
         settings_schema = schema["properties"]["settings"]
-        self.assertEqual(set(settings_schema["required"]), set(host.SETTING_DEFAULTS))
-        self.assertEqual(set(settings_schema["properties"]), set(host.SETTING_DEFAULTS))
-        self.assertEqual(set(host.SETTING_ENV_KEYS), set(host.SETTING_DEFAULTS))
+        self.assertEqual(set(settings_schema["required"]), set(host.CONFIG.SETTING_DEFAULTS))
+        self.assertEqual(set(settings_schema["properties"]), set(host.CONFIG.SETTING_DEFAULTS))
+        self.assertEqual(set(host.CONFIG.SETTING_ENV_KEYS), set(host.CONFIG.SETTING_DEFAULTS))
 
         env_section = readme.split("Environment keys:", 1)[1].split("Run `doctor`", 1)[0]
         documented_env = set(re.findall(r"`([A-Z][A-Z0-9_]+)`", env_section))
-        self.assertEqual(documented_env, set(host.SETTING_ENV_KEYS.values()))
+        self.assertEqual(documented_env, set(host.CONFIG.SETTING_ENV_KEYS.values()))
 
     def test_no_duplicate_prompt_or_old_runtime_flags(self):
         for root in (RUNTIME_ROOT, CODEX_SKILL_ROOT, CLAUDE_SKILL_ROOT):
@@ -3512,7 +3517,7 @@ class PackageTests(TestCase):
         jsonschema.validate(payload, settings_schema)
         fableton = {**payload, "settings": complete_settings(host, claude_model="Fableton")}
         jsonschema.validate(fableton, settings_schema)
-        host.validate_v2_settings_types(fableton["settings"], "test settings")
+        host.CONFIG.validate_v2_settings_types(fableton["settings"], "test settings")
         for invalid_settings in (
             complete_settings(host, agent_timeout_seconds="999999"),
             complete_settings(host, claude_model="claude-fable-5"),
@@ -3521,7 +3526,7 @@ class PackageTests(TestCase):
             with self.assertRaises(jsonschema.ValidationError):
                 jsonschema.validate({**payload, "settings": invalid_settings}, settings_schema)
             with self.assertRaises(ValueError):
-                host.validate_v2_settings_types(invalid_settings, "test settings")
+                host.CONFIG.validate_v2_settings_types(invalid_settings, "test settings")
         provider_schema = json.loads(
             (RUNTIME_ROOT / "schemas/provider-process.schema.json").read_text()
         )
@@ -3535,8 +3540,8 @@ class PackageTests(TestCase):
         )
         with self.assertRaises(jsonschema.ValidationError):
             jsonschema.validate(invalid_cleanup, provider_schema)
-        with self.assertRaises(host.ArtifactValidationError):
-            host.validate_provider_process(invalid_cleanup, request())
+        with self.assertRaises(host.ARTIFACTS.ArtifactValidationError):
+            host.ARTIFACTS.validate_provider_process(invalid_cleanup, request())
         jsonschema.validate(
             {"schema_version": "2.0", "jobs": [valid_state_job()]},
             json.loads((RUNTIME_ROOT / "schemas/state.schema.json").read_text()),

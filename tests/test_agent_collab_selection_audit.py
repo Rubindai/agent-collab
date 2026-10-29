@@ -164,10 +164,10 @@ class SelectionAuditTests(TestCase):
                 "--run-root", str(root / "runs"),
             ])
             with (
-                mock.patch.object(host, "resolve_settings", return_value={"settings": fixtures.complete_settings(host), "errors": []}),
-                mock.patch.object(host, "require_valid_settings"),
-                mock.patch.object(host, "require_peer_cli_version") as cli,
-                mock.patch.object(host, "acquire_workspace_guard") as acquire,
+                mock.patch.object(host.CONFIG, "resolve_settings", return_value={"settings": fixtures.complete_settings(host), "errors": []}),
+                mock.patch.object(host.CONFIG, "require_valid_settings"),
+                mock.patch.object(host.CONFIG, "require_peer_cli_version") as cli,
+                mock.patch.object(host.REGISTRY, "acquire_workspace_guard") as acquire,
                 self.assertRaises(SystemExit) as error,
             ):
                 host.start(args)

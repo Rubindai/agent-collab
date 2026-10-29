@@ -37,12 +37,12 @@ class FinalAuditTests(TestCase):
             with self.subTest(model=model):
                 for source in ('local', 'global'):
                     with self.assertRaisesRegex(ValueError, 'cannot persist Fable'):
-                        host.validate_v2_settings_types(fixtures.complete_settings(host, claude_model=model), source)
+                        host.CONFIG.validate_v2_settings_types(fixtures.complete_settings(host, claude_model=model), source)
                 with tempfile.TemporaryDirectory() as tmp:
                     root = Path(tmp)
-                    with (mock.patch.object(host, 'default_global_settings_path', return_value=root / 'g'),
-                          mock.patch.object(host, 'default_local_settings_path', return_value=root / 'l')):
-                        resolved = host.resolve_settings(root, {'CLAUDE_AGENT_COLLAB_MODEL': model})
+                    with (mock.patch.object(host.CONFIG, 'default_global_settings_path', return_value=root / 'g'),
+                          mock.patch.object(host.CONFIG, 'default_local_settings_path', return_value=root / 'l')):
+                        resolved = host.CONFIG.resolve_settings(root, {'CLAUDE_AGENT_COLLAB_MODEL': model})
                 self.assertIn('cannot persist Fable', resolved['environment_errors'][0])
 
     def test_agent_counter_rejects_noncanonical_counts(self):
@@ -83,36 +83,36 @@ class FinalAuditTests(TestCase):
                     'provider': {'outcome': 'already_quiescent', 'quiescent': True},
                     'wrapper': {'outcome': 'not_running', 'quiescent': True, 'pgid': 43210},
                 },
-                'preserved_artifacts': dict.fromkeys(host.CANCEL_PRESERVED_ARTIFACTS),
+                'preserved_artifacts': dict.fromkeys(host.ARTIFACTS.CANCEL_PRESERVED_ARTIFACTS),
                 'workspace_mutation': None,
-                'workspace_mutation_sha256': host.workspace_mutation_sha256(None),
+                'workspace_mutation_sha256': host.ARTIFACTS.workspace_mutation_sha256(None),
                 'completed_at': '2026-10-18T00:00:00Z',
             }
-            host.validate_cancel_result(report, request, Path(tmp))
+            host.ARTIFACTS.validate_cancel_result(report, request, Path(tmp))
             report['preserved_artifacts']['peer_report'] = int('1' * 64)
-            with self.assertRaisesRegex(host.ArtifactValidationError, 'artifact hashes'):
-                host.validate_cancel_result(report, request, Path(tmp))
+            with self.assertRaisesRegex(host.ARTIFACTS.ArtifactValidationError, 'artifact hashes'):
+                host.ARTIFACTS.validate_cancel_result(report, request, Path(tmp))
 
     def test_process_run_directory_cannot_be_coerced_from_a_number(self):
         host = fixtures.load_host()
         run_dir = Path.cwd() / '123'
         process = fixtures.valid_peer_process(run_dir, Path.cwd(), Path.cwd() / 'guard')
         process['run_dir'] = 123
-        with self.assertRaisesRegex(host.ArtifactValidationError, 'run_dir'):
-            host.validate_peer_process(process, fixtures.request(), run_dir)
+        with self.assertRaisesRegex(host.ARTIFACTS.ArtifactValidationError, 'run_dir'):
+            host.ARTIFACTS.validate_peer_process(process, fixtures.request(), run_dir)
 
     def test_workspace_guard_run_id_must_be_a_string(self):
         host = fixtures.load_host()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             guard = root / 'guard.json'
-            with mock.patch.object(host, 'workspace_guard_path', return_value=guard):
-                host.acquire_workspace_guard(root, '123', 'codex', root / 'run')
-                data = host.STRICT_JSON.load(guard)
+            with mock.patch.object(host.REGISTRY, 'workspace_guard_path', return_value=guard):
+                host.REGISTRY.acquire_workspace_guard(root, '123', 'codex', root / 'run')
+                data = host.CONFIG.STRICT_JSON.load(guard)
                 data['runs']['123']['run_id'] = 123
-                host.STRICT_JSON.write(guard, data)
+                host.CONFIG.STRICT_JSON.write(guard, data)
                 with self.assertRaisesRegex(SystemExit, 'run_id'):
-                    host.read_workspace_guard(root, '123')
+                    host.REGISTRY.read_workspace_guard(root, '123')
 
     def test_request_rejects_boolean_helper_limit_and_numeric_digest(self):
         peer = fixtures.load_peer()
@@ -126,7 +126,7 @@ class FinalAuditTests(TestCase):
             peer.validate_request(invalid)
 
     def test_snapshot_does_not_refresh_git_index(self):
-        snapshot = fixtures.load_host().load_snapshot_runtime()
+        snapshot = fixtures.load_host().CONFIG.load_snapshot_runtime()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             for args in (['init', '-q'], ['config', 'user.name', 'Test'],

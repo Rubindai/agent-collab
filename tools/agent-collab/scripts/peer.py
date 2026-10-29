@@ -1516,6 +1516,392 @@ def canonicalize_peer_report_target(
     return report, False
 
 
+def remaining_peer_seconds(absolute_deadline: float) -> float:
+    remaining = absolute_deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("peer wrapper exceeded its absolute finite deadline")
+    return remaining
+def check_peer_mutation(report: dict[str, Any], request: dict[str, Any], repo_root: Path,
+                        snapshot_ignored_paths: list[Path], before_snapshot: dict[str, Any],
+                        mutation_output_path: Path | None, absolute_deadline: float) -> dict[str, Any]:
+    if request["workspace_mode"] == "isolated":
+        return report
+    try:
+        after_snapshot = git_mutation_snapshot(
+            repo_root,
+            snapshot_ignored_paths,
+            deadline=absolute_deadline,
+        )
+    except TimeoutError as exc:
+        return failure(
+            "timeout",
+            f"Peer absolute deadline elapsed during workspace verification: {exc}",
+            request,
+            {"peer_report": report},
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        return failure(
+            "snapshot_unavailable",
+            f"Workspace snapshot verification failed: {exc}",
+            request,
+            {"peer_report": report},
+        )
+    if not request.get("edit_allowed", False) and after_snapshot != before_snapshot:
+        mutation = mutation_error_details(before_snapshot, after_snapshot, report)
+        mutation.pop("peer_report", None)
+        mutation.update(
+            {
+                "edit_allowed": False,
+                "message": "Workspace changed while edit_allowed=false; attribution is unknown.",
+            }
+        )
+        if mutation_output_path is not None:
+            write_json(mutation_output_path, mutation)
+        if report.get("status") == "ok":
+            limitations = list(report.get("limitations", []))
+            warning = "Workspace changed while edit_allowed=false"
+            if warning not in limitations:
+                limitations.append(warning)
+            return {**report, "limitations": limitations}
+        if isinstance(report.get("error"), dict):
+            error = dict(report["error"])
+            error["details"] = STRICT_JSON.dumps(
+                {
+                    "original_details": error.get("details"),
+                    "workspace_mutation": mutation,
+                },
+                indent=None,
+            )
+            return {**report, "error": error}
+    return report
+
+def run_provider(request: dict[str, Any], repo_root: Path, peer_env: dict[str, str], command: PeerCommand,
+                 tmp: Path, raw_output_path: Path | None, absolute_deadline: float) -> Any:
+    isolation = None
+    try:
+        isolation = load_isolation_runtime() if request["workspace_mode"] == "isolated" else None
+        run_dir = Path(peer_env["AGENT_COLLAB_RUN_DIR"]) if isolation else None
+        workspace = isolation.Workspace(repo_root, run_dir, absolute_deadline) if isolation else nullcontext()
+        with workspace as active_workspace:
+            provider_args = (
+                active_workspace.command(
+                    command.args, tmp, isolation.credential_passthrough(request["peer"], peer_env)
+                )
+                if isolation else command.args
+            )
+            completed = run_peer_command(
+                provider_args,
+                cwd=repo_root,
+                env=peer_env,
+                input=command.stdin,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=remaining_peer_seconds(absolute_deadline),
+                check=False,
+                provider_process_path=(
+                    raw_output_path.with_name("provider-process.json")
+                    if raw_output_path is not None
+                    else None
+                ),
+                run_id=request["run_id"],
+                launch_check=lambda: validate_request(request, require_fresh_attestation=True),
+            )
+    except RequestValidationError as exc:
+        return failure("invalid_request", str(exc), request)
+    except subprocess.TimeoutExpired as exc:
+        return failure(
+                "timeout",
+                f"Peer run exceeded its {request['peer_timeout_seconds']}-second deadline",
+                request,
+                str(exc),
+            )
+    except TimeoutError as exc:
+        return failure("timeout", str(exc), request)
+    except FileNotFoundError as exc:
+        return failure("missing_cli", f"Required peer CLI not found: {command.args[0]}", request, str(exc))
+    except ProviderCleanupError as exc:
+        return failure(
+                "process_cleanup_failed",
+                "Provider process group could not be proven quiescent.",
+                request,
+                exc.details,
+            )
+    except PeerOutputLimitExceeded as exc:
+        return failure(
+                "output_too_large",
+                "Peer CLI output exceeded the finite runtime capture limit.",
+                request,
+                exc.details,
+            )
+    except (KeyError, RuntimeError, OSError) as exc:
+        status = "sandbox_unavailable" if isolation else "provider_runtime_error"
+        return failure(status, f"Peer launch failed: {exc}", request)
+    return completed
+
+
+def check_provider_result(request: dict[str, Any], completed: Any, raw_output_path: Path | None,
+                          effort_path: Path, expected_effort: str | None) -> dict[str, Any] | None:
+    stdout_bytes = len(completed.stdout.encode("utf-8"))
+    stderr_bytes = len(completed.stderr.encode("utf-8"))
+    if stdout_bytes > MAX_PEER_OUTPUT_BYTES or stderr_bytes > MAX_PEER_OUTPUT_BYTES:
+        return failure(
+                "output_too_large",
+                "Peer CLI output exceeded the finite runtime capture limit.",
+                request,
+                {
+                    "stdout_bytes": stdout_bytes,
+                    "stderr_bytes": stderr_bytes,
+                    "limit_bytes": MAX_PEER_OUTPUT_BYTES,
+                },
+            )
+
+    if request["peer"] == "codex" and raw_output_path is not None:
+        # Keep bounded lifecycle/usage evidence separately from the required
+        # final report. Telemetry must never become a report fallback.
+        STRICT_JSON.write_text(raw_output_path.with_name("peer-stdout.txt"), completed.stdout)
+
+    claude_error = (
+        claude_error_details(completed.stdout.strip(), completed.stderr, request)
+        if request["peer"] == "claude"
+        else None
+    )
+    if claude_error is not None:
+        if raw_output_path is not None:
+            STRICT_JSON.write_text(raw_output_path, completed.stdout)
+        kind, message, details = claude_error
+        return failure(kind, message, request, details)
+
+    if completed.returncode != 0:
+        if raw_output_path is not None:
+            STRICT_JSON.write_text(raw_output_path, completed.stdout)
+        model_error = model_unavailable_message(
+            completed.stdout,
+            completed.stderr,
+            request["peer_model"],
+            request["peer_effort"],
+        )
+        if model_error is not None:
+            return failure(
+                    "model_unavailable",
+                    model_error,
+                    request,
+                    {
+                        "requested_model": request["peer_model"],
+                        "stdout_tail": completed.stdout[-4000:],
+                        "stderr_tail": completed.stderr[-4000:],
+                    },
+                )
+        return failure(
+                "peer_nonzero_exit",
+                f"Peer CLI exited with status {completed.returncode}",
+                request,
+                {
+                    "stdout_tail": completed.stdout[-4000:],
+                    "stderr_tail": completed.stderr[-4000:],
+                },
+            )
+
+    if request["peer"] == "claude":
+        try:
+            receipt = STRICT_JSON.load(effort_path, max_bytes=CLAUDE_TELEMETRY.MAX_CAPTURE_BYTES)
+            effort_mismatch = CLAUDE_TELEMETRY.mismatch_details(
+                receipt, request["run_id"], expected_effort
+            )
+            effort_mismatch = CLAUDE_TELEMETRY.pending_capture_details(effort_path) or effort_mismatch
+            if raw_output_path is not None:
+                STRICT_JSON.write(raw_output_path.with_name("claude-effort.json"), receipt)
+        except (OSError, ValueError) as exc:
+            effort_mismatch = {
+                "expected_effort": expected_effort,
+                "reason": f"Claude actual-run Stop effort evidence is unavailable: {exc}",
+            }
+        if effort_mismatch is not None:
+            if raw_output_path is not None:
+                STRICT_JSON.write_text(raw_output_path, completed.stdout)
+            return failure(
+                "effort_unverified", effort_mismatch["reason"], request, effort_mismatch,
+            )
+        mismatch = claude_selection_mismatch_details(
+            completed.stdout.strip(),
+            request["peer_model"],
+            request["peer_effort"],
+        )
+        if mismatch is not None:
+            if raw_output_path is not None:
+                STRICT_JSON.write_text(raw_output_path, completed.stdout)
+            return failure(
+                    "model_mismatch",
+                    mismatch["reason"],
+                    request,
+                    mismatch,
+                )
+    else:
+        mismatch = codex_selection_mismatch_details(
+            completed.stdout,
+            request["peer_model"],
+            request["peer_effort"],
+        )
+        if mismatch is not None:
+            if raw_output_path is not None:
+                STRICT_JSON.write_text(raw_output_path, completed.stdout)
+            return failure(
+                    "model_mismatch",
+                    mismatch["reason"],
+                    request,
+                    mismatch,
+                )
+    return None
+
+
+def normalize_provider_result(request: dict[str, Any], completed: Any, output_path: Path,
+                              raw_output_path: Path | None, normalization_output_path: Path | None) -> dict[str, Any]:
+    if request["peer"] == "claude":
+        output_text = completed.stdout
+    elif output_path.exists():
+        if output_path.stat().st_size > MAX_PEER_OUTPUT_BYTES:
+            return failure(
+                    "output_too_large",
+                    "Codex output artifact exceeded the finite runtime capture limit.",
+                    request,
+                    {
+                        "output_bytes": output_path.stat().st_size,
+                        "limit_bytes": MAX_PEER_OUTPUT_BYTES,
+                    },
+                )
+        try:
+            output_text = STRICT_JSON.read_text(
+                output_path,
+                max_bytes=MAX_PEER_OUTPUT_BYTES,
+            )
+        except (OSError, ValueError) as exc:
+            return failure(
+                    "output_artifact_invalid",
+                    "Codex output artifact could not be read within the finite UTF-8 contract.",
+                    request,
+                    str(exc),
+                )
+    else:
+        return failure(
+                "missing_output_artifact",
+                f"Codex did not write the required --output-last-message artifact: {output_path}",
+                request,
+            )
+    if raw_output_path is not None:
+        STRICT_JSON.write_text(raw_output_path, output_text)
+    normalization_output_path = normalization_output_path or default_normalization_path(raw_output_path)
+    expected_source = "structured_output" if request["peer"] == "claude" else "direct_json"
+    try:
+        normalized = normalize_json_payload(output_text.strip(), expected_source)
+        report = normalized.report
+    except ValueError as exc:
+        failure_kind = "noncanonical_output" if isinstance(exc, PeerOutputContractError) else "invalid_json"
+        if normalization_output_path is not None:
+            write_provider_normalization(
+                normalization_output_path,
+                {
+                    "schema_version": "2.0",
+                    "source": "none",
+                    "input_bytes": len(output_text.encode("utf-8")),
+                    "warnings": [],
+                    "validation_status": failure_kind,
+                    "error": str(exc),
+                },
+            )
+        return failure(failure_kind, f"Peer output violated its contract: {exc}", request)
+
+    try:
+        validate_peer_report(report)
+    except PeerReportValidationError as exc:
+        if normalization_output_path is not None:
+            metadata = dict(normalized.metadata)
+            metadata["validation_status"] = "schema_validation_failed"
+            metadata["error"] = str(exc)
+            write_provider_normalization(normalization_output_path, metadata)
+        return failure("schema_validation_failed", str(exc), request, report)
+
+    report, target_was_canonicalized = canonicalize_peer_report_target(report, request)
+    try:
+        validate_peer_report_matches_request(report, request)
+    except PeerReportValidationError as exc:
+        if normalization_output_path is not None:
+            metadata = dict(normalized.metadata)
+            metadata["validation_status"] = "peer_report_mismatch"
+            metadata["error"] = str(exc)
+            write_provider_normalization(normalization_output_path, metadata)
+        return failure("peer_report_mismatch", str(exc), request, report)
+
+    if normalization_output_path is not None:
+        metadata = dict(normalized.metadata)
+        if target_was_canonicalized:
+            metadata["warnings"] = [
+                *metadata.get("warnings", []),
+                "target_xml_entities_canonicalized",
+            ]
+        metadata["validation_status"] = "ok"
+        write_provider_normalization(normalization_output_path, metadata)
+
+    return report
+
+
+def execute_peer(request: dict[str, Any], repo_root: Path, effective_env: dict[str, str], tmp: Path,
+                 before_snapshot: dict[str, Any], absolute_deadline: float, schema_path: Path,
+                 raw_output_path: Path | None, normalization_output_path: Path | None) -> dict[str, Any]:
+    output_path = tmp / "peer-output.json"
+    effort_path = tmp / "claude-effort.json"
+    expected_effort = None
+    if request["peer"] == "claude":
+        expected_effort = load_availability_runtime().effective_claude_effort(request["peer_effort"])
+        STRICT_JSON.write(effort_path, CLAUDE_TELEMETRY.new_receipt(request["run_id"], expected_effort))
+        STRICT_JSON.ensure_private_directory(CLAUDE_TELEMETRY.pending_directory(effort_path))
+    prompt = build_prompt(request, repo_root, schema_path)
+    try:
+        command = build_peer_command(
+            request,
+            prompt,
+            repo_root,
+            schema_path,
+            output_path,
+            effective_env,
+            before_snapshot.get("mode"),
+        )
+        remaining_peer_seconds(absolute_deadline)
+    except TimeoutError as exc:
+        return failure("timeout", str(exc), request)
+    except ValueError as exc:
+        return failure("invalid_configuration", str(exc), request)
+    executable = command.args[0]
+    try:
+        SAFETY.resolve_cli(executable, effective_env.get("PATH"))
+    except FileNotFoundError as exc:
+        return failure("missing_cli", str(exc), request)
+
+    peer_env = dict(effective_env)
+    if request["peer"] == "claude":
+        for key in CLAUDE_EFFORT_ENV_OVERRIDES:
+            peer_env.pop(key, None)
+        peer_env.update(claude_helper_environment(request))
+    peer_env["AGENT_COLLAB_PEER_ONLY"] = "true"
+    peer_env["AGENT_COLLAB_CROSS_AGENT_DEPTH"] = "1"
+    peer_env["AGENT_COLLAB_MAX_CROSS_AGENT_DEPTH"] = "1"
+    peer_env["AGENT_COLLAB_LOCAL_SUBAGENT_DEPTH"] = "0"
+    peer_env["AGENT_COLLAB_MAX_LOCAL_SUBAGENT_DEPTH"] = "1"
+    peer_env["AGENT_COLLAB_HOST"] = request["host"]
+    peer_env["AGENT_COLLAB_PEER"] = request["peer"]
+    peer_env["AGENT_COLLAB_RUN_ID"] = request["run_id"]
+    guard_bin = make_host_cli_guard(tmp, request["host"])
+    peer_env["PATH"] = f"{guard_bin}{os.pathsep}{peer_env.get('PATH', '')}"
+    completed = run_provider(request, repo_root, peer_env, command, tmp, raw_output_path, absolute_deadline)
+    if isinstance(completed, dict):
+        return completed
+    problem = check_provider_result(request, completed, raw_output_path, effort_path, expected_effort)
+    if problem is not None:
+        return problem
+    return normalize_provider_result(request, completed, output_path, raw_output_path, normalization_output_path)
+
+
 def invoke_peer(
     request: dict[str, Any],
     repo_root: Path,
@@ -1537,11 +1923,6 @@ def invoke_peer(
             return failure("helper_policy_unavailable", policy_failure["details"], request, policy_failure)
     absolute_deadline = time.monotonic() + float(request["peer_timeout_seconds"])
 
-    def remaining_peer_seconds() -> float:
-        remaining = absolute_deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError("peer wrapper exceeded its absolute finite deadline")
-        return remaining
     # Codex read-only sandboxing uses bubblewrap on Linux. Claude's plan
     # permission mode is provider-native and does not use this backend.
     if request["safe_mode"] and request["peer"] == "codex":
@@ -1576,389 +1957,15 @@ def invoke_peer(
     except (OSError, RuntimeError, ValueError) as exc:
         return failure("snapshot_unavailable", f"Workspace snapshot preflight failed: {exc}", request)
 
-    def with_mutation_check(report: dict[str, Any]) -> dict[str, Any]:
-        if request["workspace_mode"] == "isolated":
-            return report
-        try:
-            after_snapshot = git_mutation_snapshot(
-                repo_root,
-                snapshot_ignored_paths,
-                deadline=absolute_deadline,
-            )
-        except TimeoutError as exc:
-            return failure(
-                "timeout",
-                f"Peer absolute deadline elapsed during workspace verification: {exc}",
-                request,
-                {"peer_report": report},
-            )
-        except (OSError, RuntimeError, ValueError) as exc:
-            return failure(
-                "snapshot_unavailable",
-                f"Workspace snapshot verification failed: {exc}",
-                request,
-                {"peer_report": report},
-            )
-        if not request.get("edit_allowed", False) and after_snapshot != before_snapshot:
-            mutation = mutation_error_details(before_snapshot, after_snapshot, report)
-            mutation.pop("peer_report", None)
-            mutation.update(
-                {
-                    "edit_allowed": False,
-                    "message": "Workspace changed while edit_allowed=false; attribution is unknown.",
-                }
-            )
-            if mutation_output_path is not None:
-                write_json(mutation_output_path, mutation)
-            if report.get("status") == "ok":
-                limitations = list(report.get("limitations", []))
-                warning = "Workspace changed while edit_allowed=false"
-                if warning not in limitations:
-                    limitations.append(warning)
-                return {**report, "limitations": limitations}
-            if isinstance(report.get("error"), dict):
-                error = dict(report["error"])
-                error["details"] = STRICT_JSON.dumps(
-                    {
-                        "original_details": error.get("details"),
-                        "workspace_mutation": mutation,
-                    },
-                    indent=None,
-                )
-                return {**report, "error": error}
-        return report
-
     with tempfile.TemporaryDirectory(
         prefix="agent-collab-",
         dir="/tmp" if request["workspace_mode"] == "isolated" else None,
     ) as tmp_name:
-        tmp = Path(tmp_name)
-        output_path = tmp / "peer-output.json"
-        effort_path = tmp / "claude-effort.json"
-        expected_effort = None
-        if request["peer"] == "claude":
-            expected_effort = load_availability_runtime().effective_claude_effort(request["peer_effort"])
-            STRICT_JSON.write(effort_path, CLAUDE_TELEMETRY.new_receipt(request["run_id"], expected_effort))
-            STRICT_JSON.ensure_private_directory(CLAUDE_TELEMETRY.pending_directory(effort_path))
-        prompt = build_prompt(request, repo_root, schema_path)
-        try:
-            command = build_peer_command(
-                request,
-                prompt,
-                repo_root,
-                schema_path,
-                output_path,
-                effective_env,
-                before_snapshot.get("mode"),
-            )
-            remaining_peer_seconds()
-        except TimeoutError as exc:
-            return with_mutation_check(failure("timeout", str(exc), request))
-        except ValueError as exc:
-            return with_mutation_check(failure("invalid_configuration", str(exc), request))
-        executable = command.args[0]
-        try:
-            SAFETY.resolve_cli(executable, effective_env.get("PATH"))
-        except FileNotFoundError as exc:
-            return with_mutation_check(failure("missing_cli", str(exc), request))
+        report = execute_peer(request, repo_root, effective_env, Path(tmp_name), before_snapshot,
+                              absolute_deadline, schema_path, raw_output_path, normalization_output_path)
+        return check_peer_mutation(report, request, repo_root, snapshot_ignored_paths,
+                                   before_snapshot, mutation_output_path, absolute_deadline)
 
-        peer_env = dict(effective_env)
-        if request["peer"] == "claude":
-            for key in CLAUDE_EFFORT_ENV_OVERRIDES:
-                peer_env.pop(key, None)
-            peer_env.update(claude_helper_environment(request))
-        peer_env["AGENT_COLLAB_PEER_ONLY"] = "true"
-        peer_env["AGENT_COLLAB_CROSS_AGENT_DEPTH"] = "1"
-        peer_env["AGENT_COLLAB_MAX_CROSS_AGENT_DEPTH"] = "1"
-        peer_env["AGENT_COLLAB_LOCAL_SUBAGENT_DEPTH"] = "0"
-        peer_env["AGENT_COLLAB_MAX_LOCAL_SUBAGENT_DEPTH"] = "1"
-        peer_env["AGENT_COLLAB_HOST"] = request["host"]
-        peer_env["AGENT_COLLAB_PEER"] = request["peer"]
-        peer_env["AGENT_COLLAB_RUN_ID"] = request["run_id"]
-        guard_bin = make_host_cli_guard(tmp, request["host"])
-        peer_env["PATH"] = f"{guard_bin}{os.pathsep}{peer_env.get('PATH', '')}"
-
-        isolation = None
-        try:
-            isolation = load_isolation_runtime() if request["workspace_mode"] == "isolated" else None
-            run_dir = Path(effective_env["AGENT_COLLAB_RUN_DIR"]) if isolation else None
-            workspace = isolation.Workspace(repo_root, run_dir, absolute_deadline) if isolation else nullcontext()
-            with workspace as active_workspace:
-                provider_args = (
-                    active_workspace.command(
-                        command.args, tmp, isolation.credential_passthrough(request["peer"], peer_env)
-                    )
-                    if isolation else command.args
-                )
-                completed = run_peer_command(
-                    provider_args,
-                    cwd=repo_root,
-                    env=peer_env,
-                    input=command.stdin,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    timeout=remaining_peer_seconds(),
-                    check=False,
-                    provider_process_path=(
-                        raw_output_path.with_name("provider-process.json")
-                        if raw_output_path is not None
-                        else None
-                    ),
-                    run_id=request["run_id"],
-                    launch_check=lambda: validate_request(request, require_fresh_attestation=True),
-                )
-        except RequestValidationError as exc:
-            return with_mutation_check(failure("invalid_request", str(exc), request))
-        except subprocess.TimeoutExpired as exc:
-            return with_mutation_check(
-                failure(
-                    "timeout",
-                    f"Peer run exceeded its {request['peer_timeout_seconds']}-second deadline",
-                    request,
-                    str(exc),
-                )
-            )
-        except TimeoutError as exc:
-            return with_mutation_check(failure("timeout", str(exc), request))
-        except FileNotFoundError as exc:
-            return with_mutation_check(failure("missing_cli", f"Required peer CLI not found: {executable}", request, str(exc)))
-        except ProviderCleanupError as exc:
-            return with_mutation_check(
-                failure(
-                    "process_cleanup_failed",
-                    "Provider process group could not be proven quiescent.",
-                    request,
-                    exc.details,
-                )
-            )
-        except PeerOutputLimitExceeded as exc:
-            return with_mutation_check(
-                failure(
-                    "output_too_large",
-                    "Peer CLI output exceeded the finite runtime capture limit.",
-                    request,
-                    exc.details,
-                )
-            )
-        except (KeyError, RuntimeError, OSError) as exc:
-            status = "sandbox_unavailable" if isolation else "provider_runtime_error"
-            return with_mutation_check(failure(status, f"Peer launch failed: {exc}", request))
-
-        stdout_bytes = len(completed.stdout.encode("utf-8"))
-        stderr_bytes = len(completed.stderr.encode("utf-8"))
-        if stdout_bytes > MAX_PEER_OUTPUT_BYTES or stderr_bytes > MAX_PEER_OUTPUT_BYTES:
-            return with_mutation_check(
-                failure(
-                    "output_too_large",
-                    "Peer CLI output exceeded the finite runtime capture limit.",
-                    request,
-                    {
-                        "stdout_bytes": stdout_bytes,
-                        "stderr_bytes": stderr_bytes,
-                        "limit_bytes": MAX_PEER_OUTPUT_BYTES,
-                    },
-                )
-            )
-
-        if request["peer"] == "codex" and raw_output_path is not None:
-            # Keep bounded lifecycle/usage evidence separately from the required
-            # final report. Telemetry must never become a report fallback.
-            STRICT_JSON.write_text(raw_output_path.with_name("peer-stdout.txt"), completed.stdout)
-
-        claude_error = (
-            claude_error_details(completed.stdout.strip(), completed.stderr, request)
-            if request["peer"] == "claude"
-            else None
-        )
-        if claude_error is not None:
-            if raw_output_path is not None:
-                STRICT_JSON.write_text(raw_output_path, completed.stdout)
-            kind, message, details = claude_error
-            return with_mutation_check(failure(kind, message, request, details))
-
-        if completed.returncode != 0:
-            if raw_output_path is not None:
-                STRICT_JSON.write_text(raw_output_path, completed.stdout)
-            model_error = model_unavailable_message(
-                completed.stdout,
-                completed.stderr,
-                request["peer_model"],
-                request["peer_effort"],
-            )
-            if model_error is not None:
-                return with_mutation_check(
-                    failure(
-                        "model_unavailable",
-                        model_error,
-                        request,
-                        {
-                            "requested_model": request["peer_model"],
-                            "stdout_tail": completed.stdout[-4000:],
-                            "stderr_tail": completed.stderr[-4000:],
-                        },
-                    )
-                )
-            return with_mutation_check(
-                failure(
-                    "peer_nonzero_exit",
-                    f"Peer CLI exited with status {completed.returncode}",
-                    request,
-                    {
-                        "stdout_tail": completed.stdout[-4000:],
-                        "stderr_tail": completed.stderr[-4000:],
-                    },
-                )
-            )
-
-        if request["peer"] == "claude":
-            try:
-                receipt = STRICT_JSON.load(effort_path, max_bytes=CLAUDE_TELEMETRY.MAX_CAPTURE_BYTES)
-                effort_mismatch = CLAUDE_TELEMETRY.mismatch_details(
-                    receipt, request["run_id"], expected_effort
-                )
-                effort_mismatch = CLAUDE_TELEMETRY.pending_capture_details(effort_path) or effort_mismatch
-                if raw_output_path is not None:
-                    STRICT_JSON.write(raw_output_path.with_name("claude-effort.json"), receipt)
-            except (OSError, ValueError) as exc:
-                effort_mismatch = {
-                    "expected_effort": expected_effort,
-                    "reason": f"Claude actual-run Stop effort evidence is unavailable: {exc}",
-                }
-            if effort_mismatch is not None:
-                if raw_output_path is not None:
-                    STRICT_JSON.write_text(raw_output_path, completed.stdout)
-                return with_mutation_check(failure(
-                    "effort_unverified", effort_mismatch["reason"], request, effort_mismatch,
-                ))
-            mismatch = claude_selection_mismatch_details(
-                completed.stdout.strip(),
-                request["peer_model"],
-                request["peer_effort"],
-            )
-            if mismatch is not None:
-                if raw_output_path is not None:
-                    STRICT_JSON.write_text(raw_output_path, completed.stdout)
-                return with_mutation_check(
-                    failure(
-                        "model_mismatch",
-                        mismatch["reason"],
-                        request,
-                        mismatch,
-                    )
-                )
-        else:
-            mismatch = codex_selection_mismatch_details(
-                completed.stdout,
-                request["peer_model"],
-                request["peer_effort"],
-            )
-            if mismatch is not None:
-                if raw_output_path is not None:
-                    STRICT_JSON.write_text(raw_output_path, completed.stdout)
-                return with_mutation_check(
-                    failure(
-                        "model_mismatch",
-                        mismatch["reason"],
-                        request,
-                        mismatch,
-                    )
-                )
-
-        if request["peer"] == "claude":
-            output_text = completed.stdout
-        elif output_path.exists():
-            if output_path.stat().st_size > MAX_PEER_OUTPUT_BYTES:
-                return with_mutation_check(
-                    failure(
-                        "output_too_large",
-                        "Codex output artifact exceeded the finite runtime capture limit.",
-                        request,
-                        {
-                            "output_bytes": output_path.stat().st_size,
-                            "limit_bytes": MAX_PEER_OUTPUT_BYTES,
-                        },
-                    )
-                )
-            try:
-                output_text = STRICT_JSON.read_text(
-                    output_path,
-                    max_bytes=MAX_PEER_OUTPUT_BYTES,
-                )
-            except (OSError, ValueError) as exc:
-                return with_mutation_check(
-                    failure(
-                        "output_artifact_invalid",
-                        "Codex output artifact could not be read within the finite UTF-8 contract.",
-                        request,
-                        str(exc),
-                    )
-                )
-        else:
-            return with_mutation_check(
-                failure(
-                    "missing_output_artifact",
-                    f"Codex did not write the required --output-last-message artifact: {output_path}",
-                    request,
-                )
-            )
-        if raw_output_path is not None:
-            STRICT_JSON.write_text(raw_output_path, output_text)
-        normalization_output_path = normalization_output_path or default_normalization_path(raw_output_path)
-        expected_source = "structured_output" if request["peer"] == "claude" else "direct_json"
-        try:
-            normalized = normalize_json_payload(output_text.strip(), expected_source)
-            report = normalized.report
-        except ValueError as exc:
-            failure_kind = "noncanonical_output" if isinstance(exc, PeerOutputContractError) else "invalid_json"
-            if normalization_output_path is not None:
-                write_provider_normalization(
-                    normalization_output_path,
-                    {
-                        "schema_version": "2.0",
-                        "source": "none",
-                        "input_bytes": len(output_text.encode("utf-8")),
-                        "warnings": [],
-                        "validation_status": failure_kind,
-                        "error": str(exc),
-                    },
-                )
-            return with_mutation_check(failure(failure_kind, f"Peer output violated its contract: {exc}", request))
-
-        try:
-            validate_peer_report(report)
-        except PeerReportValidationError as exc:
-            if normalization_output_path is not None:
-                metadata = dict(normalized.metadata)
-                metadata["validation_status"] = "schema_validation_failed"
-                metadata["error"] = str(exc)
-                write_provider_normalization(normalization_output_path, metadata)
-            return with_mutation_check(failure("schema_validation_failed", str(exc), request, report))
-
-        report, target_was_canonicalized = canonicalize_peer_report_target(report, request)
-        try:
-            validate_peer_report_matches_request(report, request)
-        except PeerReportValidationError as exc:
-            if normalization_output_path is not None:
-                metadata = dict(normalized.metadata)
-                metadata["validation_status"] = "peer_report_mismatch"
-                metadata["error"] = str(exc)
-                write_provider_normalization(normalization_output_path, metadata)
-            return with_mutation_check(failure("peer_report_mismatch", str(exc), request, report))
-
-        if normalization_output_path is not None:
-            metadata = dict(normalized.metadata)
-            if target_was_canonicalized:
-                metadata["warnings"] = [
-                    *metadata.get("warnings", []),
-                    "target_xml_entities_canonicalized",
-                ]
-            metadata["validation_status"] = "ok"
-            write_provider_normalization(normalization_output_path, metadata)
-
-        return with_mutation_check(report)
 
 
 def run_request(

@@ -20,17 +20,17 @@ class RegistryOwnershipTests(TestCase):
         host = fixtures.load_host()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            with mock.patch.object(host, 'workspace_guard_path', return_value=root / 'guard.json'):
-                host.acquire_workspace_guard(root, 'reuse', 'codex', root / 'run')
-                owner = host.read_workspace_guard(root, 'reuse')[1]
-                host.release_workspace_guard(root, 'reuse', owner=owner)
-                host.acquire_workspace_guard(root, 'reuse', 'codex', root / 'run')
+            with mock.patch.object(host.REGISTRY, 'workspace_guard_path', return_value=root / 'guard.json'):
+                host.REGISTRY.acquire_workspace_guard(root, 'reuse', 'codex', root / 'run')
+                owner = host.REGISTRY.read_workspace_guard(root, 'reuse')[1]
+                host.REGISTRY.release_workspace_guard(root, 'reuse', owner=owner)
+                host.REGISTRY.acquire_workspace_guard(root, 'reuse', 'codex', root / 'run')
                 before = (root / 'guard.json').read_bytes()
                 for action in (
-                    lambda: host.release_workspace_guard(root, 'reuse', owner=owner),
-                    lambda: host.update_workspace_guard(root, 'reuse', owner=owner,
+                    lambda: host.REGISTRY.release_workspace_guard(root, 'reuse', owner=owner),
+                    lambda: host.REGISTRY.update_workspace_guard(root, 'reuse', owner=owner,
                         phase='peer_running', peer_identity=fixtures.valid_process_identity()),
-                    lambda: host.require_workspace_guard_owner(root, 'reuse', owner=owner),
+                    lambda: host.REGISTRY.require_workspace_guard_owner(root, 'reuse', owner=owner),
                 ):
                     with self.assertRaisesRegex(SystemExit, 'owner mismatch'):
                         action()
@@ -42,10 +42,10 @@ class RegistryOwnershipTests(TestCase):
             root = Path(tmp)
             run = root / 'runs' / fixtures.request()['run_id']
             guard = root / 'guard.json'
-            with (mock.patch.object(host, 'workspace_guard_path', return_value=guard),
+            with (mock.patch.object(host.REGISTRY, 'workspace_guard_path', return_value=guard),
                   mock.patch.object(host, 'wait_for_peer_report', return_value='report_ready'),
                   mock.patch.object(host, 'record_host_workspace_mutation', return_value=None),
-                  mock.patch.object(host.SAFETY, 'process_group_alive', return_value=False),
+                  mock.patch.object(host.CONFIG.SAFETY, 'process_group_alive', return_value=False),
                   redirect_stdout(io.StringIO())):
                 lifecycle.LifecycleAuditTests().prepare_run(host, root, run, guard)
                 common = [str(run), '--repo-root', str(root)]
@@ -53,7 +53,7 @@ class RegistryOwnershipTests(TestCase):
                 host.write_json(run / 'host-synthesis.json', fixtures.valid_host_synthesis(run_dir=run))
                 args = host.build_parser().parse_args(['complete', *common])
                 host.complete(args)
-                host.acquire_workspace_guard(root, run.name, 'claude', root / 'elsewhere' / run.name)
+                host.REGISTRY.acquire_workspace_guard(root, run.name, 'claude', root / 'elsewhere' / run.name)
                 before = guard.read_bytes()
                 with self.assertRaisesRegex(SystemExit, 'owner mismatch'):
                     host.complete(args)
@@ -65,9 +65,9 @@ class RegistryOwnershipTests(TestCase):
             root = Path(tmp)
             run = root / 'runs' / fixtures.request()['run_id']
             guard = root / 'guard.json'
-            with (mock.patch.object(host, 'workspace_guard_path', return_value=guard),
+            with (mock.patch.object(host.REGISTRY, 'workspace_guard_path', return_value=guard),
                   mock.patch.object(host, 'process_alive', return_value=False),
-                  mock.patch.object(host.SAFETY, 'process_group_alive', return_value=False),
+                  mock.patch.object(host.CONFIG.SAFETY, 'process_group_alive', return_value=False),
                   mock.patch.object(host, 'record_cancel_workspace_mutation', return_value=None),
                   redirect_stdout(io.StringIO())):
                 lifecycle.LifecycleAuditTests().prepare_run(host, root, run, guard)
@@ -75,7 +75,7 @@ class RegistryOwnershipTests(TestCase):
                 args = host.build_parser().parse_args(['cancel', str(run), '--repo-root', str(root)])
                 host.cancel(args)
                 self.assertFalse(guard.exists())
-                host.acquire_workspace_guard(root, run.name, 'codex', root / 'other' / run.name)
+                host.REGISTRY.acquire_workspace_guard(root, run.name, 'codex', root / 'other' / run.name)
                 before = guard.read_bytes()
                 with self.assertRaisesRegex(SystemExit, 'owner mismatch'):
                     host.cancel(args)
@@ -85,49 +85,50 @@ class RegistryOwnershipTests(TestCase):
         host = fixtures.load_host()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            with mock.patch.object(host, 'workspace_guard_path', return_value=root / 'guard.json'):
-                host.acquire_workspace_guard(root, 'one', 'codex', root / 'one')
-                entries = host.read_workspace_guards(root)[1]
+            with mock.patch.object(host.REGISTRY, 'workspace_guard_path', return_value=root / 'guard.json'):
+                host.REGISTRY.acquire_workspace_guard(root, 'one', 'codex', root / 'one')
+                entries = host.REGISTRY.read_workspace_guards(root)[1]
                 owner = entries['one']
-                budget = host.registry_capacity_bytes(entries)
+                budget = host.REGISTRY.registry_capacity_bytes(entries)
                 identity = fixtures.valid_process_identity()
                 identity['start_time'] = 'x' * 3700
-                with mock.patch.object(host, 'WORKSPACE_GUARD_MAX_BYTES', budget):
+                with mock.patch.object(host.REGISTRY, 'WORKSPACE_GUARD_MAX_BYTES', budget):
                     with self.assertRaisesRegex(SystemExit, 'no capacity'):
-                        host.acquire_workspace_guard(root, 'two', 'claude', root / 'two')
+                        host.REGISTRY.acquire_workspace_guard(root, 'two', 'claude', root / 'two')
                     for phase in ('peer_running', 'ready_for_synthesis'):
-                        host.update_workspace_guard(root, 'one', owner=owner, phase=phase, peer_identity=identity)
+                        host.REGISTRY.update_workspace_guard(root, 'one', owner=owner, phase=phase, peer_identity=identity)
                     self.assertLess((root / 'guard.json').stat().st_size, budget)
-                    host.release_workspace_guard(root, 'one', owner=owner)
+                    host.REGISTRY.release_workspace_guard(root, 'one', owner=owner)
                 self.assertFalse((root / 'guard.json').exists())
 
     def test_start_validation_does_not_probe_other_launchers(self):
         host = fixtures.load_host()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            with mock.patch.object(host, 'workspace_guard_path', return_value=root / 'guard.json'):
-                host.acquire_workspace_guard(root, 'one', 'codex', root / 'one')
-                with mock.patch.object(host.SAFETY, 'process_identity_state', side_effect=AssertionError('unrelated probe')):
-                    host.require_workspace_guard_available(root)
-                    host.acquire_workspace_guard(root, 'two', 'claude', root / 'two')
+            with mock.patch.object(host.REGISTRY, 'workspace_guard_path', return_value=root / 'guard.json'):
+                host.REGISTRY.acquire_workspace_guard(root, 'one', 'codex', root / 'one')
+                with mock.patch.object(host.CONFIG.SAFETY, 'process_identity_state', side_effect=AssertionError('unrelated probe')):
+                    host.REGISTRY.require_workspace_guard_available(root)
+                    host.REGISTRY.acquire_workspace_guard(root, 'two', 'claude', root / 'two')
                 for state in ('unknown', 'matching'):
-                    with mock.patch.object(host.SAFETY, 'process_identity_state', return_value=state):
+                    with mock.patch.object(host.CONFIG.SAFETY, 'process_identity_state', return_value=state):
                         with self.assertRaisesRegex(SystemExit, 'proven dead'):
-                            host.recover_workspace_guard(root, 'one')
-                with mock.patch.object(host.SAFETY, 'process_identity_state', return_value='dead_or_replaced'):
-                    host.recover_workspace_guard(root, 'one')
-                self.assertEqual(set(host.read_workspace_guards(root)[1]), {'two'})
+                            host.REGISTRY.recover_workspace_guard(root, 'one')
+                with mock.patch.object(host.CONFIG.SAFETY, 'process_identity_state', return_value='dead_or_replaced'):
+                    host.REGISTRY.recover_workspace_guard(root, 'one')
+                self.assertEqual(set(host.REGISTRY.read_workspace_guards(root)[1]), {'two'})
 
     def test_independent_processes_keep_all_registry_entries(self):
         host = fixtures.load_host()
         code = '''import importlib.util, sys
 from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]).parent))
 spec = importlib.util.spec_from_file_location('host', sys.argv[1])
 h = importlib.util.module_from_spec(spec); spec.loader.exec_module(h)
-r = Path(sys.argv[2]); h.workspace_guard_path = lambda _: r / 'guard.json'
-h.acquire_workspace_guard(r, sys.argv[3], 'codex', r / sys.argv[3])
-owner = h.read_workspace_guard(r, sys.argv[3])[1]
-h.update_workspace_guard(r, sys.argv[3], owner=owner, phase='peer_running', peer_identity=h.SAFETY.process_identity(__import__('os').getpid()))
+r = Path(sys.argv[2]); h.REGISTRY.workspace_guard_path = lambda _: r / 'guard.json'
+h.REGISTRY.acquire_workspace_guard(r, sys.argv[3], 'codex', r / sys.argv[3])
+owner = h.REGISTRY.read_workspace_guard(r, sys.argv[3])[1]
+h.REGISTRY.update_workspace_guard(r, sys.argv[3], owner=owner, phase='peer_running', peer_identity=h.CONFIG.SAFETY.process_identity(__import__('os').getpid()))
 '''
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -136,8 +137,8 @@ h.update_workspace_guard(r, sys.argv[3], owner=owner, phase='peer_running', peer
             for process in processes:
                 out, err = process.communicate(timeout=20)
                 self.assertEqual(process.returncode, 0, out + err)
-            with mock.patch.object(host, 'workspace_guard_path', return_value=root / 'guard.json'):
-                self.assertEqual(len(host.read_workspace_guards(root)[1]), 8)
+            with mock.patch.object(host.REGISTRY, 'workspace_guard_path', return_value=root / 'guard.json'):
+                self.assertEqual(len(host.REGISTRY.read_workspace_guards(root)[1]), 8)
 
     def test_malformed_cli_artifact_is_actionable_without_traceback(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -152,10 +153,10 @@ h.update_workspace_guard(r, sys.argv[3], owner=owner, phase='peer_running', peer
 
     def test_pending_adjudication_cannot_contain_authored_judgments(self):
         host = fixtures.load_host()
-        report = host.default_adjudicator_report(fixtures.request(), fixtures.valid_report())
+        report = host.ARTIFACTS.default_adjudicator_report(fixtures.request(), fixtures.valid_report())
         report['summary'] = 'A reviewer approved this.'
-        with self.assertRaisesRegex(host.ArtifactValidationError, 'unmodified runtime placeholder'):
-            host.validate_adjudicator_report(report, fixtures.request())
+        with self.assertRaisesRegex(host.ARTIFACTS.ArtifactValidationError, 'unmodified runtime placeholder'):
+            host.ARTIFACTS.validate_adjudicator_report(report, fixtures.request())
 
 
 class CompactWorkflowTests(TestCase):
@@ -167,10 +168,10 @@ class CompactWorkflowTests(TestCase):
         self.run = self.root / 'runs' / fixtures.request()['run_id']
         self.guard = self.root / 'guard.json'
         for patch in (
-            mock.patch.object(self.host, 'workspace_guard_path', return_value=self.guard),
+            mock.patch.object(self.host.REGISTRY, 'workspace_guard_path', return_value=self.guard),
             mock.patch.object(self.host, 'wait_for_peer_report', return_value='report_ready'),
             mock.patch.object(self.host, 'record_host_workspace_mutation', return_value=None),
-            mock.patch.object(self.host.SAFETY, 'process_group_alive', return_value=False),
+            mock.patch.object(self.host.CONFIG.SAFETY, 'process_group_alive', return_value=False),
         ):
             patch.start()
             self.addCleanup(patch.stop)
@@ -200,12 +201,12 @@ class CompactWorkflowTests(TestCase):
         authored = self.author(output)
         second = self.finish()
         self.assertEqual(output['synthesis_input'], second['synthesis_input'])
-        self.assertEqual(self.host.load_json(authored)['verdict'], 'pass')
+        self.assertEqual(self.host.ARTIFACTS.load_json(authored)['verdict'], 'pass')
         rendered = self.invoke('result', '--format', 'markdown', '--review', output['review_dir'])
         self.assertIn('Independent host pass.', rendered)
         self.assertIn('Peer Report', rendered)
         self.invoke('complete', '--synthesis', authored)
-        synthesis = self.host.load_json(self.run / 'host-synthesis.json')
+        synthesis = self.host.ARTIFACTS.load_json(self.run / 'host-synthesis.json')
         self.assertEqual(synthesis['run_id'], self.run.name)
         self.assertEqual(synthesis['claim_matrix_sha256'], output['claim_matrix_sha256'])
         self.assertTrue(synthesis['final_answer_ready'])
@@ -216,7 +217,7 @@ class CompactWorkflowTests(TestCase):
         previous = self.finish()
         authored = self.author(previous)
         original = authored.read_bytes()
-        report = self.host.load_json(self.run / 'peer-report.json')
+        report = self.host.ARTIFACTS.load_json(self.run / 'peer-report.json')
         report['summary'] = 'New evidence.'
         self.host.write_json(self.run / 'peer-report.json', report)
         for command, flags in [('result', ('--format','markdown','--review',previous['review_dir'])),
@@ -236,7 +237,7 @@ class CompactWorkflowTests(TestCase):
         result = self.finish()
         authored = self.author(result)
         receipt = authored.parent / 'context.json'
-        data = self.host.load_json(receipt)
+        data = self.host.ARTIFACTS.load_json(receipt)
         data['owner_token'] = '0' * 32
         self.host.write_json(receipt, data)
         with self.assertRaisesRegex(ValueError, 'receipt was modified'):
@@ -266,6 +267,6 @@ class CompactWorkflowTests(TestCase):
         path.write_text(json.dumps(payload))
         second = self.finish('--adjudicator', path)
         self.assertNotEqual(first['review_dir'], second['review_dir'])
-        saved = self.host.load_json(self.run / 'adjudicator-report.json')
+        saved = self.host.ARTIFACTS.load_json(self.run / 'adjudicator-report.json')
         self.assertEqual(saved['summary'], payload['summary'])
         self.invoke('complete', '--synthesis', self.author(second))

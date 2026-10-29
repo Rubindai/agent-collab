@@ -288,6 +288,10 @@ Peer prompts use one compact, escaped XML brief with role, outcome, evidence, bo
 
 The prompt is an instruction to the peer, not a sandbox or a higher-precedence security boundary. Provider-managed instructions and repository guidance may still load through the peer CLI. Runtime boundaries include launch validation, the workflow guard, provider permissions, and the disposable filesystem when selected.
 
+## Runtime organization
+
+The host command adapter coordinates launch, finalization, and cancellation. `host_config.py` owns settings and prerequisite resolution; `registry.py` owns locked run-instance transitions; `artifacts.py` validates and assembles evidence; `review.py` binds compact judgments to a captured revision. `peer.py` separates preparation, provider execution, output checks, normalization, and mutation verification. Provider waits remain outside the run-operation lock.
+
 ## Compact host inputs
 
 Hosts supply judgments in small JSON files; the runtime writes the canonical envelopes and hashes. Use `finish RUN --first-pass FILE`, optionally with `--helpers FILE` or `--adjudicator FILE`. `finish` returns a revision directory and a four-field synthesis input. Read it with `result RUN --format markdown --review DIR`, author the synthesis judgments, and close with `complete RUN --synthesis FILE`. Changed evidence invalidates the draft and requires another reviewed revision. See the [synthesis contract](tools/agent-collab/references/synthesize.md#artifact-shapes) for exact inputs.
