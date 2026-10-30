@@ -1116,6 +1116,9 @@ def ingest_finish_inputs(args: argparse.Namespace, run_dir: Path, request: dict[
         review = CONFIG.load_review_runtime()
         admission = review.verify_admissions(run_dir, process_info, replacing={item[1] for item in supplied})
         for option, filename, allowed, validate in supplied:
+            if option == "first_pass" and admission["reports"][filename] is None and (
+                    (run_dir / filename).exists() or (run_dir / "reviews").exists()):
+                raise ARTIFACTS.ArtifactValidationError("cannot re-admit an existing first pass without its original receipt")
             value = ARTIFACTS.load_json(getattr(args, option))
             required = allowed - ({"claims"} if option == "adjudicator" else set())
             if not required <= set(value) <= allowed:
@@ -2381,7 +2384,12 @@ def summarize_claude_auth(report: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def doctor(args: argparse.Namespace) -> int:
-    repo_root = CONFIG.canonical_repo_root(args.repo_root or CONFIG.default_repo_root())
+    requested_root = (args.repo_root or Path.cwd()).resolve()
+    root_error = None
+    try:
+        repo_root = CONFIG.canonical_repo_root(requested_root)
+    except SystemExit as exc:
+        repo_root, root_error = requested_root, str(exc)
     run_root = (args.run_root or CONFIG.default_run_root(repo_root)).resolve()
     peer_runtime = CONFIG.load_peer_runtime()
     resolved = CONFIG.resolve_settings(repo_root)
@@ -2459,11 +2467,18 @@ def doctor(args: argparse.Namespace) -> int:
         if doctor_workspace_mode == "isolated" else
         {"status": "not_required", "backend": None, "details": "direct workspace mode"}
     )
+    namespace_check = {"ok": True, "value": "not_required"}
+    if sys.platform.startswith("linux"):
+        try:
+            namespace_check["value"] = CONFIG.SAFETY.pid_namespace()
+        except OSError as exc:
+            namespace_check = {"ok": False, "value": "/proc/self/ns/pid", "error": str(exc)}
 
     checks = {
-        "repo_root": {"ok": repo_root.exists(), "value": str(repo_root)},
+        "repo_root": {"ok": root_error is None, "value": str(repo_root), "error": root_error},
         "run_root": {"ok": run_root.exists() or path_is_creatable(run_root), "value": str(run_root)},
         "python": {"ok": sys.version_info >= (3, 11), "value": sys.version.split()[0]},
+        "pid_namespace": namespace_check,
         "platform": {
             "ok": CONFIG.is_supported_platform(),
             "value": {"os_name": os.name, "platform": sys.platform, "supported": ["Linux", "macOS", "Windows"]},
@@ -2600,7 +2615,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     start_parser.add_argument("--run-id")
     start_parser.add_argument("--run-root", type=Path)
-    start_parser.add_argument("--repo-root", type=Path)
+    start_parser.add_argument("--repo-root", type=Path, help="Workspace directory; Git subdirectories use the whole worktree.")
     start_parser.set_defaults(func=start)
 
     availability_parser = sub.add_parser(

@@ -32,12 +32,17 @@
             "pgid": {"type": "integer", "minimum": 1},
             "boot_id": {"type": "string", "minLength": 1},
             "start_time": {"type": "string", "minLength": 1},
-            "pid_namespace": {"type": "string", "pattern": "^pid:\\[[0-9]+\\]$"}
+            "pid_namespace": {"type": "string", "pattern": "^pid:\\[[0-9]+\\]$"},
+            "ps_format": {"const": "utc_c_v1"}
           },
           "allOf": [{
             "if": {"properties": {"kind": {"const": "linux_proc"}}},
             "then": {"required": ["pid_namespace"]},
             "else": {"not": {"required": ["pid_namespace"]}}
+          }, {
+            "if": {"properties": {"kind": {"const": "posix_ps"}}},
+            "then": {"required": ["ps_format"]},
+            "else": {"not": {"required": ["ps_format"]}}
           }]
         }
       ]

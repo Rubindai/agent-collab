@@ -1408,6 +1408,8 @@ def normalize_json_payload(text: str, expected_source: str) -> NormalizedPeerOut
 
 
 def validate_peer_report(report: dict[str, Any]) -> None:
+    if not isinstance(report, dict):
+        raise PeerReportValidationError("peer report must be an object")
     unknown = set(report) - TOP_LEVEL_KEYS
     if unknown:
         raise PeerReportValidationError(f"unknown top-level keys: {sorted(unknown)}")
@@ -1416,15 +1418,15 @@ def validate_peer_report(report: dict[str, Any]) -> None:
         raise PeerReportValidationError(f"missing required keys: {sorted(missing)}")
     if report["schema_version"] != "2.0":
         raise PeerReportValidationError("schema_version must be 2.0; legacy peer reports are not supported")
-    if report["origin"] not in ORIGINS or report["host"] not in ORIGINS or report["peer"] not in ORIGINS:
+    if any(not isinstance(report[key], str) or report[key] not in ORIGINS for key in ("origin", "host", "peer")):
         raise PeerReportValidationError("origin, host, and peer must be claude or codex")
     if report["origin"] != report["host"] or report["host"] == report["peer"]:
         raise PeerReportValidationError("origin must equal host and host must differ from peer")
-    if report["mode"] not in MODES:
+    if not isinstance(report["mode"], str) or report["mode"] not in MODES:
         raise PeerReportValidationError("invalid mode")
-    if report["status"] not in {"ok", "peer_failed"}:
+    if not isinstance(report["status"], str) or report["status"] not in {"ok", "peer_failed"}:
         raise PeerReportValidationError("invalid status")
-    if report["verdict"] not in VERDICTS:
+    if not isinstance(report["verdict"], str) or report["verdict"] not in VERDICTS:
         raise PeerReportValidationError("invalid verdict")
     for key in ("run_id", "target", "summary"):
         if not isinstance(report[key], str):
@@ -1447,9 +1449,9 @@ def validate_peer_report(report: dict[str, Any]) -> None:
         for key in ("severity", "title", "details", "files", "recommendation", "confidence"):
             if key not in finding:
                 raise PeerReportValidationError(f"finding missing {key}")
-        if finding["severity"] not in {"critical", "high", "medium", "low", "info"}:
+        if not isinstance(finding["severity"], str) or finding["severity"] not in {"critical", "high", "medium", "low", "info"}:
             raise PeerReportValidationError("invalid finding severity")
-        if finding["confidence"] not in {"high", "medium", "low"}:
+        if not isinstance(finding["confidence"], str) or finding["confidence"] not in {"high", "medium", "low"}:
             raise PeerReportValidationError("invalid finding confidence")
         for key in ("title", "details"):
             if not isinstance(finding[key], str):
@@ -1469,7 +1471,7 @@ def validate_peer_report(report: dict[str, Any]) -> None:
                 raise PeerReportValidationError(f"claim missing {key}")
         if not isinstance(claim["claim"], str):
             raise PeerReportValidationError("claim claim must be a string")
-        if claim.get("status") not in CLAIM_STATUSES:
+        if not isinstance(claim.get("status"), str) or claim["status"] not in CLAIM_STATUSES:
             raise PeerReportValidationError("invalid claim status")
         if not isinstance(claim["evidence"], str):
             raise PeerReportValidationError("claim evidence must be a string")

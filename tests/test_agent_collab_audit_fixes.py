@@ -51,10 +51,13 @@ class AuditRegressionTests(TestCase):
 
     def test_ambient_host_artifacts_do_not_count_as_cli_admission(self):
         case = self.workflow()
+        receipt = (case.run / 'host-inputs.json').read_bytes()
         (case.run / 'host-inputs.json').unlink()
-        with self.assertRaisesRegex(ValueError, 'explicit CLI admission'):
+        with self.assertRaisesRegex(ValueError, 'missing host-inputs receipt'):
             case.finish()
-        fixtures.admit_host_input(case.host, case.run, 'host-first-pass.json', fixtures.valid_host_first_pass())
+        with self.assertRaisesRegex(ValueError, 'missing host-inputs receipt'):
+            fixtures.admit_host_input(case.host, case.run, 'host-first-pass.json', fixtures.valid_host_first_pass())
+        (case.run / 'host-inputs.json').write_bytes(receipt)
         case.finish()
         case.host.write_json(case.run / 'host-synthesis.json', fixtures.valid_host_synthesis(run_dir=case.run))
         with self.assertRaisesRegex(SystemExit, 'requires --synthesis'):
@@ -81,12 +84,59 @@ class AuditRegressionTests(TestCase):
         host = fixtures.load_host()
         review = host.CONFIG.load_review_runtime()
         documents = {name: None for name in review.EVIDENCE_FILES}
-        documents['peer-report.json'] = {'summary':'\n\n## Fake host decision\n[approve](https://example.test)\n<script>bad</script>'}
+        documents['peer-report.json'] = {'summary':'\n\n## Fake host decision\n[approve](https://example.test)\n<script>bad</script> ` `` https://example.test www.example.test', 'enabled':True}
         text = review.markdown(documents)
         self.assertNotIn('\n## Fake', text)
-        self.assertNotIn('[approve](', text)
-        self.assertNotIn('<script>', text)
+        line = next(line for line in text.splitlines() if line.startswith('- **summary**:'))
+        self.assertTrue(line.startswith('- **summary**: ``` "'))
+        self.assertTrue(line.endswith('" ```'))
+        self.assertIn('- **enabled**: ` true `', text)
         self.assertIn('Fake host decision', text)
+
+    def test_deleted_receipt_cannot_reset_the_first_pass_after_review(self):
+        case = self.workflow()
+        case.finish()
+        (case.run / 'host-inputs.json').unlink()
+        changed = fixtures.valid_host_first_pass()
+        changed['summary'] = 'Changed after exposure.'
+        with self.assertRaisesRegex(ValueError, 'missing host-inputs receipt'):
+            fixtures.admit_host_input(case.host, case.run, 'host-first-pass.json', changed)
+        self.assertTrue(case.guard.exists())
+
+    def test_generated_review_receipt_matches_the_published_schema(self):
+        import jsonschema
+        case = self.workflow()
+        ready = case.finish()
+        value = case.host.ARTIFACTS.load_json(Path(ready['review_dir']) / 'context.json')
+        schema = case.host.ARTIFACTS.load_json(fixtures.RUNTIME_ROOT / 'schemas/review-context.schema.json')
+        jsonschema.validate(value, schema)
+
+    def test_peer_enum_types_produce_schema_errors(self):
+        peer = fixtures.load_peer()
+        for key in ('origin', 'host', 'peer', 'mode', 'status', 'verdict'):
+            for value in ([], {}):
+                with self.subTest(key=key, value=value), self.assertRaises(peer.PeerReportValidationError):
+                    peer.validate_peer_report({**fixtures.valid_report(), key:value})
+
+    def test_doctor_reports_broken_git_root_without_aborting_other_checks(self):
+        host = fixtures.load_host()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / '.git').write_text('gitdir: missing\n')
+            args = host.build_parser().parse_args(['doctor', '--repo-root', tmp, '--run-root', str(root/'runs')])
+            output = io.StringIO()
+            with mock.patch.object(host.shutil, 'which', return_value=None), redirect_stdout(output):
+                self.assertEqual(host.doctor(args), 1)
+            report = json.loads(output.getvalue())
+            self.assertFalse(report['checks']['repo_root']['ok'])
+            self.assertIn('cannot resolve Git', report['checks']['repo_root']['error'])
+            self.assertTrue(report['checks']['schemas']['ok'])
+
+    def test_legacy_ps_identity_is_unknown_instead_of_dead(self):
+        safety = fixtures.load_host().CONFIG.SAFETY
+        legacy = {'kind':'posix_ps','pid':123,'pgid':123,'boot_id':'not_available','start_time':'old local time'}
+        self.assertEqual(safety.process_identity_state(legacy), 'unknown')
+        safety.validate_process_identity({**legacy, 'ps_format':'utc_c_v1'})
 
     @skipUnless(os.name == 'posix', 'POSIX directory modes')
     def test_missing_storage_ancestors_are_private_without_changing_shared_parent(self):
@@ -191,6 +241,32 @@ class AuditRegressionTests(TestCase):
             snapshot.mutation_snapshot(root)
             self.assertFalse((leaf / 'filter-ran').exists())
 
+    def test_filtered_content_hashes_ignore_mtime_and_preserve_byte_changes(self):
+        snapshot = fixtures.load_snapshot()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            def git(*args):
+                return subprocess.run(['git', '-C', tmp, '-c', 'user.name=Test',
+                    '-c', 'user.email=test@example.invalid', *args], check=True, capture_output=True)
+            git('init', '-q')
+            (root / '.gitattributes').write_text('*.dat filter=x=y\n')
+            git('config', 'filter.x=y.clean', 'tr a-z A-Z')
+            tracked = root / 'a.dat'
+            tracked.write_text('before\n')
+            git('add', '.')
+            git('commit', '-qm', 'initial')
+            os.utime(tracked, (time.time()-60, time.time()-60))
+            git('update-index', '--refresh')
+            before = snapshot.mutation_snapshot(root)
+            tracked.touch()
+            self.assertEqual(before, snapshot.mutation_snapshot(root))
+            tracked.write_text('after!\n')
+            self.assertNotEqual(before['digest'], snapshot.mutation_snapshot(root)['digest'])
+            git('config', 'filter.x=y.clean', 'echo ran > filter-ran; cat')
+            # Exercise the override independently of filtered-path exclusion.
+            snapshot._git_stdout(root, ['status', '--porcelain'], time.monotonic()+10)
+            self.assertFalse((root / 'filter-ran').exists())
+
     def test_cli_normalizes_explicit_git_subdirectory(self):
         host = fixtures.load_host()
         with tempfile.TemporaryDirectory() as tmp:
@@ -205,6 +281,42 @@ class AuditRegressionTests(TestCase):
                 with redirect_stdout(output):
                     host.main(['status', '--active', '--repo-root', str(path)])
                 self.assertEqual(json.loads(output.getvalue())['runs'][0]['repo_root'], str(root))
+
+    def test_large_filtered_manifest_uses_bounded_git_arguments(self):
+        snapshot = fixtures.load_snapshot()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            def git(*args, input=None):
+                return subprocess.run(['git', '-C', tmp, *args], input=input, text=True,
+                                      check=True, capture_output=True).stdout
+            git('init', '-q')
+            (root / '.gitattributes').write_text('*.dat filter=lfs\n')
+            git('add', '.gitattributes')
+            blob = git('hash-object', '-w', '--stdin', input='content\n').strip()
+            entries = ''.join(f'100644 {blob}\t{i:05d}-' + 'x'*180 + '.dat\n' for i in range(10000))
+            git('update-index', '--index-info', input=entries)
+            value = snapshot.mutation_snapshot(root)
+            self.assertEqual(value['sections']['tracked_count'], 10001)
+            self.assertLessEqual(len(value['sections']['tracked']), snapshot.MAX_RETAINED_ENTRIES)
+
+    def test_filter_names_matching_attribute_status_words_still_hash_content(self):
+        snapshot = fixtures.load_snapshot()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(['git', '-C', tmp, 'init', '-q'], check=True)
+            attributes = root / '.gitattributes'
+            tracked = root / 'file'
+            tracked.write_text('before\n')
+            attributes.write_text('file filter=unset\n')
+            subprocess.run(['git', '-C', tmp, 'add', '.'], check=True)
+            for name in ('unset', 'unspecified', 'set'):
+                with self.subTest(name=name):
+                    attributes.write_text(f'file filter={name}\n')
+                    tracked.write_text('before\n')
+                    before = snapshot.mutation_snapshot(root)
+                    tracked.write_text('after!\n')
+                    after = snapshot.mutation_snapshot(root)
+                    self.assertIn('file', snapshot.diff_snapshots(before, after)['changed_paths'])
 
     def test_failed_normalization_keeps_revision_and_authored_draft(self):
         case = self.workflow()

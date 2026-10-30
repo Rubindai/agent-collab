@@ -43,7 +43,7 @@ Save independent host analysis before opening peer output:
 {"summary": "Independent host analysis.", "claims": [{"claim": "A candidate finding.", "status": "plausible_unverified", "evidence": "File, command, or source evidence."}]}
 ```
 
-Admit it with `host.py finish RUN --first-pass first-pass.input.json`. Optional `--helpers helpers.input.json` accepts `{"reports": [{"name": "reviewer", "summary": "Independent summary.", "claims": []}]}` subject to the resolved helper bound. The runtime records CLI admission hashes in `host-inputs.json`; writing canonical reports directly does not admit judgments. The first pass is immutable after admission. Put later conclusions in synthesis; helper and advisory reports can be updated through their explicit flags, producing new evidence revisions.
+Admit it with `host.py finish RUN --first-pass first-pass.input.json`. Optional `--helpers helpers.input.json` accepts `{"reports": [{"name": "reviewer", "summary": "Independent summary.", "claims": []}]}` subject to the resolved helper bound. The runtime records CLI admission hashes in `host-inputs.json`; writing canonical reports directly does not admit judgments. The first pass is immutable after admission; a missing receipt alongside existing host evidence fails closed. Put later conclusions in synthesis; helper and advisory reports can be updated through their explicit flags, producing new evidence revisions.
 
 For enabled adjudication, save the actual advisory report without schema or run metadata:
 
@@ -65,7 +65,7 @@ Each claim uses exactly `claim`, `status`, and `evidence`; evidence is one strin
 
 The revision receipt binds the exact run instance and all admitted source reports, claim matrix, normalization, and workspace evidence. It contains hashes of complete reports, so changes to findings, severity, summaries, or other evidence invalidate the revision. Every peer finding also appears as a `plausible_unverified` matrix row with severity, confidence, details, files, and recommendation.
 
-`complete` rebuilds the matrix and checks current mutation evidence. Changed evidence keeps the guard active: rerun `finish`, inspect the new revision, and author a new synthesis. Repeated `finish` calls preserve an existing draft when evidence is unchanged; changed evidence gets another directory. Never copy old judgments into a new revision without reviewing it. The runtime checks artifact bindings, not the host's actual reading history or whether every finding has a disposition. Rendered source strings are quoted and escaped so they cannot become report headings or links.
+`complete` rebuilds the matrix and checks current mutation evidence. Changed evidence keeps the guard active: rerun `finish`, inspect the new revision, and author a new synthesis. Repeated `finish` calls preserve an existing draft when evidence is unchanged; changed evidence gets another directory. Never copy old judgments into a new revision without reviewing it. The runtime checks artifact bindings, not the host's actual reading history or whether every finding has a disposition. Rendered source values use literal code spans so headings, HTML and automatic links remain source text.
 
 ## Evidence boundaries
 
@@ -76,8 +76,10 @@ counts with bounded path samples; changes beyond a sample remain detectable, but
 may be unavailable. The scan itself still reads the included file contents and can hit its
 finite deadline. Snapshot Git commands disable configured clean/process filters, including
 drivers defined only in initialized nested submodules, plus fsmonitor,
-external diff and textconv; they compare unfiltered content and include `.git/info/attributes`
-among the selected Git-control surfaces. After snapshots may be larger.
+external diff and textconv. Filter-attributed paths use raw byte hashes rather than
+comparisons to filtered index blobs, so mtime-only changes do not create mutation evidence.
+Initialized submodules contribute separate snapshots; `.git/info/attributes` is among the
+selected Git-control surfaces. After snapshots may be larger.
 Isolated mode uses a small boundary receipt instead of reading file contents. Its writable
 overlay is discarded after the provider and wrapper are quiescent. Provider outputs return
 through a private temporary directory and only the provider credential file is bound through;

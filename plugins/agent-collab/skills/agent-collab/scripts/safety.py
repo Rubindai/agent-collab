@@ -180,6 +180,7 @@ def process_identity(pid: int) -> dict[str, Any]:
         "pgid": pgid,
         "boot_id": "not_available",
         "start_time": started,
+        "ps_format": "utc_c_v1",
     }
 
 
@@ -202,9 +203,12 @@ def identity_is_foreign(value: Mapping[str, Any]) -> bool:
 def validate_process_identity(value: Any) -> None:
     if not isinstance(value, dict) or not isinstance(value.get("kind"), str) or value["kind"] not in PROCESS_IDENTITY_KINDS:
         raise ValueError("process identity kind is invalid")
-    keys = PROCESS_IDENTITY_KEYS | ({"pid_namespace"} if value["kind"] == "linux_proc" else set())
+    keys = PROCESS_IDENTITY_KEYS | ({"pid_namespace"} if value["kind"] == "linux_proc"
+                                   else {"ps_format"} if value["kind"] == "posix_ps" else set())
     if set(value) != keys:
         raise ValueError(f"process identity must contain exactly {sorted(keys)}")
+    if value["kind"] == "posix_ps" and value["ps_format"] != "utc_c_v1":
+        raise ValueError("process identity ps_format must identify UTC and C locale")
     if value["kind"] == "linux_proc" and (
         not isinstance(value["pid_namespace"], str)
         or re.fullmatch(r"pid:\[[0-9]+\]", value["pid_namespace"]) is None

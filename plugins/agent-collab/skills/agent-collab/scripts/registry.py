@@ -161,7 +161,7 @@ def _read_workspace_guards_unlocked(repo_root: Path) -> tuple[Path, dict[str, di
             if parsed["peer_identity"] is not None:
                 validate_guard_identity(parsed["peer_identity"])
         except (ValueError, TypeError) as exc:
-            raise SystemExit(f"invalid process identity for {run_id!r} in workspace guard at {path}: {exc}") from exc
+            raise SystemExit(f"invalid process identity for {run_id!r} in workspace guard at {path}: {exc}; close incompatible runs with the version that started them") from exc
         if parsed["phase"] == "starting" and parsed["peer_identity"] is not None:
             raise SystemExit(f"starting Agent Collab guard must not contain peer_identity for {run_id!r} at {path}")
         if parsed["phase"] != "starting" and parsed["peer_identity"] is None:
@@ -180,7 +180,7 @@ def registry_capacity_bytes(runs: dict[str, dict[str, Any]]) -> int:
     size = len((CONFIG.STRICT_JSON.dumps({"schema_version": WORKSPACE_GUARD_SCHEMA_VERSION, "runs": runs}) + "\n").encode("utf-8"))
     for entry in runs.values():
         current_identity_size = len(CONFIG.STRICT_JSON.dumps(entry["peer_identity"]).encode("utf-8"))
-        # Identities have six scalar fields. 128 also covers the additional
+        # Identities have at most seven scalar fields. 128 also covers the additional
         # indentation when the bounded object is nested inside the registry.
         size += WORKSPACE_GUARD_IDENTITY_MAX_BYTES + 128 - current_identity_size
         size += len("ready_for_synthesis") - len(entry["phase"])

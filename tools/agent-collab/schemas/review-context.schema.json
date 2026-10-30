@@ -51,7 +51,8 @@
         "adjudicator-report.json",
         "claim-matrix.json",
         "workspace-mutation.json",
-        "peer-normalization.json"
+        "peer-normalization.json",
+        "host-inputs.json"
       ],
       "properties": {
         "host-request.json": {
@@ -143,6 +144,17 @@
           ]
         },
         "peer-normalization.json": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "host-inputs.json": {
           "anyOf": [
             {
               "type": "string",

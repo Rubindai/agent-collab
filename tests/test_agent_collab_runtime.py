@@ -376,7 +376,7 @@ def valid_process_identity(pid=43210, pgid=43210):
         "pid": pid,
         "pgid": pgid,
         "boot_id": "test-boot-id",
-        **({"pid_namespace": os.readlink("/proc/self/ns/pid")} if local_kind == "linux_proc" else {}),
+        **({"pid_namespace": os.readlink("/proc/self/ns/pid")} if local_kind == "linux_proc" else {"ps_format": "utc_c_v1"}),
         "start_time": "12345",
     }
 

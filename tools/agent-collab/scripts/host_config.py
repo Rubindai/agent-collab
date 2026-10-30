@@ -198,6 +198,8 @@ def default_repo_root() -> Path:
 def canonical_repo_root(path: Path) -> Path:
     """Use one owner/storage identity for every directory in a Git worktree."""
     path = path.resolve()
+    if not path.is_dir():
+        raise SystemExit(f"repository path is not an existing directory: {path}")
     completed = run_git_probe(["rev-parse", "--show-toplevel"], cwd=path)
     if completed is not None and completed.returncode == 0 and completed.stdout.strip():
         return Path(completed.stdout.strip()).resolve()

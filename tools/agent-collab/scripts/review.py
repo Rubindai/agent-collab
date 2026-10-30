@@ -34,6 +34,8 @@ def admissions(run_dir: Path, owner: dict[str, Any]) -> dict[str, Any]:
                 "reports": {name: None for name in HOST_INPUT_FILES}}
     path = run_dir / "host-inputs.json"
     if not path.exists():
+        if any((run_dir / name).exists() for name in HOST_INPUT_FILES) or (run_dir / "reviews").exists():
+            raise ValueError("missing host-inputs receipt alongside existing host evidence; refusing new admission")
         return expected
     value = JSON.load(path, max_bytes=16_384)
     if (not isinstance(value, dict) or set(value) != set(expected)
@@ -124,19 +126,23 @@ def markdown(documents: dict[str, Any]) -> str:
     def literal(value: Any) -> str:
         # Keep source strings on one physical line and escape Markdown syntax,
         # including HTML, so source text cannot impersonate report structure.
-        text = JSON.dumps(value, indent=None) if isinstance(value, str) else str(value)
-        return re.sub(r'([\\`*_{}\[\]<>()#|~])', r'\\\1', text)
+        text = JSON.dumps(value, indent=None)
+        fence = "`" * max(1, 1 + max((len(item) for item in re.findall(r'`+', text)), default=0))
+        return f"{fence} {text} {fence}"
+
+    def label(key: str) -> str:
+        return re.sub(r'([\\`*_{}\[\]<>()#|~])', r'\\\1', key.replace('_', ' '))
 
     def render(value: Any, indent: int = 0) -> None:
         prefix = "  " * indent
         if isinstance(value, dict):
             for key, item in value.items():
                 if isinstance(item, (dict, list)) and item:
-                    lines.append(f"{prefix}- **{literal(key.replace('_', ' '))}**:")
+                    lines.append(f"{prefix}- **{label(key)}**:")
                     render(item, indent + 1)
                 else:
                     text = literal(item) if item is not None else "none"
-                    lines.append(f"{prefix}- **{literal(key.replace('_', ' '))}**: " + text)
+                    lines.append(f"{prefix}- **{label(key)}**: " + text)
         elif isinstance(value, list):
             for i, item in enumerate(value, 1):
                 if isinstance(item, (dict, list)):

@@ -149,6 +149,7 @@ GIT_BASE_COMMAND = (
     "-c", "diff.autoRefreshIndex=false",
     "-c", "core.fsmonitor=false",
     "-c", "core.untrackedCache=false",
+    "-c", "diff.ignoreSubmodules=all",
 )
 
 
@@ -164,28 +165,28 @@ def _printable(value: str) -> str:
 
 
 def _git_filter_drivers(repo_root: Path, deadline: float) -> set[str]:
-    """Include initialized nested submodules before Git recursively reads them."""
-    drivers: set[str] = set()
-    pending = [repo_root]
-    visited: set[Path] = set()
-    while pending:
-        root = pending.pop().resolve()
-        if root in visited:
-            continue
-        visited.add(root)
-        result = _run_git(root, [
-            "config", "--null", "--name-only", "--get-regexp", r"^filter\..*\.(clean|process|required)$",
-        ], deadline)
-        if result.returncode not in {0, 1}:
-            raise RuntimeError(f"cannot inspect Git filter configuration: {result.stderr}")
-        drivers.update(key.rsplit(".", 1)[0] for key in result.stdout.split("\0") if key)
-        index = _git_stdout(root, ["ls-files", "--stage", "-z"], deadline)
-        for entry in index.split("\0"):
-            if entry.startswith("160000 ") and "\t" in entry:
-                child = root / entry.split("\t", 1)[1]
-                if (child / ".git").exists():
-                    pending.append(child)
-    return drivers
+    result = _run_git(repo_root, [
+        "config", "--null", "--name-only", "--get-regexp", r"^filter\..*\.(clean|process|required)$",
+    ], deadline)
+    if result.returncode not in {0, 1}:
+        raise RuntimeError(f"cannot inspect Git filter configuration: {result.stderr}")
+    return {key.rsplit(".", 1)[0] for key in result.stdout.split("\0") if key}
+
+
+def _git_filtered_paths(repo_root: Path, deadline: float) -> set[str]:
+    paths = set(_git_stdout(repo_root, ["ls-files", "-z"], deadline).split("\0"))
+    unfiltered = set(_git_stdout(repo_root, ["ls-files", "-z", *_git_content_pathspecs(repo_root, None)], deadline).split("\0"))
+    # Attribute selectors distinguish an unset attribute from a driver
+    # literally named "unset" or "unspecified"; check-attr text does not.
+    return paths - unfiltered
+
+
+def _git_content_pathspecs(repo_root: Path, ignored_paths: Iterable[Path] | None) -> list[str]:
+    # Raw worktree bytes cannot be compared to clean-filtered index blobs.
+    # The tracked manifest hashes these paths instead, independent of mtimes.
+    # Fixed-size positive selectors avoid one argv entry per filtered file.
+    return ["--", ":(attr:!filter)**", ":(attr:-filter)**",
+            *_git_pathspecs(repo_root, ignored_paths)[2:]]
 
 
 def _start_git(args: list[str], *, deadline: float | None = None, **kwargs: Any) -> subprocess.Popen[Any]:
@@ -197,13 +198,17 @@ def _start_git(args: list[str], *, deadline: float | None = None, **kwargs: Any)
     wrapper's job still stops them.
     """
 
-    overrides: list[str] = []
     if args and args[0] in {"status", "diff"}:
         drivers = _git_filter_drivers(Path(kwargs["cwd"]), _snapshot_deadline(deadline))
-        for driver in sorted(drivers):
-            overrides.extend(["-c", f"{driver}.clean=", "-c", f"{driver}.process=",
-                              "-c", f"{driver}.required=false"])
-    command = [*GIT_BASE_COMMAND, *overrides, *args]
+        pairs = [(f"{driver}.{key}", value) for driver in sorted(drivers)
+                 for key, value in (("clean", ""), ("process", ""), ("required", "false"))]
+        # Separate keys/values handle '=' in a legal filter subsection name.
+        env = dict(kwargs.get("env") or _git_env())
+        env["GIT_CONFIG_COUNT"] = str(len(pairs))
+        for i, (key, value) in enumerate(pairs):
+            env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"] = key, value
+        kwargs["env"] = env
+    command = [*GIT_BASE_COMMAND, *args]
     if deadline is not None:
         _remaining_seconds(deadline)
     if os.name == "nt":
@@ -563,19 +568,22 @@ def _git_tracked_entries(
     repo_root: Path,
     ignored_paths: Iterable[Path] | None,
     deadline: float,
+    filtered_paths: set[str],
 ) -> dict[str, str]:
     """Record working-tree metadata Git status cannot see.
 
     Every tracked path contributes its type and permission bits, which catches
     mode-only changes Git does not track. Paths Git deliberately skips
-    (assume-unchanged or skip-worktree) also contribute a content hash.
+    (assume-unchanged or skip-worktree), and filtered files, contribute raw
+    content hashes. Initialized submodules contribute their own snapshot.
     """
 
     repo_root = _resolve(repo_root)
-    output = _git_stdout(repo_root, ["ls-files", "-v", "-z", *_git_pathspecs(repo_root, ignored_paths)], deadline)
+    output = _git_stdout(repo_root, ["ls-files", "--stage", "-v", "-z", *_git_pathspecs(repo_root, ignored_paths)], deadline)
     entries: dict[str, str] = {}
     for entry in (item for item in output.split("\0") if item):
-        tag, _, raw_path = entry.partition(" ")
+        metadata, _, raw_path = entry.partition("\t")
+        tag, mode, *_ = metadata.split(" ")
         path = repo_root / raw_path
         _remaining_seconds(deadline)
         try:
@@ -587,7 +595,11 @@ def _git_tracked_entries(
             entries[raw_path] = f"error error={type(exc).__name__}"
             continue
         signature = f"mode={stat.st_mode:o}"
-        if tag.islower() or tag == "S":
+        if mode == "160000" and not path.is_symlink() and (path / ".git").exists():
+            if Path(_git_stdout(path, ["rev-parse", "--show-toplevel"], deadline)).resolve() != path.resolve():
+                raise RuntimeError(f"submodule worktree root mismatch: {path}")
+            signature = f"submodule mode={stat.st_mode:o} digest={_git_snapshot(path, ignored_paths, deadline)['digest']}"
+        elif mode == "160000" or tag.islower() or tag == "S" or raw_path in filtered_paths:
             signature = f"{_path_signature(path, deadline)} tag={tag}"
         entries[raw_path] = signature
     return dict(sorted(entries.items()))
@@ -645,8 +657,8 @@ def _filesystem_entries(
     return dict(sorted(entries.items()))
 
 
-# Raw bytes, no textconv rewriting, and submodule content changes inline.
-GIT_DIFF_OPTIONS = ("--binary", "--no-ext-diff", "--no-textconv", "--submodule=diff")
+# Filtered paths use raw hashes; submodules are snapshotted separately.
+GIT_DIFF_OPTIONS = ("--binary", "--no-ext-diff", "--no-textconv", "--ignore-submodules=all")
 
 
 def _git_snapshot(
@@ -655,10 +667,12 @@ def _git_snapshot(
     deadline: float,
 ) -> dict[str, Any]:
     pathspecs = _git_pathspecs(repo_root, ignored_paths)
+    filtered_paths = _git_filtered_paths(repo_root, deadline)
+    content_pathspecs = _git_content_pathspecs(repo_root, ignored_paths)
     head = _git_head(repo_root, deadline)
     index = _git_output_digest(repo_root, ["ls-files", "--stage", "-v", "-z", *pathspecs], deadline)
     tracked, tracked_count, tracked_digest = _bounded_entries(
-        _git_tracked_entries(repo_root, ignored_paths, deadline)
+        _git_tracked_entries(repo_root, ignored_paths, deadline, filtered_paths)
     )
     untracked, untracked_count, untracked_digest = _bounded_entries(
         _git_untracked_entries(repo_root, ignored_paths, deadline)
@@ -670,11 +684,11 @@ def _git_snapshot(
         _git_control_entries(repo_root, deadline)
     )
     status, status_digest, status_truncated = _bounded_status(
-        _git_stdout(repo_root, ["status", "--porcelain=v1", "--untracked-files=no", *pathspecs], deadline),
+        _git_stdout(repo_root, ["status", "--porcelain=v1", "--untracked-files=no", "--ignore-submodules=all", *content_pathspecs], deadline),
         "\n",
     )
     status_z, status_z_digest, status_z_truncated = _bounded_status(
-        _git_stdout(repo_root, ["status", "--porcelain=v1", "-z", "--untracked-files=no", *pathspecs], deadline),
+        _git_stdout(repo_root, ["status", "--porcelain=v1", "-z", "--untracked-files=no", "--ignore-submodules=all", *content_pathspecs], deadline),
         "\0",
     )
     sections = {
@@ -701,8 +715,8 @@ def _git_snapshot(
         "status_z": status_z,
         "status_z_digest": status_z_digest,
         "status_z_truncated": status_z_truncated,
-        "diff": _git_output_digest(repo_root, ["diff", *GIT_DIFF_OPTIONS, *pathspecs], deadline),
-        "diff_cached": _git_output_digest(repo_root, ["diff", "--cached", *GIT_DIFF_OPTIONS, *pathspecs], deadline),
+        "diff": _git_output_digest(repo_root, ["diff", *GIT_DIFF_OPTIONS, *content_pathspecs], deadline),
+        "diff_cached": _git_output_digest(repo_root, ["diff", "--cached", *GIT_DIFF_OPTIONS, *content_pathspecs], deadline),
     }
     digest = _digest_lines(
         [
@@ -903,7 +917,7 @@ def snapshot_text(
     if snapshot["mode"] == "isolated":
         lines.append("Host workspace is outside the disposable peer overlay; no content scan was performed.")
     elif snapshot["mode"] == "git":
-        pathspecs = _git_pathspecs(repo_root, ignored_paths)
+        pathspecs = _git_content_pathspecs(repo_root, ignored_paths)
         status = snapshot["sections"]["status"]
         diff_names, _, diff_names_truncated = _bounded_status(
             _git_stdout(repo_root, ["diff", "--name-status", *pathspecs], effective_deadline), "\n"
