@@ -2,7 +2,6 @@
 from __future__ import annotations
 import argparse
 import hashlib
-import importlib.util
 import json
 import os
 import re
@@ -11,6 +10,15 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+import peer as PEER
+import availability as AVAILABILITY
+import safety as SAFETY
+import strict_json as STRICT_JSON
+import snapshot as SNAPSHOT
+import isolation as ISOLATION
+import review as REVIEW
+import state as STATE
+
 
 ORIGINS = {"claude", "codex"}
 
@@ -203,7 +211,7 @@ def canonical_repo_root(path: Path) -> Path:
     completed = run_git_probe(["rev-parse", "--show-toplevel"], cwd=path)
     if completed is not None and completed.returncode == 0 and completed.stdout.strip():
         return Path(completed.stdout.strip()).resolve()
-    if load_snapshot_runtime().has_git_metadata(path):
+    if SNAPSHOT.has_git_metadata(path):
         raise SystemExit(f"cannot resolve Git worktree root for {path}; check Git and repository metadata")
     return path
 
@@ -248,64 +256,6 @@ def require_peer_cli_version(peer: str) -> str:
 
 def configured_timeout_seconds(value: Any) -> float:
     return float(normalize_timeout(value))
-
-
-_SIBLING_MODULES: dict[str, Any] = {}
-
-
-def _load_sibling(filename: str, module_name: str) -> Any:
-    """Load a sibling runtime module once, so every caller shares its classes and state."""
-
-    cached = _SIBLING_MODULES.get(module_name)
-    if cached is not None:
-        return cached
-    path = runtime_dir() / filename
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load runtime module: {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    _SIBLING_MODULES[module_name] = module
-    return module
-
-
-def load_peer_runtime() -> Any:
-    return _load_sibling("peer.py", "agent_collab_peer")
-
-
-def load_availability_runtime() -> Any:
-    return _load_sibling("availability.py", "agent_collab_availability")
-
-
-def load_safety_runtime() -> Any:
-    return _load_sibling("safety.py", "agent_collab_safety_host")
-
-
-def load_strict_json_runtime() -> Any:
-    return _load_sibling("strict_json.py", "agent_collab_strict_json_host")
-
-
-SAFETY = load_safety_runtime()
-
-
-STRICT_JSON = load_strict_json_runtime()
-
-
-def load_snapshot_runtime() -> Any:
-    return _load_sibling("snapshot.py", "agent_collab_snapshot")
-
-
-def load_isolation_runtime() -> Any:
-    return _load_sibling("isolation.py", "agent_collab_isolation_host")
-
-
-def load_review_runtime() -> Any:
-    return _load_sibling("review.py", "agent_collab_review_runtime")
-
-
-def load_state_runtime() -> Any:
-    return _load_sibling("state.py", "agent_collab_state")
 
 
 def read_text_arg(value: str | None, file_value: Path | None) -> str:

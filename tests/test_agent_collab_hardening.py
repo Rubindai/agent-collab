@@ -99,7 +99,7 @@ class StateRootTests(TestCase):
 
 class IsolationBoundaryTests(TestCase):
     def isolation(self):
-        return fixtures.load_host().CONFIG.load_isolation_runtime()
+        return fixtures.load_host().CONFIG.ISOLATION
 
     def test_sandbox_command_does_not_bind_the_run_directory_writable(self):
         isolation = self.isolation()

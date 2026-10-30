@@ -6,14 +6,11 @@ or reads mutable evidence itself: the caller supplies one captured document set.
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import re
 from pathlib import Path
 from typing import Any
+import strict_json as JSON
 
-_spec = importlib.util.spec_from_file_location("agent_collab_review_json", Path(__file__).with_name("strict_json.py"))
-JSON = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(JSON)
 
 EVIDENCE_FILES = (
     "host-request.json", "peer-process.json", "host-first-pass.json", "peer-report.json",

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import os
 import sys
 import tempfile
@@ -12,12 +11,7 @@ from pathlib import Path
 from typing import Any
 
 sys.dont_write_bytecode = True
-_spec = importlib.util.spec_from_file_location(
-    "agent_collab_telemetry_strict_json", Path(__file__).with_name("strict_json.py")
-)
-assert _spec is not None and _spec.loader is not None
-STRICT_JSON = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(STRICT_JSON)
+import strict_json as STRICT_JSON
 
 MAX_CAPTURE_BYTES = 1_000_000
 MAX_OBSERVATIONS = 1024

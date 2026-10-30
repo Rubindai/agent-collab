@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-import importlib.util
 import math
 import os
 import sys
@@ -10,6 +9,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+import strict_json as STRICT_JSON
 
 
 STATE_SCHEMA_VERSION = "2.0"
@@ -86,20 +86,6 @@ JOB_OPTIONAL_KEYS = {
 }
 JOB_KEYS = JOB_REQUIRED_KEYS | JOB_OPTIONAL_KEYS
 RUN_ID_SAFE_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
-
-
-def load_strict_json_runtime() -> Any:
-    path = Path(__file__).resolve().parent / "strict_json.py"
-    spec = importlib.util.spec_from_file_location("agent_collab_strict_json_state", path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load strict JSON runtime: {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-STRICT_JSON = load_strict_json_runtime()
 
 
 def now_iso() -> str:

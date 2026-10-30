@@ -37,13 +37,13 @@ class LifecycleAuditTests(TestCase):
                 check=lambda *args, **kwargs: attestation,
                 validate_result=lambda *args, **kwargs: None,
             )
-            snapshot = host.CONFIG.load_snapshot_runtime()
+            snapshot = host.CONFIG.SNAPSHOT
             with (
                 mock.patch.object(host.REGISTRY, "workspace_guard_path", return_value=guard),
                 mock.patch.object(host.CONFIG, "resolve_settings", return_value=resolved),
                 mock.patch.object(host.CONFIG, "require_peer_cli_version", return_value="2.1.295"),
-                mock.patch.object(host.CONFIG, "load_availability_runtime", return_value=availability),
-                mock.patch.object(host.CONFIG, "load_snapshot_runtime", return_value=snapshot),
+                mock.patch.object(host.CONFIG, "AVAILABILITY", new=availability),
+                mock.patch.object(host.CONFIG, "SNAPSHOT", new=snapshot),
                 mock.patch.object(snapshot, "mutation_snapshot", return_value={
                     "schema_version": "2.0", "mode": "git", "repo_root": str(root),
                     "digest": "a" * 64, "sections": {"diff": "x" * host.ARTIFACTS.MAX_JSON_ARTIFACT_BYTES},
@@ -114,7 +114,7 @@ class LifecycleAuditTests(TestCase):
                 synthesis = fixtures.valid_host_synthesis()
                 synthesis["claim_matrix_sha256"] = host.ARTIFACTS.load_json(run_dir / "host-result.json")["claim_matrix_sha256"]
                 complete_args.synthesis = fixtures.author_synthesis_input(host, run_dir, synthesis)
-                if artifact_name in host.CONFIG.load_review_runtime().HOST_INPUT_FILES:
+                if artifact_name in host.CONFIG.REVIEW.HOST_INPUT_FILES:
                     fixtures.admit_host_input(host, run_dir, artifact_name, changed_report)
                 else:
                     host.write_json(run_dir / artifact_name, changed_report)
@@ -211,7 +211,7 @@ class LifecycleAuditTests(TestCase):
                 (run_dir / "peer-report.json").write_text("{malformed")
                 host.run_snapshot(root, run_dir / "before.snapshot", ignored_paths=[run_dir])
                 tracked.write_text("after")
-                snapshot = host.CONFIG.load_snapshot_runtime()
+                snapshot = host.CONFIG.SNAPSHOT
                 after = snapshot.mutation_snapshot(root, ignored_paths=[run_dir])
                 # A later snapshot can exceed the baseline reader limit.
                 after["padding"] = "x" * host.ARTIFACTS.MAX_JSON_ARTIFACT_BYTES
@@ -226,7 +226,7 @@ class LifecycleAuditTests(TestCase):
                     return write_once(path, data)
 
                 with (
-                    mock.patch.object(host.CONFIG, "load_snapshot_runtime", return_value=snapshot),
+                    mock.patch.object(host.CONFIG, "SNAPSHOT", new=snapshot),
                     mock.patch.object(snapshot, "mutation_snapshot", return_value=after),
                     mock.patch.object(host, "write_json_once", side_effect=interrupt_result),
                     self.assertRaises(KeyboardInterrupt),

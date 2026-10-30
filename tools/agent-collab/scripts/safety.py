@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
+from importlib import import_module as _load_sibling
 import json
 import os
 import re
@@ -95,19 +95,6 @@ code = subprocess.call(sys.argv[2:], stdin=0, stdout=1, stderr=2)
 # Keep NTSTATUS codes intact where SystemExit takes a signed 32-bit value.
 raise SystemExit(code - 2**32 if code >= 2**31 else code)
 """
-_SIBLINGS: dict[str, Any] = {}
-
-
-def _load_sibling(name: str) -> Any:
-    if name not in _SIBLINGS:
-        path = Path(__file__).resolve().parent / f"{name}.py"
-        spec = importlib.util.spec_from_file_location(f"agent_collab_{name}_safety", path)
-        if spec is None or spec.loader is None:
-            raise RuntimeError(f"cannot load Agent Collab runtime module: {path}")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        _SIBLINGS[name] = module
-    return _SIBLINGS[name]
 
 
 def _read_linux_start_time(pid: int) -> str:

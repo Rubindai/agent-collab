@@ -50,7 +50,7 @@ WORKSPACE_GUARD_KEYS = {
 
 def workspace_guard_path(repo_root: Path) -> Path:
     completed = CONFIG.run_git_probe(["rev-parse", "--git-path", WORKSPACE_GUARD_GIT_PATH], cwd=repo_root)
-    if completed is None and CONFIG.load_snapshot_runtime().has_git_metadata(repo_root):
+    if completed is None and CONFIG.SNAPSHOT.has_git_metadata(repo_root):
         # Without Git the guard would move out of the repository, where it no
         # longer excludes runs started from an environment that has Git.
         raise SystemExit("git is required inside a Git repository, but it is not on PATH")

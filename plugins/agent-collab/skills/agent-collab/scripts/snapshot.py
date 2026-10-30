@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import os
 import subprocess
 import sys
@@ -14,6 +13,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
+import strict_json as STRICT_JSON
+import safety as SAFETY
 
 
 SNAPSHOT_HEADER = "agent_collab_workspace_snapshot_v2"
@@ -52,33 +53,6 @@ MAX_RETAINED_ENTRIES = 1024
 MAX_RETAINED_ENTRY_BYTES = 512 * 1024
 MAX_RETAINED_STATUS_BYTES = 512 * 1024
 EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
-
-
-def _load_strict_json_runtime() -> Any:
-    path = Path(__file__).resolve().with_name("strict_json.py")
-    spec = importlib.util.spec_from_file_location("agent_collab_snapshot_strict_json", path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load strict JSON runtime: {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-STRICT_JSON = _load_strict_json_runtime()
-
-
-def _load_safety_runtime() -> Any:
-    path = Path(__file__).resolve().with_name("safety.py")
-    spec = importlib.util.spec_from_file_location("agent_collab_snapshot_safety", path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load Agent Collab safety runtime: {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-SAFETY = _load_safety_runtime()
 
 
 def _snapshot_deadline(deadline: float | None) -> float:

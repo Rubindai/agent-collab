@@ -234,7 +234,7 @@ class PortableFileChecks(unittest.TestCase):
 
     def test_review_receipt_uses_native_paths_and_utf8(self):
         host = load("host")
-        review = host.CONFIG.load_review_runtime()
+        review = host.CONFIG.REVIEW
         with tempfile.TemporaryDirectory() as tmp:
             run = Path(tmp).resolve()
             owner = {"run_id":"run", "host":"codex", "owner_token":"a" * 32,

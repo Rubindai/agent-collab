@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import html
-import importlib.util
 import json
 import math
 import os
@@ -23,6 +22,12 @@ from typing import Any
 
 
 sys.dont_write_bytecode = True
+import snapshot as SNAPSHOT
+import isolation as ISOLATION
+import availability as AVAILABILITY
+import safety as SAFETY
+import strict_json as STRICT_JSON
+import claude_telemetry as CLAUDE_TELEMETRY
 
 ORIGINS = {"claude", "codex"}
 MODES = {
@@ -520,55 +525,6 @@ def resource_root() -> Path:
     return runtime_dir().parent
 
 
-_SIBLING_MODULES: dict[str, Any] = {}
-
-
-def _load_sibling(filename: str, module_name: str) -> Any:
-    """Load a sibling runtime module once, so every caller shares its classes and state."""
-
-    cached = _SIBLING_MODULES.get(module_name)
-    if cached is not None:
-        return cached
-    path = runtime_dir() / filename
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load runtime module: {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    _SIBLING_MODULES[module_name] = module
-    return module
-
-
-def load_snapshot_runtime() -> Any:
-    return _load_sibling("snapshot.py", "agent_collab_snapshot")
-
-
-def load_isolation_runtime() -> Any:
-    return _load_sibling("isolation.py", "agent_collab_isolation_peer")
-
-
-def load_availability_runtime() -> Any:
-    return _load_sibling("availability.py", "agent_collab_availability")
-
-
-def load_safety_runtime() -> Any:
-    return _load_sibling("safety.py", "agent_collab_safety_peer")
-
-
-def load_strict_json_runtime() -> Any:
-    return _load_sibling("strict_json.py", "agent_collab_strict_json_peer")
-
-
-def load_claude_telemetry_runtime() -> Any:
-    return _load_sibling("claude_telemetry.py", "agent_collab_claude_telemetry")
-
-
-SAFETY = load_safety_runtime()
-STRICT_JSON = load_strict_json_runtime()
-CLAUDE_TELEMETRY = load_claude_telemetry_runtime()
-
-
 def default_schema_path() -> Path:
     return resource_root() / "schemas" / "peer-report-provider.schema.json"
 
@@ -650,7 +606,7 @@ def validate_request(
         raise RequestValidationError("claude_tools sentinel 'default' must be used alone")
     attestation = request["availability_attestation"]
     try:
-        load_availability_runtime().validate_result(attestation, require_available=True)
+        AVAILABILITY.validate_result(attestation, require_available=True)
     except (TypeError, ValueError) as exc:
         raise RequestValidationError(f"availability_attestation is invalid: {exc}") from exc
     expected_attestation = {
@@ -836,7 +792,7 @@ def claude_helper_environment(request: dict[str, Any]) -> dict[str, str]:
     # Apply in both the process environment and command-line-priority settings:
     # ordinary settings env entries otherwise replace inherited shell values.
     return {
-        "CLAUDE_CODE_EFFORT_LEVEL": load_availability_runtime().effective_claude_effort(
+        "CLAUDE_CODE_EFFORT_LEVEL": AVAILABILITY.effective_claude_effort(
             request["peer_effort"]
         ),
         "CLAUDE_CODE_SUBAGENT_MODEL": request["peer_model"],
@@ -895,7 +851,7 @@ def build_peer_command(
             "command": sys.executable,
             "args": CLAUDE_TELEMETRY.capture_args(
                 output_path.with_name("claude-effort.json"), request["run_id"],
-                load_availability_runtime().effective_claude_effort(request["peer_effort"]),
+                AVAILABILITY.effective_claude_effort(request["peer_effort"]),
             ),
             "timeout": SAFETY.CLAUDE_HOOK_TIMEOUT_SECONDS,
         }]}]
@@ -1081,7 +1037,7 @@ def claude_selection_mismatch_details(
     requested_effort: str | None,
 ) -> dict[str, Any] | None:
     """Detect observable substitution or effort downgrade of an exact Claude request."""
-    availability = load_availability_runtime()
+    availability = AVAILABILITY
     try:
         envelope = STRICT_JSON.loads(stdout, max_bytes=16 * 1024 * 1024)
     except ValueError:
@@ -1268,7 +1224,7 @@ def git_mutation_snapshot(
     *,
     deadline: float | None = None,
 ) -> dict[str, Any]:
-    snapshot = load_snapshot_runtime()
+    snapshot = SNAPSHOT
     return snapshot.mutation_snapshot(
         repo_root,
         ignored_paths=ignored_paths,
@@ -1278,7 +1234,7 @@ def git_mutation_snapshot(
 
 def mutation_error_details(before: dict[str, Any], after: dict[str, Any], peer_report: dict[str, Any]) -> dict[str, Any]:
     try:
-        details = load_snapshot_runtime().diff_snapshots(before, after)
+        details = SNAPSHOT.diff_snapshots(before, after)
     except Exception:
         details = {
             "changed": before != after,
@@ -1581,7 +1537,7 @@ def run_provider(request: dict[str, Any], repo_root: Path, peer_env: dict[str, s
                  tmp: Path, raw_output_path: Path | None, absolute_deadline: float) -> Any:
     isolation = None
     try:
-        isolation = load_isolation_runtime() if request["workspace_mode"] == "isolated" else None
+        isolation = ISOLATION if request["workspace_mode"] == "isolated" else None
         run_dir = Path(peer_env["AGENT_COLLAB_RUN_DIR"]) if isolation else None
         workspace = isolation.Workspace(repo_root, run_dir, absolute_deadline) if isolation else nullcontext()
         with workspace as active_workspace:
@@ -1855,7 +1811,7 @@ def execute_peer(request: dict[str, Any], repo_root: Path, effective_env: dict[s
     effort_path = tmp / "claude-effort.json"
     expected_effort = None
     if request["peer"] == "claude":
-        expected_effort = load_availability_runtime().effective_claude_effort(request["peer_effort"])
+        expected_effort = AVAILABILITY.effective_claude_effort(request["peer_effort"])
         STRICT_JSON.write(effort_path, CLAUDE_TELEMETRY.new_receipt(request["run_id"], expected_effort))
         STRICT_JSON.ensure_private_directory(CLAUDE_TELEMETRY.pending_directory(effort_path))
     prompt = build_prompt(request, repo_root, schema_path)
@@ -1943,7 +1899,7 @@ def invoke_peer(
             effective_env, raw_output_path, normalization_output_path
         )
         if request["workspace_mode"] == "isolated":
-            inside_git = load_snapshot_runtime().is_git_workspace(
+            inside_git = SNAPSHOT.is_git_workspace(
                 repo_root, min(absolute_deadline, time.monotonic() + 10)
             )
             before_snapshot = {
@@ -1967,7 +1923,6 @@ def invoke_peer(
                               absolute_deadline, schema_path, raw_output_path, normalization_output_path)
         return check_peer_mutation(report, request, repo_root, snapshot_ignored_paths,
                                    before_snapshot, mutation_output_path, absolute_deadline)
-
 
 
 def run_request(

@@ -250,7 +250,7 @@ class IsolatedWorkspaceTests(TestCase):
             unavailable = {"status": "sandbox_unavailable", "backend": "linux_fuse_overlay_bwrap", "details": "FUSE unavailable"}
             with (
                 mock.patch.object(host.REGISTRY, "require_workspace_guard_available"),
-                mock.patch.object(host.CONFIG, "load_isolation_runtime", return_value=SimpleNamespace(preflight=lambda _root: unavailable)),
+                mock.patch.object(host.CONFIG, "ISOLATION", new=SimpleNamespace(preflight=lambda _root: unavailable)),
                 mock.patch.object(host.CONFIG, "require_peer_cli_version") as cli,
                 mock.patch.object(host.REGISTRY, "acquire_workspace_guard") as guard,
                 self.assertRaises(SystemExit) as raised,
@@ -277,7 +277,7 @@ class IsolatedWorkspaceTests(TestCase):
                     "global": {"settings": {}, "error": None},
                     "local": {"settings": {}, "error": None},
                 }),
-                mock.patch.object(host.CONFIG, "load_isolation_runtime", side_effect=AssertionError("unexpected isolation preflight")),
+                mock.patch.object(host.CONFIG.ISOLATION, "preflight", side_effect=AssertionError("unexpected isolation preflight")),
                 mock.patch.object(host.CONFIG, "require_peer_cli_version", side_effect=SystemExit("version probe reached")),
                 self.assertRaisesRegex(SystemExit, "version probe reached"),
             ):
@@ -297,11 +297,11 @@ class IsolatedWorkspaceTests(TestCase):
 
     def test_isolated_snapshot_does_not_scan_repo(self):
         host = load_host()
-        snapshot = host.CONFIG.load_snapshot_runtime()
+        snapshot = host.CONFIG.SNAPSHOT
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             with (
-                mock.patch.object(host.CONFIG, "load_snapshot_runtime", return_value=snapshot),
+                mock.patch.object(host.CONFIG, "SNAPSHOT", new=snapshot),
                 mock.patch.object(snapshot, "mutation_snapshot", side_effect=AssertionError("content scan")),
             ):
                 result = host.run_snapshot(root, root / "before.snapshot", workspace_mode="isolated")
@@ -309,7 +309,7 @@ class IsolatedWorkspaceTests(TestCase):
             self.assertIn("no content scan", (root / "before.snapshot").read_text())
 
     def test_isolation_cleanup_rejects_untrusted_scratch_path(self):
-        isolation = load_host().CONFIG.load_isolation_runtime()
+        isolation = load_host().CONFIG.ISOLATION
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             victim = root / "agent-collab-cow-victim"
@@ -326,7 +326,7 @@ class IsolatedWorkspaceTests(TestCase):
             self.assertEqual((victim / "keep").read_text(), "untouched")
 
     def test_isolation_state_writer_rejects_symlink_destination(self):
-        isolation = load_host().CONFIG.load_isolation_runtime()
+        isolation = load_host().CONFIG.ISOLATION
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             victim = root / "victim"
@@ -425,7 +425,7 @@ def admit_host_input(host, run_dir, filename, report):
 
 
 def author_synthesis_input(host, run_dir, report=None):
-    review = host.CONFIG.load_review_runtime()
+    review = host.CONFIG.REVIEW
     ready = review.prepare(run_dir, host.ARTIFACTS.load_json(run_dir / 'peer-process.json'), host.review_documents(run_dir))
     path = Path(ready['synthesis_input'])
     report = report or valid_host_synthesis(run_dir=run_dir)
@@ -1769,11 +1769,11 @@ class HostV2Tests(TestCase):
                 self.subTest(os_name=os_name, platform=platform),
                 mock.patch.object(host.os, "name", os_name),
                 mock.patch.object(host.sys, "platform", platform),
-                mock.patch.object(host.CONFIG, "load_state_runtime") as state,
+                mock.patch.object(host.CONFIG, "STATE") as state,
                 self.assertRaisesRegex(SystemExit, "requires Linux, macOS, or Windows"),
             ):
                 host.start(args)
-            state.assert_not_called()
+            self.assertEqual(state.mock_calls, [])
         for os_name, platform in (("posix", "linux"), ("posix", "darwin"), ("nt", "win32")):
             with mock.patch.object(host.os, "name", os_name), mock.patch.object(host.sys, "platform", platform):
                 self.assertTrue(host.CONFIG.is_supported_platform())
@@ -1951,7 +1951,7 @@ class HostV2Tests(TestCase):
         ])
         stream = io.StringIO()
         with (
-            mock.patch.object(host.CONFIG, "load_availability_runtime", return_value=availability),
+            mock.patch.object(host.CONFIG, "AVAILABILITY", new=availability),
             mock.patch.object(host.CONFIG, "require_peer_cli_version", return_value="2.1.257"),
             mock.patch.object(availability, "check", return_value=output) as check,
             redirect_stdout(stream),
@@ -1996,7 +1996,7 @@ class HostV2Tests(TestCase):
                 mock.patch.object(host.REGISTRY, "workspace_guard_path", return_value=guard),
                 mock.patch.object(host.CONFIG, "resolve_settings", return_value=resolved),
                 mock.patch.object(host.CONFIG, "require_peer_cli_version", return_value="2.1.257"),
-                mock.patch.object(host.CONFIG, "load_availability_runtime", return_value=availability_runtime),
+                mock.patch.object(host.CONFIG, "AVAILABILITY", new=availability_runtime),
                 mock.patch.object(host.REGISTRY, "acquire_workspace_guard") as acquire,
                 mock.patch.object(host.CONFIG.SAFETY, "popen_group") as popen,
                 self.assertRaises(SystemExit) as raised,
@@ -2047,7 +2047,7 @@ class HostV2Tests(TestCase):
             with (
                 mock.patch.object(host.CONFIG, "resolve_settings", return_value=resolved),
                 mock.patch.object(host.CONFIG, "require_peer_cli_version", return_value="2.1.257"),
-                mock.patch.object(host.CONFIG, "load_availability_runtime", return_value=availability_runtime),
+                mock.patch.object(host.CONFIG, "AVAILABILITY", new=availability_runtime),
                 mock.patch.object(host.REGISTRY, "acquire_workspace_guard") as acquire,
                 self.assertRaises(SystemExit),
             ):
@@ -2083,7 +2083,7 @@ class HostV2Tests(TestCase):
                 mock.patch.object(host.CONFIG, "resolve_settings", return_value=resolved),
                 mock.patch.object(host.CONFIG.SAFETY, "sandbox_preflight", return_value=sandbox),
                 mock.patch.object(host.CONFIG, "require_peer_cli_version") as cli_version,
-                mock.patch.object(host.CONFIG, "load_availability_runtime") as availability,
+                mock.patch.object(host.CONFIG, "AVAILABILITY") as availability,
                 mock.patch.object(host.REGISTRY, "acquire_workspace_guard") as acquire,
                 mock.patch.object(host.CONFIG.SAFETY, "popen_group") as popen,
                 self.assertRaises(SystemExit) as raised,
@@ -2092,7 +2092,7 @@ class HostV2Tests(TestCase):
             failure = json.loads(str(raised.exception))
             self.assertEqual(failure["status"], "sandbox_unavailable")
             cli_version.assert_not_called()
-            availability.assert_called_once()
+            availability.check.assert_not_called()
             acquire.assert_not_called()
             popen.assert_not_called()
             self.assertFalse(run_root.exists())
@@ -2125,7 +2125,7 @@ class HostV2Tests(TestCase):
             with (
                 mock.patch.object(host.CONFIG, "resolve_settings", return_value=resolved),
                 mock.patch.object(host.CONFIG, "require_peer_cli_version", return_value="2.1.257"),
-                mock.patch.object(host.CONFIG, "load_availability_runtime", return_value=availability_runtime),
+                mock.patch.object(host.CONFIG, "AVAILABILITY", new=availability_runtime),
                 mock.patch.object(host, "run_snapshot"),
                 mock.patch.object(host.REGISTRY, "workspace_guard_path", return_value=root / "active-v2.json"),
                 mock.patch.object(host.CONFIG.SAFETY, "sandbox_preflight") as sandbox_preflight,
@@ -2138,7 +2138,7 @@ class HostV2Tests(TestCase):
                 args.run_id = "another-session"
                 self.assertEqual(host.start(args), 0)
                 self.assertEqual(set(host.REGISTRY.read_workspace_guards(root)[1]), {"override", "another-session"})
-                self.assertEqual({job["id"] for job in host.CONFIG.load_state_runtime().list_jobs(run_root)},
+                self.assertEqual({job["id"] for job in host.CONFIG.STATE.list_jobs(run_root)},
                                  {"override", "another-session"})
             sandbox_preflight.assert_not_called()
             saved = json.loads((run_root / "override" / "host-request.json").read_text())
@@ -2380,7 +2380,7 @@ class HostV2Tests(TestCase):
                 mock.patch.object(host.REGISTRY, "workspace_guard_path", return_value=guard),
                 mock.patch.object(host.CONFIG, "resolve_settings", return_value=resolved),
                 mock.patch.object(host.CONFIG, "require_peer_cli_version", return_value="2.1.257"),
-                mock.patch.object(host.CONFIG, "load_availability_runtime", return_value=availability_runtime),
+                mock.patch.object(host.CONFIG, "AVAILABILITY", new=availability_runtime),
                 mock.patch.object(host, "run_snapshot"),
                 mock.patch.object(host.CONFIG.SAFETY, "popen_group", side_effect=OSError("launch failed")),
                 self.assertRaises(OSError),
@@ -2426,7 +2426,7 @@ class HostV2Tests(TestCase):
                 mock.patch.object(host.REGISTRY, "workspace_guard_path", return_value=guard),
                 mock.patch.object(host.CONFIG, "resolve_settings", return_value=resolved),
                 mock.patch.object(host.CONFIG, "require_peer_cli_version", return_value="2.1.257"),
-                mock.patch.object(host.CONFIG, "load_availability_runtime", return_value=availability_runtime),
+                mock.patch.object(host.CONFIG, "AVAILABILITY", new=availability_runtime),
                 mock.patch.object(host, "run_snapshot"),
                 mock.patch.object(host.CONFIG.SAFETY, "popen_group", return_value=SpawnedProcess()),
                 mock.patch.object(
@@ -2521,7 +2521,7 @@ class HostV2Tests(TestCase):
                     self.assertEqual(host.finish(finish_args), 0)
                 self.assertTrue(guard.exists())
                 self.assertEqual(json.loads((run_dir / "host-result.json").read_text())["phase"], "ready_for_synthesis")
-                self.assertEqual(host.CONFIG.load_state_runtime().find_job(run_root, request()["run_id"])["status"], "synthesizing")
+                self.assertEqual(host.CONFIG.STATE.find_job(run_root, request()["run_id"])["status"], "synthesizing")
                 with (
                     mock.patch.object(host, "wait_for_peer_report", return_value="report_ready"),
                     mock.patch.object(host, "record_host_workspace_mutation", return_value=None),
@@ -2571,11 +2571,11 @@ class HostV2Tests(TestCase):
                     self.assertEqual(host.complete(complete_args), 0)
                 self.assertFalse(guard.exists())
                 self.assertEqual(json.loads((run_dir / "host-result.json").read_text())["phase"], "done")
-                self.assertEqual(host.CONFIG.load_state_runtime().find_job(run_root, request()["run_id"])["status"], "completed")
+                self.assertEqual(host.CONFIG.STATE.find_job(run_root, request()["run_id"])["status"], "completed")
                 with self.assertRaises(SystemExit):
                     host.finish(finish_args)
                 self.assertEqual(
-                    host.CONFIG.load_state_runtime().find_job(run_root, request()["run_id"])["status"],
+                    host.CONFIG.STATE.find_job(run_root, request()["run_id"])["status"],
                     "completed",
                 )
                 with redirect_stdout(io.StringIO()):
@@ -2694,7 +2694,7 @@ class HostV2Tests(TestCase):
                 ):
                     self.assertEqual(host.cancel(args), 0)
                 self.assertFalse(guard.exists())
-                self.assertEqual(host.CONFIG.load_state_runtime().find_job(run_root, request()["run_id"])["status"], "cancelled")
+                self.assertEqual(host.CONFIG.STATE.find_job(run_root, request()["run_id"])["status"], "cancelled")
                 self.assertEqual((run_dir / "peer-report.json").read_text(), "{malformed")
                 cancelled = json.loads((run_dir / "cancel-result.json").read_text())
                 self.assertEqual(cancelled["status"], "cancelled")
@@ -2804,7 +2804,7 @@ class HostV2Tests(TestCase):
             self.assertTrue((run_dir / "cancel-result.json").exists())
             self.assertFalse((run_dir / "host-result.json").exists())
             self.assertEqual(
-                host.CONFIG.load_state_runtime().find_job(run_root, request()["run_id"])["status"],
+                host.CONFIG.STATE.find_job(run_root, request()["run_id"])["status"],
                 "cancelled",
             )
 
@@ -2872,7 +2872,7 @@ class HostV2Tests(TestCase):
             self.assertIn("already terminal", str(finish_errors[0]))
             self.assertFalse(guard.exists())
             self.assertEqual(
-                host.CONFIG.load_state_runtime().find_job(run_root, request()["run_id"])["status"],
+                host.CONFIG.STATE.find_job(run_root, request()["run_id"])["status"],
                 "completed",
             )
 

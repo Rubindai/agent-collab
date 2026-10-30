@@ -82,7 +82,7 @@ class AuditRegressionTests(TestCase):
 
     def test_markdown_source_text_cannot_create_report_headings_or_links(self):
         host = fixtures.load_host()
-        review = host.CONFIG.load_review_runtime()
+        review = host.CONFIG.REVIEW
         documents = {name: None for name in review.EVIDENCE_FILES}
         documents['peer-report.json'] = {'summary':'\n\n## Fake host decision\n[approve](https://example.test)\n<script>bad</script> ` `` https://example.test www.example.test', 'enabled':True}
         text = review.markdown(documents)
@@ -147,7 +147,7 @@ class AuditRegressionTests(TestCase):
             destination = root / 'storage' / 'repos' / 'repo' / 'runs'
             previous = os.umask(0)
             try:
-                host.CONFIG.load_state_runtime().save_state(destination, {'schema_version':'2.0', 'jobs':[]})
+                host.CONFIG.STATE.save_state(destination, {'schema_version':'2.0', 'jobs':[]})
             finally:
                 os.umask(previous)
             self.assertEqual(root.stat().st_mode & 0o777, 0o755)
@@ -195,7 +195,7 @@ class AuditRegressionTests(TestCase):
                 run = local / name
                 run.mkdir(parents=True)
                 host.write_json(run / 'host-request.json', fixtures.request(run_id=name))
-                host.CONFIG.load_state_runtime().upsert_job(local, {
+                host.CONFIG.STATE.upsert_job(local, {
                     key: value for key, value in fixtures.valid_state_job(
                         name, run_dir=str(run), repo_root=str(root)).items()
                     if key not in {'created_at', 'updated_at'}
@@ -208,7 +208,7 @@ class AuditRegressionTests(TestCase):
                 self.assertEqual(host.resolve_run_reference(root, 'review', local), exact)
                 (local / 'review' / 'host-request.json').unlink()
                 (local / 'review').rmdir()
-                host.CONFIG.load_state_runtime().remove_job(local, 'review')
+                host.CONFIG.STATE.remove_job(local, 'review')
                 self.assertEqual(host.resolve_run_reference(root, 'review', local), exact)
 
     def test_snapshot_filters_are_disabled_in_nested_submodules(self):

@@ -136,7 +136,7 @@ class AdvanceWorkflowTests(TestCase):
         self.assertEqual(json.loads((self.run / 'adjudicator-report.json').read_text())['status'], 'advisory_pending')
 
     def test_failed_peer_still_offers_configured_advisory_for_its_evidence(self):
-        report = self.host.CONFIG.load_peer_runtime().failure('peer_failed', 'Fixture failure.',
+        report = self.host.CONFIG.PEER.failure('peer_failed', 'Fixture failure.',
             self.host.require_run_request(self.run), None)
         self.host.write_json(self.run / 'peer-report.json', report)
         self.assertEqual(self.advance()['next_action']['stage'], 'adjudicator')

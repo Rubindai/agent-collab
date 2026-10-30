@@ -676,7 +676,7 @@ def validate_host_result(report: dict[str, Any], request: dict[str, Any], run_di
 
 
 def validate_peer_report_matches_request(report: dict[str, Any], request: dict[str, Any]) -> None:
-    for key in CONFIG.load_peer_runtime().PEER_REPORT_REQUEST_BINDING_KEYS:
+    for key in CONFIG.PEER.PEER_REPORT_REQUEST_BINDING_KEYS:
         if report.get(key) != request.get(key):
             raise PeerReportRequestMismatch(f"peer report {key} does not match host request")
 

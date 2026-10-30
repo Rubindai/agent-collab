@@ -219,7 +219,7 @@ def run_snapshot(
     *,
     workspace_mode: str = "direct",
 ) -> dict[str, Any]:
-    snapshot = CONFIG.load_snapshot_runtime()
+    snapshot = CONFIG.SNAPSHOT
     deadline = time.monotonic() + snapshot.DEFAULT_SNAPSHOT_TIMEOUT_SECONDS
     data = (
         {"mode": "isolated", "digest": hashlib.sha256(str(repo_root).encode()).hexdigest()}
@@ -260,7 +260,7 @@ def record_workspace_mutation(
         ARTIFACTS.validate_cancel_mutation_evidence(existing, request, run_dir)
         return existing
     after = run_snapshot(repo_root, run_dir / after_snapshot_name, ignored_paths=[run_dir], workspace_mode=request["workspace_mode"])
-    snapshot = CONFIG.load_snapshot_runtime()
+    snapshot = CONFIG.SNAPSHOT
     diff = snapshot.diff_snapshots(before, after)
     if diff["changed"]:
         diagnostic = {
@@ -393,7 +393,7 @@ def require_process_tree_quiescent(
             if provider["status"] != "pending" and not isolation_path.exists():
                 raise ARTIFACTS.ArtifactValidationError("isolated provider is missing its cleanup state")
             try:
-                CONFIG.load_isolation_runtime().cleanup_state(isolation_path)
+                CONFIG.ISOLATION.cleanup_state(isolation_path)
             except (OSError, ValueError, RuntimeError) as exc:
                 raise ARTIFACTS.ArtifactValidationError(f"isolated workspace cleanup failed: {exc}") from exc
         if CONFIG.SAFETY.process_group_alive(int(process_info["pgid"])):
@@ -402,7 +402,7 @@ def require_process_tree_quiescent(
         if provider["status"] != "pending" and not isolation_path.exists():
             raise ARTIFACTS.ArtifactValidationError("isolated provider is missing its cleanup state")
         try:
-            CONFIG.load_isolation_runtime().cleanup_state(isolation_path)
+            CONFIG.ISOLATION.cleanup_state(isolation_path)
         except (OSError, ValueError, RuntimeError) as exc:
             raise ARTIFACTS.ArtifactValidationError(f"isolated workspace cleanup failed: {exc}") from exc
     if provider["status"] == "pending":
@@ -418,7 +418,7 @@ def require_run_request(run_dir: Path) -> dict[str, Any]:
     request = ARTIFACTS.load_json(run_dir / "host-request.json")
     ARTIFACTS.require_artifact_version(request, "host-request")
     try:
-        CONFIG.load_peer_runtime().validate_request(request)
+        CONFIG.PEER.validate_request(request)
     except Exception as exc:
         raise SystemExit(f"invalid v2 host request in {run_dir}: {exc}") from exc
     return request
@@ -485,14 +485,14 @@ def resolve_run_reference(repo_root: Path, reference: str | None, run_root: Path
         candidate = root / reference
         if candidate.exists():
             return ensure_run_dir(candidate, root)
-        state = CONFIG.load_state_runtime()
+        state = CONFIG.STATE
         if CONFIG.is_safe_run_id(reference):
             job = state.find_job(root, reference)
             if job and job.get("run_dir"):
                 return ensure_run_dir(Path(str(job["run_dir"])).expanduser(), root)
         raise SystemExit(f"unknown Agent Collab run: {reference}")
 
-    state = CONFIG.load_state_runtime()
+    state = CONFIG.STATE
     job = state.find_job(root, None)
     if job and job.get("run_dir"):
         return ensure_run_dir(Path(str(job["run_dir"])).expanduser(), root)
@@ -685,7 +685,7 @@ def wait_for_peer_report(
 
 
 def check_availability(args: argparse.Namespace) -> int:
-    availability = CONFIG.load_availability_runtime()
+    availability = CONFIG.AVAILABILITY
     repo_root = CONFIG.canonical_repo_root(args.repo_root or CONFIG.default_repo_root())
     try:
         availability.bounded_timeout(args.timeout_seconds)
@@ -819,7 +819,7 @@ def preflight_start(request: dict[str, Any], repo_root: Path) -> str:
     peer = request["peer"]
     peer_model, peer_effort = request["peer_model"], request["peer_effort"]
     safe_mode, workspace_mode = request["safe_mode"], request["workspace_mode"]
-    availability_runtime = CONFIG.load_availability_runtime()
+    availability_runtime = CONFIG.AVAILABILITY
     # Codex read-only sandboxing uses bubblewrap on Linux. Claude's plan
     # permission mode is provider-native and does not use this backend.
     if safe_mode and peer == "codex":
@@ -838,7 +838,7 @@ def preflight_start(request: dict[str, Any], repo_root: Path) -> str:
                 )
             )
     if workspace_mode == "isolated":
-        isolation = CONFIG.load_isolation_runtime().preflight(repo_root)
+        isolation = CONFIG.ISOLATION.preflight(repo_root)
         if isolation["status"] != "available":
             raise SystemExit(CONFIG.STRICT_JSON.dumps({
                 "schema_version": CONFIG.ARTIFACT_SCHEMA_VERSION,
@@ -977,7 +977,7 @@ def launch_start(repo_root: Path, run_root: Path, resolved: dict[str, Any], requ
     run_id, host, peer = request["run_id"], request["host"], request["peer"]
     workspace_mode = request["workspace_mode"]
     adjudicator_enabled = request["adjudicator_enabled"]
-    state = CONFIG.load_state_runtime()
+    state = CONFIG.STATE
     run_dir = run_root / run_id
     owner = {"run_id": run_id, "repo_root": str(repo_root), "run_dir": str(run_dir),
              "host": host, "owner_token": secrets.token_hex(16)}
@@ -1111,12 +1111,12 @@ def launch_start(repo_root: Path, run_root: Path, resolved: dict[str, Any], requ
 
 def start(args: argparse.Namespace) -> int:
     CONFIG.require_supported_platform()
-    peer_runtime = CONFIG.load_peer_runtime()
+    peer_runtime = CONFIG.PEER
     if peer_runtime.nested_invocation_requested(dict(os.environ)):
         raise SystemExit("nested Agent Collab invocation refused by the cross-agent depth guard")
     repo_root = CONFIG.canonical_repo_root(args.repo_root or CONFIG.default_repo_root())
     run_root = (args.run_root or CONFIG.default_run_root(repo_root)).resolve()
-    state = CONFIG.load_state_runtime()
+    state = CONFIG.STATE
     try:
         state.load_state(run_root)
     except (OSError, ValueError) as exc:
@@ -1136,7 +1136,7 @@ def start(args: argparse.Namespace) -> int:
 
 
 def review_documents(run_dir: Path) -> dict[str, Any]:
-    return {name: ARTIFACTS.read_json_if_exists(run_dir / name) for name in CONFIG.load_review_runtime().EVIDENCE_FILES}
+    return {name: ARTIFACTS.read_json_if_exists(run_dir / name) for name in CONFIG.REVIEW.EVIDENCE_FILES}
 
 
 def ingest_finish_inputs(args: argparse.Namespace, run_dir: Path, request: dict[str, Any], process_info: dict[str, Any]) -> None:
@@ -1153,7 +1153,7 @@ def ingest_finish_inputs(args: argparse.Namespace, run_dir: Path, request: dict[
         if (run_dir / "cancel-result.json").exists() or (current and current.get("phase") == "done"):
             raise ARTIFACTS.ArtifactValidationError("cannot replace evidence of a terminal run")
         pending = []
-        review = CONFIG.load_review_runtime()
+        review = CONFIG.REVIEW
         admission = review.verify_admissions(run_dir, process_info, replacing={item[1] for item in supplied})
         for option, filename, allowed, validate in supplied:
             if option == "first_pass" and admission["reports"][filename] is None and (
@@ -1189,12 +1189,12 @@ def finish(args: argparse.Namespace) -> int:
 
 def finish_run(args: argparse.Namespace, *, guided: bool = False) -> tuple[int, dict[str, Any]]:
     _, run_root, run_dir = resolve_run_context(args)
-    state = CONFIG.load_state_runtime()
+    state = CONFIG.STATE
     request = require_run_request(run_dir)
     process_info = ARTIFACTS.load_json(run_dir / "peer-process.json")
     ARTIFACTS.validate_peer_process(process_info, request, run_dir)
     ingest_finish_inputs(args, run_dir, request, process_info)
-    CONFIG.load_review_runtime().verify_admissions(run_dir, process_info)
+    CONFIG.REVIEW.verify_admissions(run_dir, process_info)
     host_first_pass = run_dir / "host-first-pass.json"
     if not host_first_pass.exists():
         raise SystemExit(f"missing required independent host analysis: {host_first_pass}")
@@ -1260,7 +1260,7 @@ def _finish_after_wait_locked(
     current_process = ARTIFACTS.load_json(run_dir / "peer-process.json")
     if current_process != process_info:
         raise SystemExit("peer-process changed while finish was waiting; refusing finalization")
-    CONFIG.load_review_runtime().verify_admissions(run_dir, process_info)
+    CONFIG.REVIEW.verify_admissions(run_dir, process_info)
     current_host_report = ARTIFACTS.load_json(run_dir / "host-first-pass.json")
     if current_host_report != host_report:
         raise SystemExit("host-first-pass changed while waiting; resume advance")
@@ -1337,7 +1337,7 @@ def _finish_after_wait_locked(
                     "the workspace guard remains active:\n"
                     + json.dumps(cleanup, ensure_ascii=False, indent=2, sort_keys=True)
                 )
-            peer_runtime = CONFIG.load_peer_runtime()
+            peer_runtime = CONFIG.PEER
             write_json(
                 peer_report_path,
                 peer_runtime.failure(
@@ -1387,7 +1387,7 @@ def _finish_after_wait_locked(
         }
         write_json(peer_report_path, failure)
 
-    peer_runtime = CONFIG.load_peer_runtime()
+    peer_runtime = CONFIG.PEER
     peer_report, validation_status = ARTIFACTS.normalize_peer_report_from_artifacts(peer_runtime, run_dir, request)
 
     adjudicator_path = run_dir / "adjudicator-report.json"
@@ -1463,7 +1463,7 @@ def _finish_after_wait_locked(
         peer_identity=process_info["process_identity"],
     )
     write_json(run_dir / "host-result.json", ready_result)
-    review = CONFIG.load_review_runtime()
+    review = CONFIG.REVIEW
     documents = review_documents(run_dir)
     review_paths = review.prepare(run_dir, process_info, documents)
     if guided:
@@ -1501,7 +1501,7 @@ def _complete_locked(args: argparse.Namespace, context: tuple[Path, Path, Path])
     phase = host_result["phase"]
     if phase not in {"ready_for_synthesis", "done"}:
         raise SystemExit("run is not ready to complete; resume advance and synthesize the evidence first")
-    CONFIG.load_review_runtime().verify_admissions(run_dir, process_info)
+    CONFIG.REVIEW.verify_admissions(run_dir, process_info)
     if phase != "done" and getattr(args, "synthesis", None) is None:
         raise SystemExit("completion requires --synthesis with the revision-bound input returned by advance")
     if phase == "ready_for_synthesis":
@@ -1571,7 +1571,7 @@ def _complete_locked(args: argparse.Namespace, context: tuple[Path, Path, Path])
                 ) from exc
 
     if getattr(args, "synthesis", None) is not None:
-        judgments = CONFIG.load_review_runtime().judgments(run_dir, args.synthesis, process_info, review_documents(run_dir))
+        judgments = CONFIG.REVIEW.judgments(run_dir, args.synthesis, process_info, review_documents(run_dir))
         synthesis = {"schema_version": CONFIG.ARTIFACT_SCHEMA_VERSION, "run_id": request["run_id"],
                      **judgments, "claim_matrix_sha256": host_result["claim_matrix_sha256"],
                      "workspace_mutation_sha256": host_result["workspace_mutation_sha256"], "final_answer_ready": True}
@@ -1582,7 +1582,7 @@ def _complete_locked(args: argparse.Namespace, context: tuple[Path, Path, Path])
         else:
             write_json(run_dir / "host-synthesis.json", synthesis)
 
-    peer_runtime = CONFIG.load_peer_runtime()
+    peer_runtime = CONFIG.PEER
     try:
         peer_report = ARTIFACTS.validate_completion_artifacts(run_dir, request, host_result, peer_runtime)
     except (OSError, ValueError, getattr(peer_runtime, "PeerReportValidationError")) as exc:
@@ -1594,7 +1594,7 @@ def _complete_locked(args: argparse.Namespace, context: tuple[Path, Path, Path])
         if phase == "done"
         else datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     )
-    state = CONFIG.load_state_runtime()
+    state = CONFIG.STATE
     state.upsert_job(
         run_root,
         {
@@ -1650,7 +1650,7 @@ def advance(args: argparse.Namespace) -> int:
             code, output = _complete_locked(args, context)
             return emit_result((code, {**output, "next_action": None}))
         REGISTRY.require_workspace_guard_owner(Path(process["repo_root"]), request["run_id"], owner=process)
-        admission = CONFIG.load_review_runtime().verify_admissions(run_dir, process)
+        admission = CONFIG.REVIEW.verify_admissions(run_dir, process)
         if args.adjudicator is not None and (not current or current["phase"] != "ready_for_synthesis"):
             raise ValueError("advisory input requires reviewed independent reports; submit the first pass with advance first")
         if admission["reports"]["host-first-pass.json"] is None and args.first_pass is None:
@@ -1673,7 +1673,7 @@ def recover(args: argparse.Namespace) -> int:
 def status(args: argparse.Namespace) -> int:
     repo_root = CONFIG.canonical_repo_root(args.repo_root or CONFIG.default_repo_root())
     run_root = (args.run_root or CONFIG.default_run_root(repo_root)).resolve()
-    state = CONFIG.load_state_runtime()
+    state = CONFIG.STATE
 
     if getattr(args, "active", False):
         if args.run or args.wait or args.all:
@@ -1720,7 +1720,7 @@ def result(args: argparse.Namespace) -> int:
             process_info = ARTIFACTS.load_json(run_dir / "peer-process.json")
             ARTIFACTS.validate_peer_process(process_info, require_run_request(run_dir), run_dir)
             documents = review_documents(run_dir)
-            review = CONFIG.load_review_runtime()
+            review = CONFIG.REVIEW
             review.verify(run_dir, args.review, process_info, documents)
             print(review.markdown(documents))
         return 0
@@ -1845,7 +1845,7 @@ def resolve_history_retain(args: argparse.Namespace, default_retained: int = CON
 def build_clear_history_output(args: argparse.Namespace, default_retained: int = CONFIG.DEFAULT_HISTORY_RETAINED_RUNS) -> tuple[int, dict[str, Any] | None]:
     repo_root = CONFIG.canonical_repo_root(args.repo_root or CONFIG.default_repo_root())
     run_root = (args.run_root or CONFIG.default_run_root(repo_root)).resolve()
-    state_runtime = CONFIG.load_state_runtime()
+    state_runtime = CONFIG.STATE
     active_statuses = state_runtime.ACTIVE_STATUSES
     candidates = history_candidates(run_root, state_runtime)
     _, active_guards = REGISTRY.read_workspace_guards(repo_root)
@@ -2036,7 +2036,7 @@ def terminate_tracked_process_tree(
         and not process_identity_matches(process_info)
     ):
         try:
-            CONFIG.load_isolation_runtime().cleanup_state(run_dir / "isolation-state.json")
+            CONFIG.ISOLATION.cleanup_state(run_dir / "isolation-state.json")
         except (OSError, ValueError, RuntimeError) as exc:
             provider_cleanup = {
                 "outcome": f"isolated_workspace_cleanup_failed: {exc}",
@@ -2079,7 +2079,7 @@ def terminate_tracked_process_tree(
         # A killed wrapper may not have finished its own unmount; the idempotent
         # receipt cleanup must succeed before the guard can be released.
         try:
-            CONFIG.load_isolation_runtime().cleanup_state(run_dir / "isolation-state.json")
+            CONFIG.ISOLATION.cleanup_state(run_dir / "isolation-state.json")
         except (OSError, ValueError, RuntimeError) as exc:
             provider_cleanup = {
                 "outcome": f"isolated_workspace_cleanup_failed: {exc}",
@@ -2120,7 +2120,7 @@ def _cancel_locked(args: argparse.Namespace, context: tuple[Path, Path, Path]) -
         raise SystemExit(f"invalid peer-process artifact in {run_dir}: {exc}") from exc
     peer_repo_root = Path(process_info["repo_root"]).resolve()
     cancel_result_path = run_dir / "cancel-result.json"
-    state = CONFIG.load_state_runtime()
+    state = CONFIG.STATE
 
     if cancel_result_path.exists():
         existing = ARTIFACTS.load_json(cancel_result_path)
@@ -2215,7 +2215,7 @@ def _cancel_locked(args: argparse.Namespace, context: tuple[Path, Path, Path]) -
     except ARTIFACTS.ArtifactValidationError:
         pass
     else:
-        peer_runtime = CONFIG.load_peer_runtime()
+        peer_runtime = CONFIG.PEER
         if ARTIFACTS.valid_terminal_peer_report(peer_runtime, run_dir, request):
             output = {
                 "schema_version": CONFIG.ARTIFACT_SCHEMA_VERSION,
@@ -2467,7 +2467,7 @@ def doctor(args: argparse.Namespace) -> int:
     except SystemExit as exc:
         repo_root, root_error = requested_root, str(exc)
     run_root = (args.run_root or CONFIG.default_run_root(repo_root)).resolve()
-    peer_runtime = CONFIG.load_peer_runtime()
+    peer_runtime = CONFIG.PEER
     resolved = CONFIG.resolve_settings(repo_root)
     settings = resolved["settings"]
     cli_paths: dict[str, str | None] = {}
@@ -2484,7 +2484,7 @@ def doctor(args: argparse.Namespace) -> int:
     claude_auth = parse_json_command(["claude", "auth", "status", "--json"], timeout=10) if claude_path else {}
     claude_report = claude_auth.get("json") if isinstance(claude_auth, dict) else None
     settings_errors = CONFIG.settings_error_messages(resolved)
-    state_runtime = CONFIG.load_state_runtime()
+    state_runtime = CONFIG.STATE
     try:
         state_data = state_runtime.load_state(run_root)
     except (OSError, ValueError) as exc:
@@ -2539,7 +2539,7 @@ def doctor(args: argparse.Namespace) -> int:
 
     doctor_workspace_mode = "direct" if settings["safe_mode"] else settings["workspace_mode"]
     isolation_check = (
-        CONFIG.load_isolation_runtime().preflight(repo_root)
+        CONFIG.ISOLATION.preflight(repo_root)
         if doctor_workspace_mode == "isolated" else
         {"status": "not_required", "backend": None, "details": "direct workspace mode"}
     )
@@ -2561,7 +2561,7 @@ def doctor(args: argparse.Namespace) -> int:
         },
         # Git is needed only inside a Git repository.
         "git": {
-            "ok": shutil.which("git") is not None or not CONFIG.load_snapshot_runtime().has_git_metadata(repo_root),
+            "ok": shutil.which("git") is not None or not CONFIG.SNAPSHOT.has_git_metadata(repo_root),
             "value": shutil.which("git"),
         },
         "workspace_isolation": {

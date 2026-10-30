@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import json
 import os
 import re
@@ -15,6 +14,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+import strict_json as STRICT_JSON
+import safety as SAFETY
 
 
 SCHEMA_VERSION = "2.0"
@@ -68,32 +69,6 @@ CLAUDE_KNOWN_MODEL_EFFORTS = (
     ("claude-fable-5", ("low", "medium", "high", "xhigh", "max", "ultracode")),
 )
 CLAUDE_AUXILIARY_MODEL_PREFIXES = ("claude-haiku-",)
-def load_strict_json_runtime() -> Any:
-    path = Path(__file__).resolve().parent / "strict_json.py"
-    spec = importlib.util.spec_from_file_location("agent_collab_strict_json_availability", path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load strict JSON runtime: {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-STRICT_JSON = load_strict_json_runtime()
-
-
-def load_safety_runtime() -> Any:
-    path = Path(__file__).resolve().parent / "safety.py"
-    spec = importlib.util.spec_from_file_location("agent_collab_safety_availability", path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load safety runtime: {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-SAFETY = load_safety_runtime()
 
 
 def run_bounded_command(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:

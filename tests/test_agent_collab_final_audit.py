@@ -126,7 +126,7 @@ class FinalAuditTests(TestCase):
             peer.validate_request(invalid)
 
     def test_snapshot_does_not_refresh_git_index(self):
-        snapshot = fixtures.load_host().CONFIG.load_snapshot_runtime()
+        snapshot = fixtures.load_host().CONFIG.SNAPSHOT
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             for args in (['init', '-q'], ['config', 'user.name', 'Test'],
