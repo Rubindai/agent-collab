@@ -141,9 +141,9 @@ def should_ignore(path: Path, repo_root: Path, ignored_paths: Iterable[Path] | N
     return any(_has_prefix(parts, prefix) for prefix in IGNORED_REL_PREFIXES)
 
 
-# Repository config must not run programs (fsmonitor) or rewrite content
-# (textconv) during a host snapshot, and inherited GIT_* variables must not
-# redirect it to another repository or index.
+# Disable fsmonitor and content conversion programs during host snapshots.
+# Filter drivers are disabled dynamically below; diff disables textconv and
+# external drivers. Inherited GIT_* variables must not redirect the scan.
 GIT_BASE_COMMAND = (
     "git", "--no-optional-locks",
     "-c", "diff.autoRefreshIndex=false",
@@ -163,7 +163,7 @@ def _printable(value: str) -> str:
     return value.encode("utf-8", "surrogateescape").decode("utf-8", "backslashreplace")
 
 
-def _start_git(args: list[str], **kwargs: Any) -> subprocess.Popen[Any]:
+def _start_git(args: list[str], *, deadline: float | None = None, **kwargs: Any) -> subprocess.Popen[Any]:
     """Start git inside the caller's supervision.
 
     POSIX keeps git in the caller's process group, so cancelling the wrapper
@@ -172,9 +172,21 @@ def _start_git(args: list[str], **kwargs: Any) -> subprocess.Popen[Any]:
     wrapper's job still stops them.
     """
 
+    overrides: list[str] = []
+    if args and args[0] in {"status", "diff"}:
+        result = _run_git(Path(kwargs["cwd"]), [
+            "config", "--null", "--name-only", "--get-regexp", r"^filter\..*\.(clean|process|required)$",
+        ], _snapshot_deadline(deadline))
+        if result.returncode not in {0, 1}:
+            raise RuntimeError(f"cannot inspect Git filter configuration: {result.stderr}")
+        drivers = {key.rsplit(".", 1)[0] for key in result.stdout.split("\0") if key}
+        for driver in sorted(drivers):
+            overrides.extend(["-c", f"{driver}.clean=", "-c", f"{driver}.process=",
+                              "-c", f"{driver}.required=false"])
+    command = [*GIT_BASE_COMMAND, *overrides, *args]
     if os.name == "nt":
-        return SAFETY.popen_group([*GIT_BASE_COMMAND, *args], **kwargs)
-    return subprocess.Popen([*GIT_BASE_COMMAND, *args], **kwargs)
+        return SAFETY.popen_group(command, **kwargs)
+    return subprocess.Popen(command, **kwargs)
 
 
 def _stop_git(process: subprocess.Popen[Any]) -> None:
@@ -193,6 +205,7 @@ def _run_git(repo_root: Path, args: list[str], deadline: float) -> subprocess.Co
         timeout = _remaining_seconds(deadline)
         process = _start_git(
             args,
+            deadline=deadline,
             cwd=repo_root,
             env=_git_env(),
             encoding="utf-8",
@@ -263,7 +276,7 @@ def _git_output_digest(repo_root: Path, args: list[str], deadline: float) -> str
     """Hash potentially large Git output without retaining a patch or index listing."""
     try:
         with tempfile.TemporaryFile(mode="w+b") as errors:
-            process = _start_git(args, cwd=repo_root, env=_git_env(), stdout=subprocess.PIPE, stderr=errors)
+            process = _start_git(args, deadline=deadline, cwd=repo_root, env=_git_env(), stdout=subprocess.PIPE, stderr=errors)
             assert process.stdout is not None
             stdout = process.stdout
             digest = hashlib.sha256()
@@ -496,6 +509,7 @@ def _git_control_entries(repo_root: Path, deadline: float) -> dict[str, str]:
     candidates: list[tuple[str, Path]] = [
         ("common/config", common_dir / "config"),
         ("common/info/exclude", common_dir / "info" / "exclude"),
+        ("common/info/attributes", common_dir / "info" / "attributes"),
         ("common/packed-refs", common_dir / "packed-refs"),
         ("worktree/HEAD", git_dir / "HEAD"),
         # The raw index is omitted: read-only status refreshes rewrite its stat

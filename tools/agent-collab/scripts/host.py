@@ -950,7 +950,8 @@ def launch_start(repo_root: Path, run_root: Path, resolved: dict[str, Any], requ
     startup_gate_read = None
     startup_gate_write = None
     try:
-        run_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
+        CONFIG.STRICT_JSON.ensure_private_directory(run_dir.parent)
+        run_dir.mkdir(exist_ok=False, mode=0o700)
         os.chmod(run_dir, 0o700)
         run_dir_created = True
 

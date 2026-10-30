@@ -541,7 +541,7 @@ def validate_host_synthesis(report: dict[str, Any], request: dict[str, Any]) -> 
         raise ArtifactValidationError("host-synthesis run_id does not match host request")
     if not isinstance(report["summary"], str) or not report["summary"].strip():
         raise ArtifactValidationError("host-synthesis summary must be a non-empty string")
-    if report["verdict"] not in RECOMMENDED_VERDICTS:
+    if not isinstance(report["verdict"], str) or report["verdict"] not in RECOMMENDED_VERDICTS:
         raise ArtifactValidationError("host-synthesis verdict is invalid")
     if not isinstance(report["claims"], list):
         raise ArtifactValidationError("host-synthesis claims must be an array")

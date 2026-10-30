@@ -799,14 +799,7 @@ def _run_claude_agent_guard(counter_path: Path, limit: int) -> int:
         strict_json = _load_sibling("strict_json")
         if limit < 0 or limit > MAX_LOCAL_SUBAGENTS:
             raise ValueError("invalid Agent call limit")
-        counter_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        if os.name == "posix":
-            directory_fd = os.open(counter_path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-                                   | getattr(os, "O_NOFOLLOW", 0))
-            try:
-                os.fchmod(directory_fd, 0o700)
-            finally:
-                os.close(directory_fd)
+        strict_json.ensure_private_directory(counter_path.parent)
         flags = os.O_RDWR | strict_json.BINARY_FLAG
         flags |= getattr(os, "O_CLOEXEC", 0)
         flags |= getattr(os, "O_NOFOLLOW", 0)

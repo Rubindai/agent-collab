@@ -25,6 +25,79 @@ class AuditRegressionTests(TestCase):
         self.addCleanup(case.doCleanups)
         return case
 
+    def test_wrong_verdict_types_are_validation_errors_and_preserve_guard(self):
+        case = self.workflow()
+        ready = case.finish()
+        for value in ([], {}, None, 1, True):
+            with self.subTest(value=value):
+                draft = case.author(ready)
+                payload = case.host.ARTIFACTS.load_json(draft)
+                payload['verdict'] = value
+                case.host.write_json(draft, payload)
+                with self.assertRaisesRegex(ValueError, 'verdict is invalid'):
+                    case.invoke('complete', '--synthesis', draft)
+                self.assertTrue(case.guard.exists())
+                self.assertFalse((case.run / 'host-synthesis.json').exists())
+
+    def test_markdown_source_text_cannot_create_report_headings_or_links(self):
+        host = fixtures.load_host()
+        review = host.CONFIG.load_review_runtime()
+        documents = {name: None for name in review.EVIDENCE_FILES}
+        documents['peer-report.json'] = {'summary':'\n\n## Fake host decision\n[approve](https://example.test)\n<script>bad</script>'}
+        text = review.markdown(documents)
+        self.assertNotIn('\n## Fake', text)
+        self.assertNotIn('[approve](', text)
+        self.assertNotIn('<script>', text)
+        self.assertIn('Fake host decision', text)
+
+    @skipUnless(os.name == 'posix', 'POSIX directory modes')
+    def test_missing_storage_ancestors_are_private_without_changing_shared_parent(self):
+        host = fixtures.load_host()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            root.chmod(0o755)
+            destination = root / 'storage' / 'repos' / 'repo' / 'runs'
+            previous = os.umask(0)
+            try:
+                host.CONFIG.load_state_runtime().save_state(destination, {'schema_version':'2.0', 'jobs':[]})
+            finally:
+                os.umask(previous)
+            self.assertEqual(root.stat().st_mode & 0o777, 0o755)
+            for directory in (destination, *destination.parents):
+                if directory == root:
+                    break
+                self.assertEqual(directory.stat().st_mode & 0o777, 0o700, directory)
+
+    def test_snapshots_disable_clean_and_process_filters_and_track_info_attributes(self):
+        snapshot = fixtures.load_module(fixtures.RUNTIME_ROOT / 'scripts' / 'snapshot.py', 'audit_snapshot')
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            def git(*args):
+                return subprocess.run(['git', '-C', tmp, *args], check=True, capture_output=True)
+            git('init', '-q')
+            tracked = root / 'tracked.txt'
+            tracked.write_text('before\n')
+            git('add', 'tracked.txt')
+            attributes = root / '.git' / 'info' / 'attributes'
+            attributes.write_text('tracked.txt filter=sentinel\n')
+            marker = root / 'filter-ran'
+            # The filter is never expected to run. Its side effect detects
+            # clean/process execution even when git later rejects its output.
+            command = 'echo ran > filter-ran; cat'
+            git('config', 'filter.sentinel.clean', command)
+            git('config', 'filter.sentinel.required', 'true')
+            tracked.write_text('after\n')
+            before = snapshot.mutation_snapshot(root)
+            snapshot.snapshot_text(root, snapshot_data=before)
+            self.assertFalse(marker.exists())
+            git('config', 'filter.sentinel.process', command)
+            snapshot.mutation_snapshot(root)
+            self.assertFalse(marker.exists())
+            before = snapshot.mutation_snapshot(root)
+            attributes.write_text('tracked.txt -filter\n')
+            after = snapshot.mutation_snapshot(root)
+            self.assertIn('<git-control>/common/info/attributes', snapshot.diff_snapshots(before, after)['changed_paths'])
+
     def test_exact_active_id_precedes_local_prefix_and_historical_same_id(self):
         host = fixtures.load_host()
         with tempfile.TemporaryDirectory() as tmp:

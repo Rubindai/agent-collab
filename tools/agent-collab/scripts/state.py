@@ -221,9 +221,7 @@ def validate_state_payload(parsed: Any) -> dict[str, Any]:
 
 @contextmanager
 def state_lock(run_root: Path):
-    run_root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if os.name == "posix":
-        os.chmod(run_root, 0o700)
+    STRICT_JSON.ensure_private_directory(run_root)
     path = lock_file(run_root)
     descriptor = STRICT_JSON.open_lock_file(path)
     with os.fdopen(descriptor, "a+", encoding="utf-8") as lock:
@@ -266,7 +264,7 @@ def prune_jobs(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def save_state(run_root: Path, state: dict[str, Any]) -> dict[str, Any]:
-    run_root.mkdir(parents=True, exist_ok=True)
+    STRICT_JSON.ensure_private_directory(run_root)
     validated = validate_state_payload(state)
     next_state = {
         "schema_version": STATE_SCHEMA_VERSION,

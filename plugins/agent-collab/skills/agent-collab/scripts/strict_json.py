@@ -25,9 +25,17 @@ REPLACE_RETRY_SECONDS = 2.0
 
 
 def ensure_private_directory(path: Path) -> Path:
-    """Create a runtime directory and force an owner-only POSIX mode."""
+    """Create private missing ancestors and an owner-only runtime directory.
 
-    path.mkdir(parents=True, exist_ok=True, mode=PRIVATE_DIRECTORY_MODE)
+    Existing ancestors may be shared (for example /tmp); leave them alone.
+    pathlib's parents=True otherwise creates intermediate directories at 0777.
+    """
+
+    try:
+        path.mkdir(exist_ok=True, mode=PRIVATE_DIRECTORY_MODE)
+    except FileNotFoundError:
+        ensure_private_directory(path.parent)
+        path.mkdir(exist_ok=True, mode=PRIVATE_DIRECTORY_MODE)
     if os.name == "posix":
         descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
                              | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
