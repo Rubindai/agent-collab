@@ -28,7 +28,7 @@
       "name": "explains-independent-peer",
       "type": "regex",
       "target": "last_message",
-      "pattern": "\\b(independent|opposite)[\\s\\S]*\\b(peer|Claude|Codex|assistant|agent)\\b",
+      "pattern": "^(?=[\\s\\S]*\\b(?:independent|opposite|separate|second\\s+opinion)\\b)(?=[\\s\\S]*\\b(?:peer|Claude|Codex|agent|(?:another|separate|second|independent|opposite)\\s+assistant)\\b)[\\s\\S]+$",
       "flags": "i"
     }
   ]

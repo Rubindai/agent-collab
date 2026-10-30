@@ -1,9 +1,10 @@
-"""Offline checks of eval safety bounds and the objective grading oracle.
+"""Offline checks of eval configuration and the objective grading oracle.
 
-These do not run a provider or claim that skill activation has been evaluated.
+These do not verify the provider's actual exposed tools or skill activation.
 """
 import json
 import re
+import shlex
 import unittest
 from pathlib import Path
 
@@ -25,7 +26,7 @@ def regex_passes(grader, message):
 
 
 class BehavioralEvalTests(unittest.TestCase):
-    def test_cases_cannot_launch_peers_or_helpers(self):
+    def test_cases_request_only_read_and_skill_with_finite_limits(self):
         suite = cases()
         self.assertEqual(len(suite), 6)
         for name, case in suite.items():
@@ -46,6 +47,22 @@ class BehavioralEvalTests(unittest.TestCase):
                 self.assertTrue(all(g["type"] in {"regex", "tool_used"} for g in case["graders"]))
         self.assertFalse(list(EVAL_ROOT.rglob("mocks")))
 
+    def test_documented_commands_deny_helper_tools_and_preserve_evidence(self):
+        readme = (EVAL_ROOT / "README.md").read_text(encoding="utf-8")
+        commands = re.findall(r"^claude plugin eval .*?(?=\n```)", readme, re.M | re.S)
+        self.assertEqual(len(commands), 2)
+        denied = {"Agent", "Task", "Workflow", "ToolSearch", "SendMessage", "TaskStop"}
+        for command in commands:
+            args = shlex.split(command.replace("\\\n", " "))
+            index = args.index("--disallow-tools") + 1
+            end = next(i for i in range(index, len(args)) if args[i].startswith("--"))
+            self.assertTrue(denied <= set(args[index:end]))
+            self.assertIn("--keep-temp", args)
+            self.assertIn("--no-publish", args)
+            self.assertEqual(args[args.index("--output-dir") + 1], "$EVAL_OUTPUT_DIR")
+            self.assertNotIn("--allow-tools", args)
+            self.assertNotIn("--allow-real-servers", args)
+
     def test_selection_checks_do_not_inflate_baseline_quality(self):
         suite = cases()
         positives = {"explicit-request", "implicit-substantial-review", "synthetic-finding-verification"}
@@ -62,6 +79,31 @@ class BehavioralEvalTests(unittest.TestCase):
             else:
                 self.assertEqual((grader["min"], grader["max"], grader["arm"]), (0, 0, "both"))
             self.assertTrue(any(g["type"] == "regex" for g in case["graders"]))
+
+    def test_informational_grader_accepts_peer_paraphrases_without_word_order(self):
+        grader = next(g for g in cases()["informational-question"]["graders"] if g["type"] == "regex")
+        valid = (
+            '"Use agent collab" asks the assistant to run the agent-collab plugin, '
+            'which starts a separate Claude or Codex agent to do the review on its '
+            'own so you get a second opinion to check against the assistant’s.',
+            "It asks for an independent peer to review the work.",
+            "A Codex peer supplies an independent review.",
+            "The assistant asks another agent for a second opinion.",
+            "A separate assistant reviews the change.",
+        )
+        invalid = (
+            "It asks the assistant to correct spelling mistakes.",
+            "Separate documentation sections explain installation.",
+            "The assistant reviews the change alone.",
+            "The assistant conducts an independent review alone.",
+            "",
+        )
+        for answer in valid:
+            with self.subTest(answer=answer):
+                self.assertTrue(regex_passes(grader, answer))
+        for answer in invalid:
+            with self.subTest(answer=answer):
+                self.assertFalse(regex_passes(grader, answer))
 
     def test_objective_oracle_rejects_missed_and_invented_findings(self):
         case = cases()["synthetic-finding-verification"]

@@ -362,6 +362,7 @@ tools/agent-collab/                               Canonical skill, runtime, sche
 tools/agent-collab/agents/                        Canonical Codex metadata and Claude helper agents
 tools/agent-collab/assets/                        Canonical SVG logo and composer icon
 tools/agent-collab/README.md                      Canonical package overview
+tools/agent-collab/evals/                         Canonical native Claude activation and synthetic outcome evaluations
 scripts/sync-packages.sh                          Package synchronization and byte/mode parity check
 scripts/release-check.sh                          Every release verification step
 scripts/ci-provider-checks.sh                     Independent no-auth provider validators and isolated installs
@@ -439,6 +440,8 @@ On this Linux host with Python 3.13.5, 20 alternating fresh-process `host.py --h
 The final local suite passes all 249 tests without skips on Python 3.11.18, 3.13.5, and 3.15.2, using Codex CLI 0.165.0 and Claude Code 2.1.312. Package synchronization and all 17 schema meta-validations pass. Registry concurrency is exercised with independent OS processes and lifecycle fixtures; this change did not run two live provider sessions. The native Windows suite was invoked on Linux and skipped all 18 checks, so neither it nor native macOS execution is counted as verified.
 
 ### Evaluation evidence
+
+Repeatable behavioral cases and bounded, local-report commands are in [the evaluation guide](tools/agent-collab/evals/README.md). They cover skill selection and a synthetic verification task with a no-plugin arm; they do not establish real peer usefulness, end-to-end closure, or Codex behavioral coverage. Unit tests check the fixtures and graders separately from live model behavior.
 
 The 2026-10-30 installed-plugin follow-up added regressions for exact run selection, zombie reports, normalization provenance, Linux PID namespaces, private storage parents, explicit host admission, request binding, filtered Git files, nested submodules, and review-schema conformance. All 272 tests pass without skips on Python 3.11.18, 3.13.5, and 3.15.2; package synchronization passes. The real Bubblewrap namespace test passes on the development Linux host; CI and native macOS/Windows execution remain separate validation requirements. Git subdirectories passed as `--repo-root` are normalized to the worktree root, including peer cwd, storage, and snapshot scope. `doctor` reports resolution failures as failed checks; commands that manage a run still require a valid canonical workspace identity.
 
