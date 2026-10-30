@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add a resumable `start`/`advance` host workflow with explicit next actions, resolved host policy, bounded 60-second guided waits, and successful waiting responses. Keep the normal instructions self-contained within 8 KB and make recovery diagnostics use the guided interface.
+- Save readable, revision-bound Markdown evidence separately from compact control output, preserving all original reports while omitting duplicate matrix rows and admission hashes from the reading surface. Review receipts now bind rendered bytes; refresh older drafts through `advance` before synthesis.
+- Count advisory reports within the host helper-report bound and route exhausted budgets to synthesis with the missing advisory visible.
 - **Breaking:** require explicit CLI admission for host reports and revision-bound synthesis, preserve the first admitted host pass, and verify the saved request against its launch-time digest. Close active runs before upgrading; old process artifacts lack the required request digest and admission receipt.
 - Keep filtered-file mutation evidence byte-based, support `=` in filter names, align generated review receipts with their schema, reject deleted admission receipts, and keep `doctor` diagnostics available when Git root resolution fails.
 - Disable Git clean/process filters during snapshots, including initialized nested submodules, and track `.git/info/attributes`; create missing storage parents privately, reject malformed verdict types cleanly, and quote source text in Markdown review views.

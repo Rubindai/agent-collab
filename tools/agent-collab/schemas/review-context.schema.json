@@ -11,9 +11,14 @@
     "repo_root",
     "host",
     "owner_token",
+    "rendered_sha256",
     "evidence_sha256"
   ],
   "properties": {
+    "rendered_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
     "schema_version": {
       "const": "2.0"
     },

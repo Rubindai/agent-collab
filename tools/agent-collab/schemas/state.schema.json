@@ -56,7 +56,7 @@
           "maximum": 86430
         },
         "finish_timeout_source": {
-          "enum": ["explicit", "peer_timeout_plus_grace"]
+          "enum": ["explicit", "peer_timeout_plus_grace", "guided_default"]
         },
         "peer_status": {"enum": ["ok", "peer_failed"]},
         "peer_verdict": {

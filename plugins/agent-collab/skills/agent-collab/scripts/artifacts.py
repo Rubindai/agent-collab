@@ -61,7 +61,7 @@ VALIDATION_STATUSES = {
 }
 
 
-FINISH_TIMEOUT_SOURCES = {"explicit", "peer_timeout_plus_grace"}
+FINISH_TIMEOUT_SOURCES = {"explicit", "peer_timeout_plus_grace", "guided_default"}
 
 
 PROVIDER_PROCESS_KEYS = {
@@ -790,6 +790,20 @@ def load_helper_evidence(
     return validate_helper_evidence(data, request)
 
 
+def validate_host_helper_budget(helpers: dict[str, Any] | None, adjudicator: dict[str, Any] | None,
+                                request: dict[str, Any]) -> None:
+    """Count admitted helper reports, including one actual advisory report."""
+    if helpers is not None:
+        validate_helper_evidence(helpers, request)
+    if adjudicator is not None:
+        validate_adjudicator_report(adjudicator, request)
+    used = len(helpers["reports"]) if helpers else 0
+    used += int(adjudicator is not None and adjudicator["status"] != "advisory_pending")
+    limit = request["max_local_subagents"] if request["local_subagents_allowed"] else 0
+    if used > limit:
+        raise ArtifactValidationError(f"host helper reports including adjudication exceed the resolved per-run limit {limit}")
+
+
 def validate_helper_evidence(data: dict[str, Any], request: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
     required = {"schema_version", "run_id", "reports"}
     if not isinstance(data, dict) or set(data) != required:
@@ -1041,6 +1055,7 @@ def validate_completion_artifacts(
             "host-synthesis does not bind the current workspace mutation evidence; inspect the diagnostic and resynthesize"
         )
     helper_claims, helper_digest = load_helper_evidence(run_dir, request)
+    validate_host_helper_budget(read_json_if_exists(run_dir / "helper-reports.json"), adjudicator, request)
     expected_claim_matrix = build_claim_matrix(
         request,
         host_report,
@@ -1051,11 +1066,11 @@ def validate_completion_artifacts(
     )
     if claim_matrix != expected_claim_matrix:
         raise ArtifactValidationError(
-            "claim-matrix does not derive from the current host, peer, helper, and adjudicator reports; rerun finish"
+            "claim-matrix does not derive from the current host, peer, helper, and adjudicator reports; resume advance"
         )
     current_digest = claim_matrix_sha256(expected_claim_matrix)
     if host_result["claim_matrix_sha256"] != current_digest:
-        raise ArtifactValidationError("host-result does not bind the current claim-matrix; rerun finish")
+        raise ArtifactValidationError("host-result does not bind the current claim-matrix; resume advance")
     if host_synthesis["claim_matrix_sha256"] != current_digest:
         raise ArtifactValidationError(
             "host-synthesis does not bind the current claim-matrix; inspect the claims and resynthesize"

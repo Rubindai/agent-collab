@@ -2131,9 +2131,10 @@ class HostV2Tests(TestCase):
                 mock.patch.object(host.CONFIG.SAFETY, "sandbox_preflight") as sandbox_preflight,
                 mock.patch.object(host.CONFIG.SAFETY, "process_identity", return_value=valid_process_identity()),
                 mock.patch.object(host.CONFIG.SAFETY, "popen_group", return_value=FakePopen()),
-                redirect_stdout(io.StringIO()),
+                redirect_stdout(io.StringIO()) as output,
             ):
                 self.assertEqual(host.start(args), 0)
+                start_output = json.loads(output.getvalue())
                 args.run_id = "another-session"
                 self.assertEqual(host.start(args), 0)
                 self.assertEqual(set(host.REGISTRY.read_workspace_guards(root)[1]), {"override", "another-session"})
@@ -2142,6 +2143,15 @@ class HostV2Tests(TestCase):
             sandbox_preflight.assert_not_called()
             saved = json.loads((run_root / "override" / "host-request.json").read_text())
             process = json.loads((run_root / "override" / "peer-process.json").read_text())
+            self.assertEqual(start_output['next_action']['stage'], 'first_pass')
+            self.assertEqual(start_output['host_policy']['peer_timeout_seconds'], 900)
+            self.assertFalse(start_output['host_policy']['online_research'])
+            self.assertTrue(start_output['host_policy']['local_subagents_allowed'])
+            action_args = host.build_parser().parse_args(start_output['next_action']['command'][2:])
+            self.assertEqual(action_args.command, 'advance')
+            self.assertEqual(action_args.run, str(run_root / 'override'))
+            self.assertEqual(action_args.repo_root, root)
+            self.assertEqual(action_args.first_pass, Path(start_output['next_action']['input_path']))
             private_modes = {
                 "run_dir": stat.S_IMODE((run_root / "override").stat().st_mode),
                 "request": stat.S_IMODE((run_root / "override" / "host-request.json").stat().st_mode),

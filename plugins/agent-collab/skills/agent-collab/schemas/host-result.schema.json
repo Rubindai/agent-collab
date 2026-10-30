@@ -26,7 +26,7 @@
         "phase": {"const": "waiting_for_peer"},
         "peer_pid": {"type": "integer", "minimum": 1},
         "finish_wait_seconds": {"type": "number", "minimum": 60, "maximum": 86430},
-        "finish_timeout_source": {"enum": ["explicit", "peer_timeout_plus_grace"]},
+        "finish_timeout_source": {"enum": ["explicit", "peer_timeout_plus_grace", "guided_default"]},
         "peer_report": {"type": "string", "minLength": 1},
         "message": {"type": "string", "minLength": 1}
       }
@@ -66,7 +66,7 @@
           ]
         },
         "finish_wait_seconds": {"type": "number", "minimum": 60, "maximum": 86430},
-        "finish_timeout_source": {"enum": ["explicit", "peer_timeout_plus_grace"]},
+        "finish_timeout_source": {"enum": ["explicit", "peer_timeout_plus_grace", "guided_default"]},
         "normalization": {"type": "string", "minLength": 1},
         "claim_matrix": {"type": "string", "minLength": 1},
         "claim_matrix_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},

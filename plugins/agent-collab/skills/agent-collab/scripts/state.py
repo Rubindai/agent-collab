@@ -44,7 +44,7 @@ VALIDATION_STATUSES = {
 NORMALIZATION_SOURCES = {"structured_output", "direct_json", "none"}
 FINISH_TIMEOUT_SOURCES = {
     "explicit",
-    "peer_timeout_plus_grace",
+    "peer_timeout_plus_grace", "guided_default",
 }
 MIN_FINISH_WAIT_SECONDS = 60
 MAX_FINISH_WAIT_SECONDS = 86_430

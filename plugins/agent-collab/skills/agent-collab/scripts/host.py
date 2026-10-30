@@ -151,7 +151,9 @@ def write_json(path: Path, data: dict[str, Any]) -> None:
 
 def emit_result(result: tuple[int, dict[str, Any]]) -> int:
     code, output = result
-    print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
+    if "next_action" in output:
+        output = {"next_action": output["next_action"], **output}
+    print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys="next_action" not in output))
     return code
 
 
@@ -163,11 +165,11 @@ def next_action(run_dir: Path, repo_root: Path, stage: str, synthesis_input: str
             "Complete independent host analysis without reading peer output or polling status. Save summary and claims, then submit this file.",
             {"summary": "", "claims": []}),
         "adjudicator": ("--adjudicator", str(run_dir / "adjudicator.input.json"),
-            "Obtain a fresh host-local advisory report using the neutral brief and returned evidence; follow the skill's helper rules. If no advisory helper is available, document that limitation in the synthesis and submit it with --synthesis instead.",
+            "Read evidence_file, then obtain a fresh host-local advisory report using the neutral brief and that evidence; follow the skill's helper rules. If no advisory helper is available, document that limitation in synthesis and submit it with --synthesis instead.",
             {"status": "ok", "summary": "", "false_positives": [], "claims_needing_verification": [],
              "recommended_verdict": "", "claims": []}),
         "synthesis": ("--synthesis", synthesis_input,
-            "Verify material claims in the returned evidence. Edit the generated synthesis input, then submit it immediately before answering. Changed evidence requires a newly reviewed revision.", None),
+            "Read evidence_file completely and verify material claims. Edit the generated synthesis input, then submit it immediately before answering. Changed evidence requires a newly reviewed revision.", None),
         "waiting": (None, None, "Peer remains within its finite deadline. Resume advance; do not replace or cancel it unless the user stops the run.", None),
     }
     flag, path, instruction, template = actions[stage]
@@ -615,6 +617,7 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
 def resolve_finish_wait_timeout(
     explicit_timeout_seconds: float | None,
     process_info: dict[str, Any],
+    *, guided: bool = False,
 ) -> tuple[float, str]:
     if explicit_timeout_seconds is not None:
         if not CONFIG.MIN_PEER_WAIT_SECONDS <= explicit_timeout_seconds <= CONFIG.SAFETY.MAX_AGENT_TIMEOUT_SECONDS + CONFIG.FINISH_TIMEOUT_GRACE_SECONDS:
@@ -630,7 +633,7 @@ def resolve_finish_wait_timeout(
             derived = float(peer_timeout) + CONFIG.FINISH_TIMEOUT_GRACE_SECONDS
             if not CONFIG.MIN_PEER_WAIT_SECONDS <= float(peer_timeout) <= CONFIG.SAFETY.MAX_AGENT_TIMEOUT_SECONDS:
                 raise ValueError("peer timeout is outside the finite supported range")
-            return derived, "peer_timeout_plus_grace"
+            return (float(CONFIG.MIN_PEER_WAIT_SECONDS), "guided_default") if guided else (derived, "peer_timeout_plus_grace")
         except (TypeError, ValueError) as exc:
             raise ValueError("peer-process peer_timeout_seconds must be finite and bounded") from exc
 
@@ -1165,6 +1168,11 @@ def ingest_finish_inputs(args: argparse.Namespace, run_dir: Path, request: dict[
             artifact = {"schema_version": CONFIG.ARTIFACT_SCHEMA_VERSION, "run_id": request["run_id"], **value}
             validate(artifact, request)
             pending.append((run_dir / filename, artifact))
+        merged = {path.name: artifact for path, artifact in pending}
+        for name in ("helper-reports.json", "adjudicator-report.json"):
+            if name not in merged:
+                merged[name] = ARTIFACTS.read_json_if_exists(run_dir / name)
+        ARTIFACTS.validate_host_helper_budget(merged["helper-reports.json"], merged["adjudicator-report.json"], request)
         for path, artifact in pending:
             digest = review.digest(artifact)
             if path.name == "host-first-pass.json" and admission["reports"][path.name] not in {None, digest}:
@@ -1206,7 +1214,7 @@ def finish_run(args: argparse.Namespace, *, guided: bool = False) -> tuple[int, 
         raise SystemExit("ready-for-synthesis workspace guard contains an invalid wrapper-quiescence proof")
     pid = int(process_info["pid"])
     peer_report_path = run_dir / "peer-report.json"
-    configured_wait_seconds, finish_timeout_source = resolve_finish_wait_timeout(args.timeout_seconds, process_info)
+    configured_wait_seconds, finish_timeout_source = resolve_finish_wait_timeout(args.timeout_seconds, process_info, guided=guided)
     actual_wait_seconds, hard_deadline = remaining_finish_wait_seconds(
         process_info, configured_wait_seconds
     )
@@ -1255,7 +1263,7 @@ def _finish_after_wait_locked(
     CONFIG.load_review_runtime().verify_admissions(run_dir, process_info)
     current_host_report = ARTIFACTS.load_json(run_dir / "host-first-pass.json")
     if current_host_report != host_report:
-        raise SystemExit("host-first-pass changed while finish was waiting; rerun finish")
+        raise SystemExit("host-first-pass changed while waiting; resume advance")
     if (run_dir / "cancel-result.json").exists():
         raise SystemExit("run was cancelled while finish was waiting; terminal evidence was preserved")
     current_job = state.find_job(run_root, request["run_id"])
@@ -1310,7 +1318,7 @@ def _finish_after_wait_locked(
         write_json(run_dir / "host-result.json", output)
         if guided:
             output["next_action"] = next_action(run_dir, repo_root, "waiting")
-        return 1, output
+        return (0 if guided else 1), output
 
     process_tree_proven = False
     if time.time() >= hard_deadline:
@@ -1401,6 +1409,7 @@ def _finish_after_wait_locked(
 
     try:
         helper_claims, helper_digest = ARTIFACTS.load_helper_evidence(run_dir, request)
+        ARTIFACTS.validate_host_helper_budget(ARTIFACTS.read_json_if_exists(run_dir / "helper-reports.json"), adjudicator, request)
         claim_matrix = ARTIFACTS.build_claim_matrix(
             request, host_report, peer_report, helper_claims, adjudicator, helper_digest
         )
@@ -1458,12 +1467,12 @@ def _finish_after_wait_locked(
     documents = review_documents(run_dir)
     review_paths = review.prepare(run_dir, process_info, documents)
     if guided:
-        advisory_available = request["local_subagents_allowed"] and request["max_local_subagents"] > 0
+        helper_count = len((documents["helper-reports.json"] or {}).get("reports", []))
+        advisory_available = request["local_subagents_allowed"] and helper_count < request["max_local_subagents"]
         stage = "adjudicator" if adjudicator and adjudicator["status"] == "advisory_pending" and advisory_available else "synthesis"
         return 0, {"run_dir": str(run_dir), "peer_status": peer_report["status"],
                    "validation_status": validation_status, "host_policy": host_policy(request), **review_paths,
-                   "next_action": next_action(run_dir, repo_root, stage, review_paths["synthesis_input"]),
-                   "evidence_markdown": review.markdown(documents)}
+                   "next_action": next_action(run_dir, repo_root, stage, review_paths["synthesis_input"])}
     return 0, {**ready_result, **review_paths}
 
 
@@ -1491,10 +1500,10 @@ def _complete_locked(args: argparse.Namespace, context: tuple[Path, Path, Path])
         raise SystemExit(f"invalid host-result artifact in {run_dir}: {exc}") from exc
     phase = host_result["phase"]
     if phase not in {"ready_for_synthesis", "done"}:
-        raise SystemExit("run is not ready to complete; run finish and synthesize the evidence first")
+        raise SystemExit("run is not ready to complete; resume advance and synthesize the evidence first")
     CONFIG.load_review_runtime().verify_admissions(run_dir, process_info)
     if phase != "done" and getattr(args, "synthesis", None) is None:
-        raise SystemExit("completion requires --synthesis with the revision-bound input generated by finish")
+        raise SystemExit("completion requires --synthesis with the revision-bound input returned by advance")
     if phase == "ready_for_synthesis":
         _, active_guard = REGISTRY.require_workspace_guard_owner(repo_root, request["run_id"], owner=process_info)
         if (
@@ -1536,7 +1545,7 @@ def _complete_locked(args: argparse.Namespace, context: tuple[Path, Path, Path])
             write_json(host_result_path, host_result)
             raise SystemExit(
                 "workspace mutation evidence changed after finish; host-result.json was refreshed. "
-                "Run finish, inspect the new review revision, and resynthesize before completing."
+                "Resume advance without --synthesis, inspect the new review revision, and resynthesize before completing."
             )
     elif phase == "done":
         _, active_guard = REGISTRY.read_workspace_guard(repo_root, request["run_id"])
@@ -2216,7 +2225,7 @@ def _cancel_locked(args: argparse.Namespace, context: tuple[Path, Path, Path]) -
                 "outcome": "already_terminal",
                 "message": (
                     "A valid terminal peer report already exists. The workspace guard was retained; "
-                    "run finish and complete so the evidence is not converted into a cancellation."
+                    "resume advance and synthesize so the evidence is not converted into a cancellation."
                 ),
             }
             print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
