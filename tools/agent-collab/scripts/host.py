@@ -730,8 +730,7 @@ def check_availability(args: argparse.Namespace) -> int:
                     args.timeout_seconds,
                 )
     availability.validate_result(output)
-    print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
-    return availability.EXIT_CODES[output["status"]]
+    return emit_result((availability.EXIT_CODES[output["status"]], output))
 
 
 def build_start_request(args: argparse.Namespace, settings: dict[str, Any]) -> dict[str, Any]:
@@ -1366,27 +1365,8 @@ def _finish_after_wait_locked(
             ) from exc
 
     if not peer_report_path.exists() or peer_report_path.stat().st_size == 0:
-        failure = {
-            "schema_version": CONFIG.ARTIFACT_SCHEMA_VERSION,
-            "run_id": request["run_id"],
-            "origin": request["origin"],
-            "host": request["host"],
-            "peer": request["peer"],
-            "mode": request["mode"],
-            "target": request["target"],
-            "status": "peer_failed",
-            "verdict": "blocked",
-            "summary": "Peer process produced no report before finish timeout.",
-            "findings": [],
-            "claims": [],
-            "limitations": ["Peer report missing or empty."],
-            "next_actions": [],
-            "error": {
-                "kind": "peer_no_output",
-                "message": "Peer report missing or empty.",
-                "details": None,
-            },
-        }
+        failure = CONFIG.PEER.failure("peer_no_output", "Peer report missing or empty.", request)
+        failure["summary"] = "Peer process produced no report before finish timeout."
         write_json(peer_report_path, failure)
 
     peer_runtime = CONFIG.PEER
@@ -1697,8 +1677,7 @@ def status(args: argparse.Namespace) -> int:
         job = state.find_job(run_root, result["run_id"])
         if job:
             result["job"] = job
-        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
-        return 0
+        return emit_result((0, result))
 
     jobs = state.list_jobs(run_root)
     if not args.all:
@@ -1707,8 +1686,7 @@ def status(args: argparse.Namespace) -> int:
         "run_root": str(run_root),
         "jobs": jobs,
     }
-    print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
-    return 0
+    return emit_result((0, result))
 
 
 def result(args: argparse.Namespace) -> int:
@@ -1745,8 +1723,7 @@ def result(args: argparse.Namespace) -> int:
         "cancel_workspace_mutation": ARTIFACTS.read_json_if_exists(run_dir / "cancel-workspace-mutation.json"),
         "peer_stderr_tail": stderr_tail(run_dir / "peer.stderr.log"),
     }
-    print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
-    return 0
+    return emit_result((0, output))
 
 
 def is_direct_run_dir(run_root: Path, run_dir: Path) -> bool:
@@ -2182,8 +2159,7 @@ def _cancel_locked(args: argparse.Namespace, context: tuple[Path, Path, Path]) -
             "workspace_guard": str(guard_path),
             "workspace_guard_released": released,
         }
-        print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
-        return 0
+        return emit_result((0, output))
 
     _, active_guard = REGISTRY.require_workspace_guard_owner(peer_repo_root, request["run_id"], owner=process_info)
     if active_guard is None or active_guard["run_id"] != request["run_id"]:
@@ -2230,8 +2206,7 @@ def _cancel_locked(args: argparse.Namespace, context: tuple[Path, Path, Path]) -
                     "resume advance and synthesize so the evidence is not converted into a cancellation."
                 ),
             }
-            print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
-            return 1
+            return emit_result((1, output))
 
     if before_minimum_wait and not force_before_min_wait:
         output = {
@@ -2245,8 +2220,7 @@ def _cancel_locked(args: argparse.Namespace, context: tuple[Path, Path, Path]) -
             "minimum_wait_remaining_seconds": ARTIFACTS.json_number(CONFIG.MIN_PEER_WAIT_SECONDS - elapsed_seconds),
             "message": "Peer is still inside the minimum wait window; use finish/status and keep waiting. Empty peer-report.json or stderr is normal while the peer is alive.",
         }
-        print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
-        return 1
+        return emit_result((1, output))
 
     cleanup = terminate_tracked_process_tree(process_info, run_dir, request)
     if cleanup["quiescent"] is not True:
@@ -2326,8 +2300,7 @@ def _cancel_locked(args: argparse.Namespace, context: tuple[Path, Path, Path]) -
         "workspace_mutation": cancel_result["workspace_mutation"],
         "workspace_guard_released": str(guard_path),
     }
-    print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
-    return 0
+    return emit_result((0, output))
 
 
 def reset_settings(args: argparse.Namespace, repo_root: Path) -> int:
@@ -2349,8 +2322,7 @@ def reset_settings(args: argparse.Namespace, repo_root: Path) -> int:
         "removed": removed,
         "missing": missing,
     }
-    print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
-    return 0
+    return emit_result((0, output))
 
 
 def setup(args: argparse.Namespace) -> int:
@@ -2404,8 +2376,7 @@ def setup(args: argparse.Namespace) -> int:
         output["history_cleanup"] = history_cleanup
     if args.print_env:
         output["env"] = CONFIG.settings_to_env(settings)
-    print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
-    return 0
+    return emit_result((0, output))
 
 
 def run_command_capture(command: list[str], timeout: float = 20) -> dict[str, Any]:
@@ -2631,8 +2602,7 @@ def doctor(args: argparse.Namespace) -> int:
         "setting_sources": resolved["sources"],
         "precedence": "environment > local > global > built-in",
     }
-    print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
-    return 0 if output["ok"] else 1
+    return emit_result((0 if output["ok"] else 1, output))
 
 
 def build_parser() -> argparse.ArgumentParser:

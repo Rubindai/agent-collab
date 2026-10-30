@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 import tempfile
+from argparse import Namespace
 from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
 from unittest import TestCase, mock
@@ -13,6 +14,31 @@ import test_agent_collab_lifecycle_audit as lifecycle
 
 setUpModule = fixtures.setUpModule
 tearDownModule = fixtures.tearDownModule
+
+
+class SettingsProjectionTests(TestCase):
+    def test_environment_roundtrip_preserves_explicit_choices(self):
+        config = fixtures.load_host().CONFIG
+        for enabled in (True, False):
+            settings = {**config.SETTING_DEFAULTS,
+                'safe_mode': enabled, 'local_subagents_allowed': enabled,
+                'online_research': enabled, 'adjudicator_enabled': enabled,
+                'max_local_subagents': 0, 'agent_timeout_seconds': 900.5,
+                'codex_effort': 'high', 'claude_effort': 'max',
+                'codex_config': ['notice="雪"'], 'workspace_mode': 'direct'}
+            environment = config.settings_to_env(settings)
+            raw = {key: environment[name] for key, name in config.SETTING_ENV_KEYS.items()}
+            self.assertEqual(config.normalize_settings(raw, 'roundtrip'), settings)
+            self.assertIn('雪', environment['CODEX_AGENT_COLLAB_CONFIG'])
+
+    def test_setup_projection_preserves_false_zero_and_timeout_error_order(self):
+        config = fixtures.load_host().CONFIG
+        self.assertEqual(config.settings_from_args(Namespace(
+            safe_mode=False, max_local_subagents=0, timeout_seconds=900,
+            agent_timeout_seconds=3600, unknown='ignored')),
+            {'safe_mode': False, 'max_local_subagents': 0, 'agent_timeout_seconds': 900})
+        with self.assertRaisesRegex(ValueError, 'expected boolean'):
+            config.settings_from_args(Namespace(safe_mode='invalid', timeout_seconds='invalid'))
 
 
 class RegistryOwnershipTests(TestCase):
@@ -210,6 +236,15 @@ class CompactWorkflowTests(TestCase):
         payload = {'summary':'Reviewed the captured evidence.', 'verdict':'pass', 'claims':[], 'unresolved_risks':[]}
         self.host.write_json(path, payload)
         return path
+
+    def test_missing_peer_report_keeps_summary_and_diagnostic_distinct(self):
+        (self.run / 'peer-report.json').unlink()
+        self.finish()
+        report = self.host.ARTIFACTS.load_json(self.run / 'peer-report.json')
+        self.assertEqual(report['summary'], 'Peer process produced no report before finish timeout.')
+        self.assertEqual(report['error'], {'kind': 'peer_no_output',
+            'message': 'Peer report missing or empty.', 'details': None})
+        self.assertEqual(report['limitations'], ['Peer report missing or empty.'])
 
     def test_semantic_inputs_complete_without_manual_metadata(self):
         first = self.root / 'first.json'

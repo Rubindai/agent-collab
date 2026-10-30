@@ -569,22 +569,16 @@ def require_valid_settings(resolved: dict[str, Any]) -> None:
 
 
 def settings_to_env(settings: dict[str, Any]) -> dict[str, str]:
-    return {
-        "AGENT_COLLAB_LOCAL_SUBAGENTS_ALLOWED": "1" if settings["local_subagents_allowed"] else "0",
-        "AGENT_COLLAB_MAX_LOCAL_SUBAGENTS": str(settings["max_local_subagents"]),
-        "AGENT_COLLAB_ADJUDICATOR_ENABLED": "1" if settings["adjudicator_enabled"] else "0",
-        "AGENT_COLLAB_TIMEOUT_SECONDS": str(settings["agent_timeout_seconds"]),
-        "AGENT_COLLAB_SAFE_MODE": "1" if settings["safe_mode"] else "0",
-        "AGENT_COLLAB_WORKSPACE_MODE": str(settings["workspace_mode"]),
-        "CODEX_AGENT_COLLAB_MODEL": str(settings["codex_model"]),
-        "CODEX_AGENT_COLLAB_EFFORT": str(settings["codex_effort"]),
-        "AGENT_COLLAB_ONLINE_RESEARCH": "1" if settings["online_research"] else "0",
-        "CODEX_AGENT_COLLAB_CONFIG": json.dumps(settings["codex_config"], ensure_ascii=False),
-        "CLAUDE_AGENT_COLLAB_MODEL": str(settings["claude_model"]),
-        "CLAUDE_AGENT_COLLAB_EFFORT": str(settings["claude_effort"]),
-        "CLAUDE_AGENT_COLLAB_TOOLS": str(settings["claude_tools"]),
-        "AGENT_COLLAB_HISTORY_RETAINED_RUNS": str(settings["history_retained_runs"]),
-    }
+    environment = {}
+    for key, env_key in SETTING_ENV_KEYS.items():
+        value = settings[key]
+        if type(SETTING_DEFAULTS[key]) is bool:
+            environment[env_key] = "1" if value else "0"
+        elif key == "codex_config":
+            environment[env_key] = json.dumps(value, ensure_ascii=False)
+        else:
+            environment[env_key] = str(value)
+    return environment
 
 
 def write_settings_file(path: Path, settings: dict[str, Any]) -> None:
@@ -602,23 +596,10 @@ def write_settings_file(path: Path, settings: dict[str, Any]) -> None:
 
 def settings_from_args(args: argparse.Namespace) -> dict[str, Any]:
     updates: dict[str, Any] = {}
-    mapping = {
-        "local_subagents_allowed": "local_subagents_allowed",
-        "max_local_subagents": "max_local_subagents",
-        "adjudicator_enabled": "adjudicator_enabled",
-        "safe_mode": "safe_mode",
-        "workspace_mode": "workspace_mode",
-        "codex_model": "codex_model",
-        "codex_effort": "codex_effort",
-        "online_research": "online_research",
-        "codex_config": "codex_config",
-        "claude_model": "claude_model",
-        "claude_effort": "claude_effort",
-        "claude_tools": "claude_tools",
-        "history_retained_runs": "history_retained_runs",
-    }
-    for attr, key in mapping.items():
-        value = getattr(args, attr, None)
+    for key in SETTING_DEFAULTS:
+        if key == "agent_timeout_seconds":
+            continue  # The CLI alias is normalized last, preserving error order.
+        value = getattr(args, key, None)
         if value is not None:
             updates[key] = value
     if getattr(args, "timeout_seconds", None) is not None:
