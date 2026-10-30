@@ -1041,7 +1041,25 @@ def model_unavailable_message(
     requested_model: str,
     requested_effort: str | None = None,
 ) -> str | None:
-    combined = f"{stdout}\n{stderr}".casefold()
+    # Codex stdout is JSONL telemetry, including untrusted tool results and
+    # assistant text. Only its provider error fields can classify a failure.
+    messages = [stderr]
+    for line in stdout.splitlines():
+        try:
+            event = STRICT_JSON.loads(line, max_bytes=1_000_000)
+        except ValueError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        kind = event.get("type")
+        error = event if kind == "error" else event.get("error") if kind == "turn.failed" else None
+        if kind == "item.completed":
+            item = event.get("item")
+            if isinstance(item, dict) and item.get("type") == "error":
+                error = item
+        if isinstance(error, dict) and isinstance(error.get("message"), str):
+            messages.append(error["message"])
+    combined = "\n".join(messages).casefold()
     unavailable_markers = (
         "model is not supported",
         "model not supported",

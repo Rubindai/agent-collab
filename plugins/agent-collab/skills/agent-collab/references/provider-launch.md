@@ -1,6 +1,6 @@
 # Provider Launch Controls
 
-This conditional reference records provider-specific launch pins and their limits. Read it when auditing provider behavior; the normal host workflow is in [synthesize.md](synthesize.md).
+This conditional reference records provider-specific launch pins and their limits. Read it when auditing provider behavior; the normal host workflow is in [SKILL.md](../SKILL.md), and the conditional closure contract is in [synthesize.md](synthesize.md).
 
 ### Provider launch audit
 

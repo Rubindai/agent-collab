@@ -1,0 +1,75 @@
+{
+  "schema_version": "1.1",
+  "name": "synthetic-finding-verification",
+  "tags": [
+    "outcome",
+    "synthetic"
+  ],
+  "runs": 1,
+  "execution": {
+    "max_turns": 6,
+    "timeout_seconds": 120,
+    "allowed_tools": [
+      "Read",
+      "Skill"
+    ]
+  },
+  "graders": [
+    {
+      "name": "skill-selected",
+      "type": "tool_used",
+      "tool": "Skill",
+      "input_match": "\"skill\"\\s*:\\s*\"(?:[\\w-]+:)?agent-collab\"",
+      "min": 1,
+      "arm": "with-only"
+    },
+    {
+      "name": "true-finding-retained",
+      "type": "regex",
+      "target": "last_message",
+      "pattern": "^F1=confirmed\\s*$",
+      "flags": "m"
+    },
+    {
+      "name": "false-finding-rejected",
+      "type": "regex",
+      "target": "last_message",
+      "pattern": "^F2=rejected\\s*$",
+      "flags": "m"
+    },
+    {
+      "name": "first-witness-evaluated",
+      "type": "regex",
+      "target": "last_message",
+      "pattern": "^F1_ACTUAL=true\\s*$",
+      "flags": "m"
+    },
+    {
+      "name": "second-witness-evaluated",
+      "type": "regex",
+      "target": "last_message",
+      "pattern": "^F2_ACTUAL=true\\s*$",
+      "flags": "m"
+    },
+    {
+      "name": "correct-verdict",
+      "type": "regex",
+      "target": "last_message",
+      "pattern": "^VERDICT=changes_recommended\\s*$",
+      "flags": "m"
+    },
+    {
+      "name": "synthetic-source-disclosed",
+      "type": "regex",
+      "target": "last_message",
+      "pattern": "^SOURCE=synthetic_fixture\\s*$",
+      "flags": "m"
+    },
+    {
+      "name": "six-line-result",
+      "type": "regex",
+      "target": "last_message",
+      "pattern": "^F1=(?:confirmed|rejected|plausible_unverified)\\r?\\nF2=(?:confirmed|rejected|plausible_unverified)\\r?\\nF1_ACTUAL=(?:true|false)\\r?\\nF2_ACTUAL=(?:true|false)\\r?\\nVERDICT=(?:pass|pass_with_concerns|changes_recommended|blocked)\\r?\\nSOURCE=synthetic_fixture\\s*$"
+    }
+  ]
+}

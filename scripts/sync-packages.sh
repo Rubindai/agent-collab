@@ -92,7 +92,7 @@ fi
 while IFS= read -r source_entry; do
   source_name="${source_entry##*/}"
   case "$source_name" in
-    SKILL.md|README.md|assets|agents|scripts|references|schemas|runs|settings.local.json|__pycache__)
+    SKILL.md|README.md|assets|agents|scripts|references|schemas|evals|runs|settings.local.json|__pycache__)
       ;;
     *)
       echo "unclassified Agent Collab source entry: $source_entry" >&2
@@ -126,7 +126,7 @@ if [[ -d "$repo_root/.agents" ]] && find "$repo_root/.agents" -type f ! -path "$
 fi
 
 for manifest in \
-  "$plugin_root/.codex-plugin/plugin.json" \
+  "$plugin_root/plugin.json" \
   "$plugin_root/.claude-plugin/plugin.json"
 do
   if [[ ! -f "$manifest" ]]; then
@@ -195,7 +195,7 @@ if codex_path != expected_source or claude_entry.get("source") != expected_sourc
 
 version = (root / "VERSION").read_text(encoding="utf-8").strip()
 for relative_manifest in (
-    "plugins/agent-collab/.codex-plugin/plugin.json",
+    "plugins/agent-collab/plugin.json",
     "plugins/agent-collab/.claude-plugin/plugin.json",
 ):
     manifest = load(relative_manifest)
@@ -226,7 +226,8 @@ cp -a "$claude_agents_source" "$staging_dir/claude-agents"
 mkdir -p "$staging_dir/codex-agents"
 cp -a "$codex_agent_source" "$staging_dir/codex-agents/openai.yaml"
 mkdir -p "$staging_dir/package"
-cp -a "$repo_root/LICENSE" "$source_dir/README.md" "$source_dir/assets" "$staging_dir/package/"
+cp -a "$repo_root/LICENSE" "$source_dir/README.md" "$source_dir/assets" "$source_dir/evals" "$staging_dir/package/"
+rm -rf "$staging_dir/package/evals/results"
 find "$staging_dir" -type d -name __pycache__ -prune -exec rm -rf {} +
 find "$staging_dir" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
 
@@ -238,7 +239,7 @@ if [[ "$check" -eq 0 ]]; then
   find "$skills_parent" -mindepth 1 -maxdepth 1 -name '.agent-collab.*' -exec rm -rf {} +
   find "$plugin_root" -mindepth 1 -maxdepth 1 -name '.agents.*' -exec rm -rf {} +
   find "$plugin_root" -mindepth 1 -maxdepth 1 -name '.metadata.*' -exec rm -rf {} +
-  find "$plugin_root" -mindepth 1 -maxdepth 1 -name '.assets.old.*' -exec rm -rf {} +
+  find "$plugin_root" -mindepth 1 -maxdepth 1 \( -name '.assets.old.*' -o -name '.evals.old.*' \) -exec rm -rf {} +
   new_skill_dir="$(mktemp -d "$skills_parent/.agent-collab.sync.XXXXXX")"
   new_agents_dir="$(mktemp -d "$plugin_root/.agents.sync.XXXXXX")"
   new_metadata_dir="$(mktemp -d "$plugin_root/.metadata.sync.XXXXXX")"
@@ -265,12 +266,15 @@ if [[ "$check" -eq 0 ]]; then
   for filename in LICENSE README.md; do
     mv "$new_metadata_dir/$filename" "$plugin_root/$filename"
   done
-  old_assets_dir="$plugin_root/.assets.old.$$"
-  if [[ -e "$plugin_root/assets" ]]; then
-    mv "$plugin_root/assets" "$old_assets_dir"
-  fi
-  mv "$new_metadata_dir/assets" "$plugin_root/assets"
-  rm -rf "$old_assets_dir" "$new_metadata_dir"
+  for dirname in assets evals; do
+    old_metadata_dir="$plugin_root/.$dirname.old.$$"
+    if [[ -e "$plugin_root/$dirname" ]]; then
+      mv "$plugin_root/$dirname" "$old_metadata_dir"
+    fi
+    mv "$new_metadata_dir/$dirname" "$plugin_root/$dirname"
+    rm -rf "$old_metadata_dir"
+  done
+  rm -rf "$new_metadata_dir"
   new_metadata_dir=""
   rm -rf "$old_skill_dir" "$old_agents_dir"
 fi
@@ -321,7 +325,7 @@ pairs += [
     (staging / "claude-agents", plugin / "agents", "packaged Claude agents"),
     (staging / "codex-agents", skill / "agents", "packaged Codex agent metadata"),
 ]
-pairs += [(staging / "package" / name, plugin / name, f"packaged {name}") for name in ("LICENSE", "README.md", "assets")]
+pairs += [(staging / "package" / name, plugin / name, f"packaged {name}") for name in ("LICENSE", "README.md", "assets", "evals")]
 for source, packaged, label in pairs:
     same = (
         signature(source) == signature(packaged) if source.is_file() and packaged.is_file()

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Classify Codex model and effort failures from provider error events rather than quoted tool or assistant output.
+- Add six native Claude behavioral evaluations for explicit and implicit activation, nonactivation, and synthetic finding verification, with deterministic graders and a no-plugin comparison.
+- Use portable root `plugin.json` with OpenAI presentation metadata and retain the native Claude manifest in the shared package.
+- Require provider validators and isolated marketplace installation checks in CI, fetch the official skill validator from the installed Codex release, and pin GitHub Actions to maintained commit SHAs.
+- Restore explicit Fable 5.1 selection guidance, correct workflow navigation, and explain prompt-injection exposure without changing model, effort, or permission defaults.
 - Reduce runtime duplication with shared module imports, strict field validation, and provider-result handling. Malformed request fields now produce structured failures, and executable entry points resolve sibling modules with Python safe-path mode enabled.
 - Add a resumable `start`/`advance` host workflow with explicit next actions, resolved host policy, bounded 60-second guided waits, and successful waiting responses. Keep the normal instructions self-contained within 8 KB and make recovery diagnostics use the guided interface.
 - Save readable, revision-bound Markdown evidence separately from compact control output, preserving all original reports while omitting duplicate matrix rows and admission hashes from the reading surface. Review receipts now bind rendered bytes; refresh older drafts through `advance` before synthesis.

@@ -17,7 +17,7 @@ These are the project defaults requested for Agent Collab. Existing persisted se
 
 The user can select a model and reasoning or effort level in natural language. The host translates an explicit selection into the per-run flags `--peer-model` and `--peer-effort`, then requires a fresh availability attestation for that exact pair before launch.
 
-Use `--peer-model` and `--peer-effort` for an explicit per-run choice. Examples include `claude-opus-5-5`/`xhigh`, `gpt-6-astra`/`high`, and explicit-only `claude-fable-5`/`max` (“Fable 5 Max”). Fable cannot be a built-in, environment, local, or global default. Never substitute a fallback.
+Use `--peer-model` and `--peer-effort` for an explicit per-run choice. Examples include `claude-opus-5-5`/`xhigh`, `gpt-6-astra`/`high`, and explicit-only `claude-fable-5`/`max` (“Fable 5 Max”). For an explicit Fable 5.1 request, use `--peer-model claude-fable-5-1` and the requested `--peer-effort`; “Fable 5 Max” retains its original `claude-fable-5`/`max` meaning. Fable cannot be a built-in, environment, local, or global default. Every choice needs fresh exact-pair attestation. Never substitute a fallback. [Fable 5.1 model ID](https://platform.claude.com/docs/en/models/fable-5-1/overview)
 
 Codex effort support comes from the exact model in the catalog resolved by `codex debug models`; it is not hardcoded here. Claude accepts `low|medium|high|xhigh|max|ultracode`, but bounded Agent Collab execution rejects `ultracode` before creating artifacts because Workflow orchestration bypasses the Agent-call counter. Fresh exact-pair availability is required before any peer, helper, host pass, or adjudicator begins. See [run selection](tools/agent-collab/references/launch.md#resolve-the-run) for probes, aliases, precedence, and failure handling.
 
@@ -140,6 +140,7 @@ Official references:
 - [Anthropic: Claude Code changelog](https://code.claude.com/docs/en/changelog)
 - [Anthropic: Model migration guide](https://platform.claude.com/docs/en/about-claude/models/migration-guide)
 - [Anthropic: Prompting Claude Opus 5.5](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-opus-5-5)
+- [Anthropic: Claude Fable 5.1 model](https://platform.claude.com/docs/en/models/fable-5-1/overview)
 - [Anthropic: Claude Fable 5 model](https://platform.claude.com/docs/en/models/fable-5/overview)
 - [Anthropic: Prompting Claude Fable 5](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-fable-5)
 - [Anthropic: Effort](https://platform.claude.com/docs/en/build-with-claude/effort)
@@ -216,7 +217,7 @@ Exact active IDs take precedence over local history and unique prefixes; an expl
 
 ## Permissions and recursion
 
-Full capability and edit authorization are separate. By default, Codex uses `danger-full-access` and Claude uses `bypassPermissions`, while `edit_allowed=false` instructs the peer not to edit. That instruction and mutation detection are not preventive enforcement. Anthropic recommends `bypassPermissions` only in isolated containers, VMs, or development containers without internet access where host damage is impossible.
+Full capability and edit authorization are separate. By default, Codex uses `danger-full-access` and Claude uses `bypassPermissions`, while `edit_allowed=false` instructs the peer not to edit. That instruction and mutation detection are not preventive enforcement. Bypass mode does not protect against prompt injection: repository text, tool output, or online sources can induce unintended actions with the peer’s granted capabilities. [Anthropic permission guidance](https://code.claude.com/docs/en/permission-modes#skip-all-checks-with-bypasspermissions-mode) Anthropic recommends `bypassPermissions` only in isolated containers, VMs, or development containers without internet access where host damage is impossible.
 
 Fresh Linux settings use `fuse-overlayfs` and `bwrap` for a disposable view of HOME and the repository. Fresh macOS and Windows settings use direct mode with bounded before/after snapshots. Explicit settings remain authoritative. Durable delegated edits require `--edit-allowed --workspace-mode direct`; unavailable isolation fails closed without a direct fallback.
 
@@ -363,6 +364,7 @@ tools/agent-collab/assets/                        Canonical SVG logo and compose
 tools/agent-collab/README.md                      Canonical package overview
 scripts/sync-packages.sh                          Package synchronization and byte/mode parity check
 scripts/release-check.sh                          Every release verification step
+scripts/ci-provider-checks.sh                     Independent no-auth provider validators and isolated installs
 scripts/install-linux-isolation-deps.sh           Linux isolated-workspace dependencies
 tests/test_agent_collab_runtime.py                Runtime and package tests, plus shared fixtures
 tests/test_agent_collab_safety.py                 Process, recursion, snapshot, and strict-JSON safety tests
@@ -389,7 +391,7 @@ scripts/sync-packages.sh --check
 
 ## Verify
 
-Run every release check with one command. Release mode fails if any step, including the official validators and isolated installations, cannot run; `--ci` reports steps that need provider CLIs as skipped and tolerates skipped unit tests. Both scripts and `sync-packages.sh` use the interpreter named by `PYTHON` (default `python3`); set `PYTHON=python` on Windows:
+Run every release check with one command. Release mode fails if any step, including the official validators and isolated installations, cannot run; `--ci` tolerates platform-specific skipped unit tests; all four provider validation and installation checks remain mandatory in both modes. CI installs the latest stable provider CLIs and validator dependencies. Both scripts and `sync-packages.sh` use the interpreter named by `PYTHON` (default `python3`); set `PYTHON=python` on Windows:
 
 ```bash
 scripts/release-check.sh
@@ -404,12 +406,13 @@ scripts/sync-packages.sh --check
 python3 -m py_compile tools/agent-collab/scripts/*.py
 # strict parse of every tracked JSON file and meta-validation of every schema (needs jsonschema)
 # VERSION, both manifests, and the CHANGELOG entry agree
-python3 "${CODEX_HOME:-$HOME/.codex}/skills/.system/skill-creator/scripts/quick_validate.py" tools/agent-collab
-python3 "${CODEX_HOME:-$HOME/.codex}/skills/.system/skill-creator/scripts/quick_validate.py" plugins/agent-collab/skills/agent-collab
-claude plugin validate . --strict
-claude plugin validate plugins/agent-collab --strict
-# isolated installs: CLAUDE_CONFIG_DIR=<tmp> with --scope user, and CODEX_HOME=<tmp>
+scripts/ci-provider-checks.sh codex-skill
+scripts/ci-provider-checks.sh claude-validator
+scripts/ci-provider-checks.sh claude-install
+scripts/ci-provider-checks.sh codex-install
 ```
+
+The four provider checks are independently runnable and require no model calls or credentials. The Codex skill check fetches the official validator from the exact installed stable CLI release, verifies that the release documents it, and prints its source URL and hash. Both installation checks use temporary provider homes, then verify the installed version and enabled state; Claude explicitly uses user scope. Provider integration checks run here rather than duplicating installation inside unit tests. GitHub Actions are pinned to full commit SHAs and refreshed weekly by Dependabot.
 
 On Windows, the discovery suite's POSIX assertions do not apply; run the Windows runtime checks instead, as CI does:
 
@@ -417,7 +420,7 @@ On Windows, the discovery suite's POSIX assertions do not apply; run the Windows
 py -3 tests/windows_runtime_checks.py -v
 ```
 
-Current Plugin Creator guidance keeps this existing `.codex-plugin/plugin.json` format supported as a compatibility fallback; it recommends a root `plugin.json` for new portable packages, which does not require migrating this dual-host package. Codex verification covers strict package JSON, schema and version consistency, official skill validation, and isolated marketplace installation. Test representative requests in a fresh conversation after installation. The package includes a README, the MIT license, and SVG logo and composer icons. Both manifests declare MIT, Codex references both icons, and Claude references the listing logo. The sync check compares these packaged files with their canonical sources. OpenAI requires both icons for Codex distribution and lists the license field as optional; Anthropic's checklist requires a README and license declaration. Public-directory publication additionally requires the submission portal's automated checks; passing local validators does not establish directory acceptance. [OpenAI package formats](https://developers.openai.com/plugins/build/plugins), [OpenAI local plugin testing](https://developers.openai.com/plugins/deploy/connect-chatgpt), [OpenAI submission checks](https://developers.openai.com/plugins/deploy/submission), [Anthropic submission checks](https://claude.com/docs/plugins/pre-submission-checklist)
+The package uses portable root `plugin.json` with OpenAI presentation metadata in `extensions.com.openai.interface`, plus the native Claude manifest at `.claude-plugin/plugin.json`. Skills use the fixed `skills/` directory; no legacy Codex manifest is shipped. Codex verification covers strict package JSON, schema and version consistency, official skill validation, and isolated marketplace installation. Test representative requests in a fresh conversation after installation. The package includes a README, the MIT license, and SVG logo and composer icons. Both manifests declare MIT, Codex references both icons, and Claude references the listing logo. The sync check compares these packaged files with their canonical sources. OpenAI requires both icons for Codex distribution and lists the license field as optional; Anthropic's checklist requires a README and license declaration. Public-directory publication additionally requires the submission portal's automated checks; passing local validators does not establish directory acceptance. [OpenAI package formats](https://developers.openai.com/plugins/build/plugins), [OpenAI local plugin testing](https://developers.openai.com/plugins/deploy/connect-chatgpt), [OpenAI submission checks](https://developers.openai.com/plugins/deploy/submission), [Anthropic submission checks](https://claude.com/docs/plugins/pre-submission-checklist)
 
 ### Tagged releases
 

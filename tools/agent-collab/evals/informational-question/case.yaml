@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.1",
+  "name": "informational-question",
+  "tags": [
+    "trigger",
+    "negative"
+  ],
+  "runs": 1,
+  "execution": {
+    "max_turns": 6,
+    "timeout_seconds": 120,
+    "allowed_tools": [
+      "Read",
+      "Skill"
+    ]
+  },
+  "graders": [
+    {
+      "name": "skill-not-selected",
+      "type": "tool_used",
+      "tool": "Skill",
+      "input_match": "\"skill\"\\s*:\\s*\"(?:[\\w-]+:)?agent-collab\"",
+      "min": 0,
+      "max": 0,
+      "arm": "both"
+    },
+    {
+      "name": "explains-independent-peer",
+      "type": "regex",
+      "target": "last_message",
+      "pattern": "\\b(independent|opposite)[\\s\\S]*\\b(peer|Claude|Codex|assistant|agent)\\b",
+      "flags": "i"
+    }
+  ]
+}

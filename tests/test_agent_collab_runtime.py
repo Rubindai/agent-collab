@@ -1580,6 +1580,35 @@ class PeerV2Tests(TestCase):
         )
         self.assertEqual(message, "Requested peer model is unavailable: gpt-5.6-sol")
 
+    def test_codex_nonzero_exit_ignores_model_errors_in_tool_and_assistant_text(self):
+        peer = load_peer()
+        for item in (
+            {"type": "command_execution", "aggregated_output": "model is unavailable; invalid effort"},
+            {"type": "agent_message", "text": "model is unavailable; invalid effort"},
+            {"type": "mcp_tool_call", "result": {"content": "model is unavailable"}},
+        ):
+            with self.subTest(item=item["type"]):
+                output = json.dumps({"type": "item.completed", "item": item})
+                completed = subprocess.CompletedProcess([], 1, output, "unrelated I/O failure")
+                result = peer.check_provider_result(request(peer="codex"), completed, None, Path("unused"), None)
+                self.assertEqual(result["error"]["kind"], "peer_nonzero_exit")
+
+    def test_codex_provider_error_events_preserve_selection_diagnostics(self):
+        peer = load_peer()
+        for message in ("model is unavailable", "invalid effort"):
+            for event in (
+                {"type": "error", "message": message},
+                {"type": "turn.failed", "error": {"message": message}},
+                {"type": "item.completed", "item": {"type": "error", "message": message}},
+            ):
+                with self.subTest(message=message, event=event["type"]):
+                    completed = subprocess.CompletedProcess([], 1, json.dumps(event), "")
+                    result = peer.check_provider_result(request(peer="codex"), completed, None, Path("unused"), None)
+                    self.assertEqual(result["error"]["kind"], "model_unavailable")
+                    self.assertIn("effort" if message == "invalid effort" else "model", result["summary"])
+        for output in ("model is unavailable", '{"type":"error","message":42}', '["model is unavailable"]'):
+            self.assertIsNone(peer.model_unavailable_message(output, "", "gpt-6-astra", "xhigh"))
+
     def test_report_v2_semantics_and_current_provider_schema(self):
         peer = load_peer()
         peer.validate_peer_report(valid_report())
@@ -3288,7 +3317,7 @@ class PackageTests(TestCase):
         self.assertRegex(version, r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
         self.assertIn(f"## {version} ", (REPO_ROOT / "CHANGELOG.md").read_text())
         for manifest in (
-            CODEX_PLUGIN_ROOT / ".codex-plugin" / "plugin.json",
+            CODEX_PLUGIN_ROOT / "plugin.json",
             CLAUDE_PLUGIN_ROOT / ".claude-plugin" / "plugin.json",
         ):
             self.assertEqual(json.loads(manifest.read_text())["version"], version)
@@ -3488,7 +3517,7 @@ class PackageTests(TestCase):
         for path in [path for path in RUNTIME_ROOT.rglob("*.json") if "runs" not in path.parts] + [
             REPO_ROOT / ".agents/plugins/marketplace.json",
             REPO_ROOT / ".claude-plugin/marketplace.json",
-            CODEX_PLUGIN_ROOT / ".codex-plugin/plugin.json",
+            CODEX_PLUGIN_ROOT / "plugin.json",
             CLAUDE_PLUGIN_ROOT / ".claude-plugin/plugin.json",
         ]:
             strict_json.load(path)
@@ -3627,77 +3656,6 @@ class PackageTests(TestCase):
             },
             json.loads((RUNTIME_ROOT / "schemas/cancel-result.schema.json").read_text()),
         )
-
-    def test_official_claude_plugin_validator_and_isolated_install(self):
-        if shutil.which("claude") is None:
-            self.skipTest("Claude Code CLI unavailable")
-        validated = subprocess.run(
-            ["claude", "plugin", "validate", ".", "--strict"], cwd=REPO_ROOT,
-            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        )
-        self.assertEqual(validated.returncode, 0, validated.stdout + validated.stderr)
-        direct = subprocess.run(
-            ["claude", "plugin", "validate", "plugins/agent-collab", "--strict"], cwd=REPO_ROOT,
-            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        )
-        self.assertEqual(direct.returncode, 0, direct.stdout + direct.stderr)
-        with tempfile.TemporaryDirectory() as tmp:
-            env = dict(os.environ)
-            env["CLAUDE_CONFIG_DIR"] = tmp
-            added = subprocess.run(
-                ["claude", "plugin", "marketplace", "add", "./", "--scope", "user"], cwd=REPO_ROOT, env=env,
-                text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            )
-            self.assertEqual(added.returncode, 0, added.stdout + added.stderr)
-            installed = subprocess.run(
-                [
-                    "claude", "plugin", "install", "agent-collab@agent-collab",
-                    "--scope", "user",
-                ], cwd=REPO_ROOT, env=env,
-                text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            )
-            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
-
-    def test_official_codex_skill_validators(self):
-        codex_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
-        skill_validator = codex_home / "skills/.system/skill-creator/scripts/quick_validate.py"
-        if not skill_validator.is_file():
-            self.skipTest("official Codex skill validator is unavailable")
-        for command in (
-            [sys.executable, str(skill_validator), "tools/agent-collab"],
-            [sys.executable, str(skill_validator), "plugins/agent-collab/skills/agent-collab"],
-        ):
-            completed = subprocess.run(
-                command,
-                cwd=REPO_ROOT,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
-
-    def test_official_codex_isolated_install(self):
-        launch_env = {**_SAVED_TEST_ENV, **os.environ}
-        if launch_env.get("AGENT_COLLAB_PEER_ONLY") == "true" and launch_env.get("AGENT_COLLAB_HOST") == "codex":
-            self.skipTest("host Codex CLI is intentionally unavailable inside a Claude peer")
-        if shutil.which("codex") is None:
-            self.skipTest("Codex CLI unavailable")
-        with tempfile.TemporaryDirectory() as tmp:
-            env = dict(os.environ)
-            env["CODEX_HOME"] = tmp
-            for command in (
-                ["codex", "plugin", "marketplace", "add", "."],
-                ["codex", "plugin", "add", "agent-collab@agent-collab"],
-            ):
-                completed = subprocess.run(
-                    command,
-                    cwd=REPO_ROOT,
-                    env=env,
-                    text=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                )
-                self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
 
     def test_maintenance_files_and_changelog_policy(self):
         self.assertTrue((REPO_ROOT / "scripts/sync-packages.sh").stat().st_mode & stat.S_IXUSR)

@@ -1,0 +1,7 @@
+version: 2
+updates:
+  # Keep immutable Action revisions current, including major releases.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
