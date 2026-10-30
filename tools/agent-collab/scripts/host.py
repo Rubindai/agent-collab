@@ -149,6 +149,43 @@ def write_json(path: Path, data: dict[str, Any]) -> None:
     CONFIG.STRICT_JSON.write(path, data)
 
 
+def emit_result(result: tuple[int, dict[str, Any]]) -> int:
+    code, output = result
+    print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
+    return code
+
+
+def next_action(run_dir: Path, repo_root: Path, stage: str, synthesis_input: str | None = None) -> dict[str, Any]:
+    """Return executable argv and only the instructions needed at this stage."""
+    command = [sys.executable, str(Path(__file__).resolve()), "advance", str(run_dir), "--repo-root", str(repo_root)]
+    actions = {
+        "first_pass": ("--first-pass", str(run_dir / "first-pass.input.json"),
+            "Complete independent host analysis without reading peer output or polling status. Save summary and claims, then submit this file.",
+            {"summary": "", "claims": []}),
+        "adjudicator": ("--adjudicator", str(run_dir / "adjudicator.input.json"),
+            "Obtain a fresh host-local advisory report using the neutral brief and returned evidence; follow the skill's helper rules. If no advisory helper is available, document that limitation in the synthesis and submit it with --synthesis instead.",
+            {"status": "ok", "summary": "", "false_positives": [], "claims_needing_verification": [],
+             "recommended_verdict": "", "claims": []}),
+        "synthesis": ("--synthesis", synthesis_input,
+            "Verify material claims in the returned evidence. Edit the generated synthesis input, then submit it immediately before answering. Changed evidence requires a newly reviewed revision.", None),
+        "waiting": (None, None, "Peer remains within its finite deadline. Resume advance; do not replace or cancel it unless the user stops the run.", None),
+    }
+    flag, path, instruction, template = actions[stage]
+    if flag:
+        command.extend([flag, path])
+    result = {"stage": stage, "command": command, "instruction": instruction}
+    if path:
+        result["input_path"] = path
+    if template is not None:
+        result["input_template"] = template
+    return result
+
+
+def host_policy(request: dict[str, Any]) -> dict[str, Any]:
+    return {key: request[key] for key in ("adjudicator_enabled", "local_subagents_allowed",
+        "max_local_subagents", "online_research", "edit_allowed", "workspace_mode", "peer_timeout_seconds")}
+
+
 def write_json_once(path: Path, data: dict[str, Any]) -> bool:
     """Atomically publish an immutable JSON artifact without replacing evidence."""
 
@@ -1066,8 +1103,8 @@ def launch_start(repo_root: Path, run_root: Path, resolved: dict[str, Any], requ
             peer_stdout.close()
         if peer_stderr is not None and not peer_stderr.closed:
             peer_stderr.close()
-    print(json.dumps(process_info, ensure_ascii=False, indent=2, sort_keys=True))
-    return 0
+    return emit_result((0, {**process_info, "host_policy": host_policy(request),
+                           "next_action": next_action(run_dir, repo_root, "first_pass")}))
 
 def start(args: argparse.Namespace) -> int:
     CONFIG.require_supported_platform()
@@ -1139,6 +1176,10 @@ def ingest_finish_inputs(args: argparse.Namespace, run_dir: Path, request: dict[
 
 
 def finish(args: argparse.Namespace) -> int:
+    return emit_result(finish_run(args))
+
+
+def finish_run(args: argparse.Namespace, *, guided: bool = False) -> tuple[int, dict[str, Any]]:
     _, run_root, run_dir = resolve_run_context(args)
     state = CONFIG.load_state_runtime()
     request = require_run_request(run_dir)
@@ -1185,6 +1226,7 @@ def finish(args: argparse.Namespace) -> int:
             finish_timeout_source=finish_timeout_source,
             hard_deadline=hard_deadline,
             wait_status=wait_status,
+            guided=guided,
         )
 
 
@@ -1202,7 +1244,8 @@ def _finish_after_wait_locked(
     finish_timeout_source: str,
     hard_deadline: float,
     wait_status: str,
-) -> int:
+    guided: bool = False,
+) -> tuple[int, dict[str, Any]]:
     current_request = require_run_request(run_dir)
     if current_request != request:
         raise SystemExit("host-request changed while finish was waiting; refusing finalization")
@@ -1265,8 +1308,9 @@ def _finish_after_wait_locked(
             },
         )
         write_json(run_dir / "host-result.json", output)
-        print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
-        return 1
+        if guided:
+            output["next_action"] = next_action(run_dir, repo_root, "waiting")
+        return 1, output
 
     process_tree_proven = False
     if time.time() >= hard_deadline:
@@ -1410,18 +1454,26 @@ def _finish_after_wait_locked(
         peer_identity=process_info["process_identity"],
     )
     write_json(run_dir / "host-result.json", ready_result)
-    review_paths = CONFIG.load_review_runtime().prepare(run_dir, process_info, review_documents(run_dir))
-    print(json.dumps({**ready_result, **review_paths}, ensure_ascii=False, indent=2, sort_keys=True))
-    return 0
+    review = CONFIG.load_review_runtime()
+    documents = review_documents(run_dir)
+    review_paths = review.prepare(run_dir, process_info, documents)
+    if guided:
+        advisory_available = request["local_subagents_allowed"] and request["max_local_subagents"] > 0
+        stage = "adjudicator" if adjudicator and adjudicator["status"] == "advisory_pending" and advisory_available else "synthesis"
+        return 0, {"run_dir": str(run_dir), "peer_status": peer_report["status"],
+                   "validation_status": validation_status, "host_policy": host_policy(request), **review_paths,
+                   "next_action": next_action(run_dir, repo_root, stage, review_paths["synthesis_input"]),
+                   "evidence_markdown": review.markdown(documents)}
+    return 0, {**ready_result, **review_paths}
 
 
 def complete(args: argparse.Namespace) -> int:
     context = resolve_run_context(args)
     with REGISTRY.run_operation_lock(context[2]):
-        return _complete_locked(args, context)
+        return emit_result(_complete_locked(args, context))
 
 
-def _complete_locked(args: argparse.Namespace, context: tuple[Path, Path, Path]) -> int:
+def _complete_locked(args: argparse.Namespace, context: tuple[Path, Path, Path]) -> tuple[int, dict[str, Any]]:
     _, run_root, run_dir = context
     request = require_run_request(run_dir)
     process_info = ARTIFACTS.load_json(run_dir / "peer-process.json")
@@ -1547,44 +1599,59 @@ def _complete_locked(args: argparse.Namespace, context: tuple[Path, Path, Path])
 
     if phase == "done":
         guard_path, active = REGISTRY.read_workspace_guard(repo_root, request["run_id"])
-        if active is None:
-            output = {
-                "schema_version": CONFIG.ARTIFACT_SCHEMA_VERSION,
-                "run_id": request["run_id"],
-                "run_dir": str(run_dir),
-                "status": "already_complete",
-                "workspace_guard": str(guard_path),
-            }
-            print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
-            return 0
-        REGISTRY.validate_guard_owner(active, process_info)
-        REGISTRY.release_workspace_guard(repo_root, request["run_id"], owner=process_info)
-        output = {
-            "schema_version": CONFIG.ARTIFACT_SCHEMA_VERSION,
-            "run_id": request["run_id"],
-            "run_dir": str(run_dir),
-            "status": "already_complete",
-            "workspace_guard_released": str(guard_path),
-        }
-        print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
-        return 0
-
-    done_result = {**host_result, "phase": "done", "completed_at": completed_at}
-    try:
+        release_guard = active is not None
+        guard_key = "workspace_guard_released" if release_guard else "workspace_guard"
+    else:
+        done_result = {**host_result, "phase": "done", "completed_at": completed_at}
         ARTIFACTS.validate_host_result(done_result, request, run_dir)
-    except ARTIFACTS.ArtifactValidationError as exc:
-        raise SystemExit(f"refusing to persist an invalid completed host result: {exc}") from exc
-    write_json(host_result_path, done_result)
-    guard_path = REGISTRY.release_workspace_guard(repo_root, request["run_id"], owner=process_info)
-    output = {
+        write_json(host_result_path, done_result)
+        release_guard, guard_key = True, "workspace_guard_released"
+    if release_guard:
+        guard_path = REGISTRY.release_workspace_guard(repo_root, request["run_id"], owner=process_info)
+    return 0, {
         "schema_version": CONFIG.ARTIFACT_SCHEMA_VERSION,
         "run_id": request["run_id"],
         "run_dir": str(run_dir),
-        "status": state_status,
-        "workspace_guard_released": str(guard_path),
+        "status": "already_complete" if phase == "done" else state_status,
+        guard_key: str(guard_path),
     }
-    print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
-    return 0
+
+
+def advance(args: argparse.Namespace) -> int:
+    """Resume from validated artifacts, using the same finalization and closure paths."""
+    evidence_inputs = any(getattr(args, key) is not None for key in ("first_pass", "helpers", "adjudicator"))
+    if args.synthesis is not None and evidence_inputs:
+        raise ValueError("submit evidence and synthesis separately so the new evidence is reviewed first")
+    context = resolve_run_context(args)
+    _, _, run_dir = context
+    with REGISTRY.run_operation_lock(run_dir):
+        request = require_run_request(run_dir)
+        process = ARTIFACTS.load_json(run_dir / "peer-process.json")
+        ARTIFACTS.validate_peer_process(process, request, run_dir)
+        if (run_dir / "cancel-result.json").exists():
+            raise ValueError("run has cancellation evidence; use cancel RUN to validate or resume cancellation")
+        current = ARTIFACTS.read_json_if_exists(run_dir / "host-result.json")
+        if current is not None:
+            ARTIFACTS.validate_host_result(current, request, run_dir)
+        if args.synthesis is not None and (not current or current["phase"] not in {"ready_for_synthesis", "done"}):
+            raise ValueError("synthesis requires returned review evidence; resume advance without --synthesis first")
+        if args.synthesis is not None or (current and current["phase"] == "done"):
+            if evidence_inputs:
+                raise ValueError("cannot replace evidence of a terminal run")
+            code, output = _complete_locked(args, context)
+            return emit_result((code, {**output, "next_action": None}))
+        REGISTRY.require_workspace_guard_owner(Path(process["repo_root"]), request["run_id"], owner=process)
+        admission = CONFIG.load_review_runtime().verify_admissions(run_dir, process)
+        if args.adjudicator is not None and (not current or current["phase"] != "ready_for_synthesis"):
+            raise ValueError("advisory input requires reviewed independent reports; submit the first pass with advance first")
+        if admission["reports"]["host-first-pass.json"] is None and args.first_pass is None:
+            if evidence_inputs:
+                raise ValueError("submit the independent first pass before other host reports")
+            return emit_result((0, {"run_dir": str(run_dir), "host_policy": host_policy(request),
+                                   "next_action": next_action(run_dir, Path(process["repo_root"]), "first_pass")}))
+    # No run-operation lock is held while waiting for the provider. Finalization
+    # rechecks ownership and evidence under the lock before publishing a revision.
+    return emit_result(finish_run(args, guided=True))
 
 
 def recover(args: argparse.Namespace) -> int:
@@ -2664,22 +2731,23 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument("--repo-root", type=Path)
     setup_parser.set_defaults(func=setup)
 
-    finish_parser = sub.add_parser("finish", help="Validate peer output and write synthesis support artifacts.")
-    finish_parser.add_argument("run", help="Run ID, unique prefix, or run directory.")
-    finish_parser.add_argument("--first-pass", type=Path, help="Semantic JSON with summary and claims.")
-    finish_parser.add_argument("--helpers", type=Path, help="Semantic JSON with a reports array.")
-    finish_parser.add_argument("--adjudicator", type=Path, help="Semantic JSON adjudicator judgments without run metadata.")
-    finish_parser.add_argument("--timeout-seconds", type=CONFIG.cli_number, default=None)
-    finish_parser.add_argument("--run-root", type=Path)
-    finish_parser.add_argument("--repo-root", type=Path)
-    finish_parser.set_defaults(func=finish)
-
-    complete_parser = sub.add_parser("complete", help="Close a synthesized run and release the run guard.")
-    complete_parser.add_argument("run", help="Run ID, unique prefix, or run directory.")
-    complete_parser.add_argument("--synthesis", type=Path, help="Edited synthesis.json generated by finish; metadata is filled automatically.")
-    complete_parser.add_argument("--run-root", type=Path)
-    complete_parser.add_argument("--repo-root", type=Path)
-    complete_parser.set_defaults(func=complete)
+    for name, handler, help_text in (
+        ("advance", advance, "Resume a run; return the next input and its captured review evidence."),
+        ("finish", finish, "Validate peer output and write synthesis support artifacts."),
+        ("complete", complete, "Close a synthesized run and release the run guard."),
+    ):
+        command = sub.add_parser(name, help=help_text)
+        command.add_argument("run", help="Run ID, unique prefix, or run directory.")
+        command.add_argument("--run-root", type=Path)
+        command.add_argument("--repo-root", type=Path)
+        if name != "complete":
+            command.add_argument("--first-pass", type=Path, help="Semantic JSON with summary and claims.")
+            command.add_argument("--helpers", type=Path, help="Semantic JSON with a reports array.")
+            command.add_argument("--adjudicator", type=Path, help="Semantic JSON advisory report without run metadata.")
+            command.add_argument("--timeout-seconds", type=CONFIG.cli_number, default=None)
+        if name != "finish":
+            command.add_argument("--synthesis", type=Path, help="Edited generated synthesis.json; metadata is filled automatically.")
+        command.set_defaults(func=handler)
 
     status_parser = sub.add_parser("status", help="Print active/recent jobs or one run's artifact status.")
     status_parser.add_argument("run", nargs="?", help="Optional run ID, unique prefix, or run directory.")

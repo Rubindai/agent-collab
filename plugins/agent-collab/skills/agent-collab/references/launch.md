@@ -1,6 +1,6 @@
 # Launch Policy and Prerequisites
 
-Read **Resolve the run** before `start`. Consult **Runtime boundaries and failures** when evaluating permissions or isolation, supervising platform-specific processes, or resolving a blocked run. Paths are relative to the skill root containing `SKILL.md`; use only that root's current scripts, references, and schemas.
+The normal workflow is self-contained in `SKILL.md`. Consult **Resolve the run** for explicit overrides and **Runtime boundaries and failures** for permissions, platform-specific supervision, or blocked runs. Paths are relative to the skill root containing `SKILL.md`; use only that root's current resources.
 
 ## Resolve the run
 

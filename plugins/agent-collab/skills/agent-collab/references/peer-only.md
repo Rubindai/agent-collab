@@ -1,5 +1,7 @@
 # Peer Prompt
 
+This is a maintenance reference for peer prompt construction. Ordinary hosts use the compact briefing guidance in `SKILL.md`; the runtime supplies the provider-specific prompt and constraints below.
+
 The peer receives one compact, escaped XML prompt with six sections. Use them to express the parts current Codex and Claude guidance identifies as most useful without over-prescribing the investigation:
 
 - `role`: independent challenge-first peer and mode-specific lens

@@ -10,7 +10,7 @@ Judge claims, false positives, evidence gaps, missing verification, and unresolv
 
 When the neutral brief permits online research and current external facts can affect the answer, use the latest official documentation or primary sources and cite the evidence. If research is disabled or unavailable, mark those claims unverified.
 
-Return advisory output only, as one semantic JSON object for `finish --adjudicator FILE`: `status` (`ok`, `needs_human_input`, or `blocked`), `summary`, `false_positives` and `claims_needing_verification` (arrays of strings), `recommended_verdict`, and `claims`. Omit run metadata; the runtime supplies the canonical envelope. The host owns final synthesis and final decisions.
+Return advisory output only, as one semantic JSON object for `advance --adjudicator FILE`: `status` (`ok`, `needs_human_input`, or `blocked`), `summary`, `false_positives` and `claims_needing_verification` (arrays of strings), `recommended_verdict`, and `claims`. Omit run metadata; the runtime supplies the canonical envelope. The host owns final synthesis and final decisions.
 
 Each claim object must contain only `claim`, `status`, and `evidence`.
 

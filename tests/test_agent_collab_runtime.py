@@ -3368,9 +3368,10 @@ class PackageTests(TestCase):
         for reference in ("launch.md", "peer-only.md", "synthesize.md"):
             self.assertIn("references/" + reference, codex)
             self.assertTrue((CODEX_SKILL_ROOT / "references" / reference).is_file())
-        commands = re.findall(r'scripts/host\.py" (start|finish|complete)', codex)
-        self.assertEqual(commands, ["start", "finish", "complete"])
-        for interface in ("--first-pass", "--adjudicator", "--synthesis", "review_dir", "synthesis_input"):
+        commands = re.findall(r'scripts/host\.py" (start|advance|finish|complete)', codex)
+        self.assertEqual(commands, ["start", "advance"])
+        self.assertLessEqual(len(codex.encode('utf-8')), 8000, 'The self-contained normal workflow has an 8 KB instruction budget')
+        for interface in ("--first-pass", "--adjudicator", "--synthesis", "next_action", "synthesis_input"):
             self.assertIn(interface, codex)
         self.assertIn("peer did not run", codex)
         self.assertIn("Never retry a fallback", codex)

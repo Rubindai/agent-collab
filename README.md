@@ -183,12 +183,16 @@ The runtime selects one of five modes unless the host supplies `--mode`:
 
 ## Workflow and evidence
 
-1. Start the opposite-product peer with a neutral brief before host analysis. The runtime first validates settings, platform support, isolation, helper policy, and fresh availability of the exact model/effort pair.
-2. Save independent host judgments before reading peer output. `finish RUN --first-pass FILE` admits that input and waits within the finite deadline.
-3. When enabled and available, obtain an independent advisory adjudicator report; admit it with `finish RUN --adjudicator FILE`. A runtime `advisory_pending` marker means no report was supplied.
-4. Review the captured evidence, verify material claims, and fill the generated synthesis input. `complete RUN --synthesis FILE` validates current evidence, records the final synthesis, and releases only that run's guard.
+Use `start` with a neutral brief before host analysis, then follow the returned `next_action` through `advance`. Each action includes executable argv, the input path, and the applicable semantic template. `host_policy` exposes the resolved helper, research, authorization, workspace, and deadline settings. The runtime validates prerequisites before launch and directs the remaining stages from admitted artifacts:
 
-The [synthesis contract](tools/agent-collab/references/synthesize.md) owns input shapes, claim labels, review revisions, and closure rules. The [launch policy](tools/agent-collab/references/launch.md) owns model selection and prerequisite failures. [AGENTS.md](AGENTS.md) owns contributor invariants.
+- `first_pass`: save independent host judgments before reading peer output; submit with `--first-pass`.
+- `waiting`: resume within the finite peer deadline without replacing the peer.
+- `adjudicator`: when enabled and available, obtain a fresh advisory report and submit with `--adjudicator`. Disabled local helpers route directly to synthesis. An `advisory_pending` marker always means no report was supplied; disclose unavailable adjudication in synthesis.
+- `synthesis`: review the returned `evidence_markdown`, verify claims, edit `synthesis_input`, and submit with `--synthesis` immediately before answering.
+
+`advance RUN` resumes the current stage without inferring submission from edited files. A response with `next_action: null` follows validated closure. The usual path uses four calls with adjudication and three without, including `start`; waiting or new evidence can require more. The interface has two command names, not a promise of two interactions.
+
+The normal workflow is self-contained in [SKILL.md](tools/agent-collab/SKILL.md). The [synthesis contract](tools/agent-collab/references/synthesize.md) documents low-level operations and evidence details; the [launch policy](tools/agent-collab/references/launch.md) covers overrides and failures. Read these references only when applicable. [AGENTS.md](AGENTS.md) owns contributor invariants.
 
 Stored settings and artifacts use strict schema 2.0: no legacy translation, coercion, duplicate JSON keys, non-finite numbers, or silently ignored fields. Runtime-owned files, locks, and newly created storage parents are private on POSIX; Windows inherits directory ACLs. Provider output is normalized only from the expected product envelope and then independently validated. Host judgments require explicit CLI admission, the first admitted pass is preserved, and the saved request is checked against its launch-time digest. Hashes bind evidence freshness; they do not prove a conclusion or that the host read it.
 
@@ -196,11 +200,11 @@ Every peer has a finite absolute deadline, 2700 seconds by default. Claude has n
 
 ## Runtime organization
 
-The host command adapter coordinates launch, finalization, and cancellation. `host_config.py` owns settings and prerequisite resolution; `registry.py` owns locked run-instance transitions; `artifacts.py` validates and assembles evidence; `review.py` binds compact judgments to a captured revision. `peer.py` separates preparation, provider execution, output checks, normalization, and mutation verification. Provider waits remain outside the run-operation lock. `peer-report.schema.json` is authoritative; `provider_schema.py` generates the self-contained provider projection during package synchronization and checks it without writing under `--check`. New unsupported constraints require an explicit projection decision.
+The host command adapter coordinates launch, finalization, and cancellation. `advance` reuses the same finalization and closure functions as the low-level `finish` and `complete` commands; it introduces no second lifecycle or persisted state format. `host_config.py` owns settings and prerequisite resolution; `registry.py` owns locked run-instance transitions; `artifacts.py` validates and assembles evidence; `review.py` binds compact judgments to a captured revision. `peer.py` separates preparation, provider execution, output checks, normalization, and mutation verification. Provider waits remain outside the run-operation lock. `peer-report.schema.json` is authoritative; `provider_schema.py` generates the self-contained provider projection during package synchronization and checks it without writing under `--check`. New unsupported constraints require an explicit projection decision.
 
 ## Compact host inputs
 
-Hosts supply judgments in small JSON files; the runtime writes the canonical envelopes and hashes. Use `finish RUN --first-pass FILE`, optionally with `--helpers FILE` or `--adjudicator FILE`. `finish` returns a revision directory and a four-field synthesis input. Read it with `result RUN --format markdown --review DIR`, author the synthesis judgments, and close with `complete RUN --synthesis FILE`. Changed evidence invalidates the draft and requires another reviewed revision. See the [synthesis contract](tools/agent-collab/references/synthesize.md#artifact-shapes) for exact inputs.
+Hosts supply judgments in small JSON files; the runtime writes canonical envelopes and hashes. `advance RUN --first-pass FILE` admits the first pass, waits, captures a revision, and renders its evidence under the same operation lock. Optional `--helpers FILE` admits actual helper reports. `advance RUN --adjudicator FILE` updates advisory evidence and returns the new revision. Submit evidence changes separately from `--synthesis FILE`; changed evidence invalidates an old draft without rewriting its judgments. The runtime requests stages and checks artifact bindings; it cannot prove reading history, advisory availability, or semantic completeness. Low-level `finish`, `result --format markdown --review DIR`, and `complete` remain available for inspection and tooling; see the [synthesis contract](tools/agent-collab/references/synthesize.md#artifact-shapes).
 
 ## Concurrent run ownership
 

@@ -151,7 +151,12 @@ def markdown(documents: dict[str, Any]) -> str:
                 else:
                     lines.append(prefix + "- " + literal(item))
 
+    # The matrix repeats source claims and findings; admission hashes are
+    # bookkeeping. Both remain revision-bound without duplicating them in the
+    # host's reading surface. Every original report is rendered in full.
     for name in EVIDENCE_FILES[2:]:
+        if name in {"claim-matrix.json", "host-inputs.json"}:
+            continue
         lines.extend(["## " + name.removesuffix(".json").replace("-", " ").title(), ""])
         if documents[name] is None:
             lines.append("Not supplied.")
