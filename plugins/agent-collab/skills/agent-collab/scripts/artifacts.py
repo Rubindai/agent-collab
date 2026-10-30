@@ -317,6 +317,7 @@ def validate_peer_process(data: dict[str, Any], request: dict[str, Any], run_dir
         "peer_cli_version",
         "workspace_guard",
         "owner_token",
+        "request_sha256",
         "settings",
         "peer_report",
         "peer_raw",
@@ -330,6 +331,8 @@ def validate_peer_process(data: dict[str, Any], request: dict[str, Any], run_dir
         )
     if data["schema_version"] != CONFIG.ARTIFACT_SCHEMA_VERSION:
         raise ArtifactValidationError("peer-process schema_version must be 2.0; legacy artifacts are not supported")
+    if data["request_sha256"] != canonical_artifact_sha256(request):
+        raise ArtifactValidationError("host-request differs from the launch-time request digest")
     if not isinstance(data["owner_token"], str) or re.fullmatch(r"[0-9a-f]{32}", data["owner_token"]) is None:
         raise ArtifactValidationError("peer-process owner_token must be 32 lowercase hexadecimal characters")
     for key in ("run_id", "host", "peer", "adjudicator_enabled"):

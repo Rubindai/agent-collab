@@ -39,6 +39,7 @@ Agent Collab launches an independent opposite-product peer, then the host verifi
 ### Artifacts
 
 - Accept semantic host judgments only through explicit CLI input flags. Bind generated synthesis drafts to an immutable evidence revision; never refresh hashes on an old judgment automatically.
+- Preserve the first admitted host pass and verify admission hashes for host reports. Bind the saved request to its launch-time digest so post-start edits cannot silently change helper admission or other resolved settings.
 - Enforce strict schema 2.0 for settings, state, requests, helper reports, and synthesis. Reject older, incomplete, noncanonical, or wrongly typed files without coercion or translation.
 - On supported POSIX hosts, create run directories as `0700` and persisted artifacts, settings, state, locks, snapshots, raw output, stderr, and helper counters as `0600`, independent of umask. Reject symlink destinations where no-follow creation is available. On Windows, POSIX modes do not apply; files inherit their directory's access control list. Write artifacts with LF line endings on every platform.
 

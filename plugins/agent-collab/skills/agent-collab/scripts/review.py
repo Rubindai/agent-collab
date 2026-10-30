@@ -19,12 +19,47 @@ EVIDENCE_FILES = (
     "host-request.json", "peer-process.json", "host-first-pass.json", "peer-report.json",
     "helper-reports.json", "adjudicator-report.json", "claim-matrix.json",
     "workspace-mutation.json", "peer-normalization.json",
+    "host-inputs.json",
 )
 JUDGMENT_FIELDS = {"summary", "verdict", "claims", "unresolved_risks"}
+HOST_INPUT_FILES = ("host-first-pass.json", "helper-reports.json", "adjudicator-report.json")
 
 
 def digest(value: Any) -> str:
     return hashlib.sha256(JSON.dumps(value, indent=None).encode("utf-8")).hexdigest()
+
+
+def admissions(run_dir: Path, owner: dict[str, Any]) -> dict[str, Any]:
+    expected = {"schema_version": "2.0", "run_id": owner["run_id"], "owner_token": owner["owner_token"],
+                "reports": {name: None for name in HOST_INPUT_FILES}}
+    path = run_dir / "host-inputs.json"
+    if not path.exists():
+        return expected
+    value = JSON.load(path, max_bytes=16_384)
+    if (not isinstance(value, dict) or set(value) != set(expected)
+            or any(value[key] != expected[key] for key in ("schema_version", "run_id", "owner_token"))
+            or not isinstance(value["reports"], dict) or set(value["reports"]) != set(HOST_INPUT_FILES)
+            or any(item is not None and (not isinstance(item, str) or re.fullmatch(r"[0-9a-f]{64}", item) is None)
+                   for item in value["reports"].values())):
+        raise ValueError("invalid host-inputs admission receipt")
+    return value
+
+
+def verify_admissions(run_dir: Path, owner: dict[str, Any], *, replacing: set[str] | None = None) -> dict[str, Any]:
+    receipt = admissions(run_dir, owner)
+    for name, expected in receipt["reports"].items():
+        if name in (replacing or set()):
+            continue
+        path = run_dir / name
+        value = JSON.load(path) if path.exists() else None
+        # The exact runtime placeholder is checked by the artifact validator;
+        # it contains no authored advisory judgment to admit.
+        if expected is None and (value is None or (name == "adjudicator-report.json"
+                and isinstance(value, dict) and value.get("status") == "advisory_pending")):
+            continue
+        if value is None or expected != digest(value):
+            raise ValueError(f"{name} differs from explicit CLI admission; supply the appropriate finish input flag")
+    return receipt
 
 
 def context(owner: dict[str, Any], documents: dict[str, Any]) -> dict[str, Any]:

@@ -39,6 +39,44 @@ class AuditRegressionTests(TestCase):
                 self.assertTrue(case.guard.exists())
                 self.assertFalse((case.run / 'host-synthesis.json').exists())
 
+    def test_request_edits_cannot_change_the_admitted_helper_policy(self):
+        case = self.workflow()
+        request = case.host.require_run_request(case.run)
+        request['max_local_subagents'] = 9
+        request['helper_enforcement']['limit'] = 9
+        case.host.write_json(case.run / 'host-request.json', request)
+        with self.assertRaisesRegex(ValueError, 'launch-time request digest'):
+            case.finish()
+        self.assertTrue(case.guard.exists())
+
+    def test_ambient_host_artifacts_do_not_count_as_cli_admission(self):
+        case = self.workflow()
+        (case.run / 'host-inputs.json').unlink()
+        with self.assertRaisesRegex(ValueError, 'explicit CLI admission'):
+            case.finish()
+        fixtures.admit_host_input(case.host, case.run, 'host-first-pass.json', fixtures.valid_host_first_pass())
+        case.finish()
+        case.host.write_json(case.run / 'host-synthesis.json', fixtures.valid_host_synthesis(run_dir=case.run))
+        with self.assertRaisesRegex(SystemExit, 'requires --synthesis'):
+            case.invoke('complete')
+        self.assertTrue(case.guard.exists())
+
+    def test_first_pass_is_immutable_and_direct_rewrites_are_detected(self):
+        case = self.workflow()
+        ready = case.finish()
+        before = (case.run / 'host-first-pass.json').read_bytes()
+        changed = fixtures.valid_host_first_pass()
+        changed['summary'] = 'A new conclusion after reading peer evidence.'
+        with self.assertRaisesRegex(ValueError, 'first pass is immutable'):
+            fixtures.admit_host_input(case.host, case.run, 'host-first-pass.json', changed)
+        self.assertEqual((case.run / 'host-first-pass.json').read_bytes(), before)
+        case.host.write_json(case.run / 'host-first-pass.json', changed)
+        with self.assertRaisesRegex(ValueError, 'explicit CLI admission'):
+            case.finish()
+        with self.assertRaisesRegex(ValueError, 'explicit CLI admission'):
+            case.invoke('complete', '--synthesis', case.author(ready))
+        self.assertTrue(case.guard.exists())
+
     def test_markdown_source_text_cannot_create_report_headings_or_links(self):
         host = fixtures.load_host()
         review = host.CONFIG.load_review_runtime()

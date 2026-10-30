@@ -87,10 +87,10 @@ class LifecycleAuditTests(TestCase):
             "host-request.json": req,
             "peer-process.json": fixtures.valid_peer_process(run_dir, root, guard),
             "provider-process.json": fixtures.valid_provider_process(),
-            "host-first-pass.json": fixtures.valid_host_first_pass(),
             "peer-report.json": fixtures.valid_report(),
         }.items():
             host.write_json(run_dir / name, data)
+        fixtures.admit_host_input(host, run_dir, "host-first-pass.json", fixtures.valid_host_first_pass())
         return req
 
     def assert_report_change_requires_resynthesis(self, artifact_name, changed_report):
@@ -113,14 +113,17 @@ class LifecycleAuditTests(TestCase):
                 self.assertEqual(host.finish(finish_args), 0)
                 synthesis = fixtures.valid_host_synthesis()
                 synthesis["claim_matrix_sha256"] = host.ARTIFACTS.load_json(run_dir / "host-result.json")["claim_matrix_sha256"]
-                host.write_json(run_dir / "host-synthesis.json", synthesis)
-                host.write_json(run_dir / artifact_name, changed_report)
+                complete_args.synthesis = fixtures.author_synthesis_input(host, run_dir, synthesis)
+                if artifact_name in host.CONFIG.load_review_runtime().HOST_INPUT_FILES:
+                    fixtures.admit_host_input(host, run_dir, artifact_name, changed_report)
+                else:
+                    host.write_json(run_dir / artifact_name, changed_report)
                 self.assertEqual(host.finish(finish_args), 0)
-                with self.assertRaisesRegex(SystemExit, "claim-matrix.*resynthesize"):
+                with self.assertRaisesRegex(ValueError, "stale review"):
                     host.complete(complete_args)
                 self.assertTrue(guard.exists())
                 synthesis["claim_matrix_sha256"] = host.ARTIFACTS.load_json(run_dir / "host-result.json")["claim_matrix_sha256"]
-                host.write_json(run_dir / "host-synthesis.json", synthesis)
+                complete_args.synthesis = fixtures.author_synthesis_input(host, run_dir, synthesis)
                 self.assertEqual(host.complete(complete_args), 0)
                 self.assertFalse(guard.exists())
 
@@ -147,7 +150,7 @@ class LifecycleAuditTests(TestCase):
                 common = [str(run_dir), "--run-root", str(run_root), "--repo-root", str(root)]
                 self.assertEqual(host.finish(host.build_parser().parse_args(["finish", *common])), 0)
                 synthesis = fixtures.valid_host_synthesis(run_dir=run_dir)
-                host.write_json(run_dir / "host-synthesis.json", synthesis)
+                common.extend(["--synthesis", str(fixtures.author_synthesis_input(host, run_dir, synthesis))])
                 self.assertEqual(host.complete(host.build_parser().parse_args(["complete", *common])), 0)
                 self.assertEqual(set(host.REGISTRY.read_workspace_guards(root)[1]), {"other-run"})
                 # Repeating completion must leave the other host's entry intact.

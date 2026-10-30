@@ -50,8 +50,8 @@ class RegistryOwnershipTests(TestCase):
                 lifecycle.LifecycleAuditTests().prepare_run(host, root, run, guard)
                 common = [str(run), '--repo-root', str(root)]
                 host.finish(host.build_parser().parse_args(['finish', *common]))
-                host.write_json(run / 'host-synthesis.json', fixtures.valid_host_synthesis(run_dir=run))
-                args = host.build_parser().parse_args(['complete', *common])
+                draft = fixtures.author_synthesis_input(host, run)
+                args = host.build_parser().parse_args(['complete', *common, '--synthesis', str(draft)])
                 host.complete(args)
                 host.REGISTRY.acquire_workspace_guard(root, run.name, 'claude', root / 'elsewhere' / run.name)
                 before = guard.read_bytes()
@@ -215,6 +215,7 @@ class CompactWorkflowTests(TestCase):
         first = self.root / 'first.json'
         first.write_text(json.dumps({'summary':'Independent host pass.', 'claims':[]}))
         (self.run / 'host-first-pass.json').unlink()
+        (self.run / 'host-inputs.json').unlink()
         output = self.finish('--first-pass', first)
         authored = self.author(output)
         second = self.finish()

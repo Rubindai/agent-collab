@@ -43,7 +43,7 @@ Save independent host analysis before opening peer output:
 {"summary": "Independent host analysis.", "claims": [{"claim": "A candidate finding.", "status": "plausible_unverified", "evidence": "File, command, or source evidence."}]}
 ```
 
-Admit it with `host.py finish RUN --first-pass first-pass.input.json`. Optional `--helpers helpers.input.json` accepts `{"reports": [{"name": "reviewer", "summary": "Independent summary.", "claims": []}]}` subject to the resolved helper bound. Existing canonical first-pass and helper files are also accepted through their strict artifact contracts.
+Admit it with `host.py finish RUN --first-pass first-pass.input.json`. Optional `--helpers helpers.input.json` accepts `{"reports": [{"name": "reviewer", "summary": "Independent summary.", "claims": []}]}` subject to the resolved helper bound. The runtime records CLI admission hashes in `host-inputs.json`; writing canonical reports directly does not admit judgments. The first pass is immutable after admission. Put later conclusions in synthesis; helper and advisory reports can be updated through their explicit flags, producing new evidence revisions.
 
 For enabled adjudication, save the actual advisory report without schema or run metadata:
 
@@ -59,13 +59,13 @@ Every successful `finish` returns `review_dir` and `synthesis_input`. Render the
 {"summary": "Host-verified synthesis.", "verdict": "pass_with_concerns", "claims": [], "unresolved_risks": []}
 ```
 
-Close with `host.py complete RUN --synthesis SYNTHESIS_INPUT`. Completion fills and validates the canonical synthesis artifact before releasing the owned guard. Existing exact canonical synthesis artifacts remain accepted by `complete RUN`.
+Close with `host.py complete RUN --synthesis SYNTHESIS_INPUT`. Completion requires this explicit input and fills and validates the canonical synthesis artifact before releasing the owned guard. `complete RUN` without input only rechecks an already completed run; a manually authored canonical synthesis cannot complete an active run.
 
 Each claim uses exactly `claim`, `status`, and `evidence`; evidence is one string. Use the claim labels below. Review every in-scope candidate; schema adherence does not prove a conclusion.
 
 The revision receipt binds the exact run instance and all admitted source reports, claim matrix, normalization, and workspace evidence. It contains hashes of complete reports, so changes to findings, severity, summaries, or other evidence invalidate the revision. Every peer finding also appears as a `plausible_unverified` matrix row with severity, confidence, details, files, and recommendation.
 
-`complete` rebuilds the matrix and checks current mutation evidence. Changed evidence keeps the guard active: rerun `finish`, inspect the new revision, and author a new synthesis. Repeated `finish` calls preserve an existing draft when evidence is unchanged; changed evidence gets another directory. Never copy old judgments into a new revision without reviewing it. The runtime checks artifact bindings, not the host's actual reading history.
+`complete` rebuilds the matrix and checks current mutation evidence. Changed evidence keeps the guard active: rerun `finish`, inspect the new revision, and author a new synthesis. Repeated `finish` calls preserve an existing draft when evidence is unchanged; changed evidence gets another directory. Never copy old judgments into a new revision without reviewing it. The runtime checks artifact bindings, not the host's actual reading history or whether every finding has a disposition. Rendered source strings are quoted and escaped so they cannot become report headings or links.
 
 ## Evidence boundaries
 
@@ -84,7 +84,11 @@ host-owned run artifacts are not writable from the sandbox. This does not observ
 through sockets (for example a Docker daemon or the systemd user manager), external services,
 or the network.
 
-Internal lifecycle artifacts without published schemas (`peer-process.json`,
+The request digest in `peer-process.json` detects changes to `host-request.json` after launch,
+including helper-bound changes. These local hashes detect drift; they do not authenticate files
+against a user who can rewrite all runtime-owned artifacts.
+
+Internal lifecycle artifacts without published schemas (`peer-process.json`, `host-inputs.json`,
 `workspace-mutation.json`, `cancel-workspace-mutation.json`, `isolation-state.json`,
 `startup-cleanup-failure.json`, the workspace snapshots `before.snapshot.json`,
 `after.snapshot.json`, and `cancel-after.snapshot.json` with their text companions, and the
@@ -105,7 +109,7 @@ describes the cancellation capture point; later workspace edits are outside that
 
 Adjudicator status is advisory. Consensus is a prioritization signal, not proof. The host makes the final decision.
 
-Recommended verdicts:
+Recommended verdicts by mode (the schema accepts their union and does not enforce this mode mapping):
 
 - For `review`, return one of: `pass`, `pass_with_concerns`, `changes_recommended`, or `blocked`.
 - For `research`, return one of: `informational`, `pass_with_concerns`, `changes_recommended`, or `blocked`.

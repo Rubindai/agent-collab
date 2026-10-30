@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+import argparse
 import filecmp
 import hashlib
 import importlib.util
@@ -381,7 +382,8 @@ def valid_process_identity(pid=43210, pgid=43210):
 
 
 def valid_peer_process(run_dir, repo_root, guard_path, **overrides):
-    req = request()
+    request_path = run_dir / "host-request.json"
+    req = json.loads(request_path.read_text()) if request_path.exists() else request()
     data = {
         "schema_version": "2.0",
         "pid": 43210,
@@ -400,6 +402,7 @@ def valid_peer_process(run_dir, repo_root, guard_path, **overrides):
         "workspace_guard": str(guard_path),
         "owner_token": (json.loads(guard_path.read_text())["runs"][req["run_id"]]["owner_token"]
                         if guard_path.exists() else "a" * 32),
+        "request_sha256": hashlib.sha256(json.dumps(req, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest(),
         "settings": {"local": "local.json", "global": "global.json"},
         "peer_report": str(run_dir / "peer-report.json"),
         "peer_raw": str(run_dir / "peer.raw.json"),
@@ -409,6 +412,25 @@ def valid_peer_process(run_dir, repo_root, guard_path, **overrides):
     }
     data.update(overrides)
     return data
+
+
+def admit_host_input(host, run_dir, filename, report):
+    option = {"host-first-pass.json": "first_pass", "helper-reports.json": "helpers",
+              "adjudicator-report.json": "adjudicator"}[filename]
+    path = run_dir / (filename + '.input')
+    host.write_json(path, {key: value for key, value in report.items() if key not in {'schema_version', 'run_id'}})
+    args = argparse.Namespace(**{option: path})
+    host.ingest_finish_inputs(args, run_dir, host.require_run_request(run_dir),
+                              host.ARTIFACTS.load_json(run_dir / 'peer-process.json'))
+
+
+def author_synthesis_input(host, run_dir, report=None):
+    review = host.CONFIG.load_review_runtime()
+    ready = review.prepare(run_dir, host.ARTIFACTS.load_json(run_dir / 'peer-process.json'), host.review_documents(run_dir))
+    path = Path(ready['synthesis_input'])
+    report = report or valid_host_synthesis(run_dir=run_dir)
+    host.write_json(path, {key: report[key] for key in review.JUDGMENT_FIELDS})
+    return path
 
 
 def valid_provider_process(run_id="agent-collab-test", **overrides):
@@ -2476,7 +2498,7 @@ class HostV2Tests(TestCase):
                 (run_dir / "host-request.json").write_text(json.dumps(request()))
                 (run_dir / "peer-process.json").write_text(json.dumps(valid_peer_process(run_dir, root, guard)))
                 (run_dir / "provider-process.json").write_text(json.dumps(valid_provider_process()))
-                (run_dir / "host-first-pass.json").write_text(json.dumps(valid_host_first_pass()))
+                admit_host_input(host, run_dir, "host-first-pass.json", valid_host_first_pass())
                 (run_dir / "peer-report.json").write_text(json.dumps(valid_report()))
                 finish_args = host.build_parser().parse_args([
                     "finish", str(run_dir), "--run-root", str(run_root), "--repo-root", str(root),
@@ -2510,17 +2532,17 @@ class HostV2Tests(TestCase):
                 ):
                     host.complete(complete_args)
                 self.assertTrue(guard.exists())
-                (run_dir / "host-synthesis.json").write_text(json.dumps(valid_host_synthesis(run_dir=run_dir)))
+                complete_args.synthesis = author_synthesis_input(host, run_dir)
                 adjudicator = json.loads((run_dir / "adjudicator-report.json").read_text())
                 adjudicator.update(
                     status="ok",
                     summary="Adjudicated current evidence.",
                     claims=[{"claim": "current", "status": "confirmed", "evidence": "test"}],
                 )
-                (run_dir / "adjudicator-report.json").write_text(json.dumps(adjudicator))
+                admit_host_input(host, run_dir, "adjudicator-report.json", adjudicator)
                 with (
                     mock.patch.object(host, "record_host_workspace_mutation", return_value=None),
-                    self.assertRaisesRegex(SystemExit, "claim-matrix"),
+                    self.assertRaisesRegex(ValueError, "stale review"),
                 ):
                     host.complete(complete_args)
                 with (
@@ -2529,9 +2551,7 @@ class HostV2Tests(TestCase):
                     redirect_stdout(io.StringIO()),
                 ):
                     self.assertEqual(host.finish(finish_args), 0)
-                (run_dir / "host-synthesis.json").write_text(
-                    json.dumps(valid_host_synthesis(run_dir=run_dir))
-                )
+                complete_args.synthesis = author_synthesis_input(host, run_dir)
                 with (
                     mock.patch.object(host, "process_identity_matches", return_value=True),
                     mock.patch.object(host, "process_alive", return_value=True),
@@ -2564,7 +2584,7 @@ class HostV2Tests(TestCase):
                 (run_dir / "host-synthesis.json").write_text(
                     json.dumps({**valid_host_synthesis(run_dir=run_dir), "final_answer_ready": False})
                 )
-                with self.assertRaises(SystemExit):
+                with self.assertRaisesRegex(ValueError, "cannot rewrite a completed synthesis"):
                     host.complete(complete_args)
 
     def test_complete_requires_resynthesis_when_mutation_evidence_changes(self):
@@ -2585,7 +2605,7 @@ class HostV2Tests(TestCase):
                     json.dumps(valid_peer_process(run_dir, root, guard))
                 )
                 (run_dir / "provider-process.json").write_text(json.dumps(valid_provider_process()))
-                (run_dir / "host-first-pass.json").write_text(json.dumps(valid_host_first_pass()))
+                admit_host_input(host, run_dir, "host-first-pass.json", valid_host_first_pass())
                 (run_dir / "peer-report.json").write_text(json.dumps(valid_report()))
                 host.run_snapshot(root, run_dir / "before.snapshot", ignored_paths=[run_dir])
                 finish_args = host.build_parser().parse_args([
@@ -2597,11 +2617,12 @@ class HostV2Tests(TestCase):
                     redirect_stdout(io.StringIO()),
                 ):
                     self.assertEqual(host.finish(finish_args), 0)
-                (run_dir / "host-synthesis.json").write_text(json.dumps(valid_host_synthesis(run_dir=run_dir)))
+                draft = author_synthesis_input(host, run_dir)
                 tracked.write_text("after", encoding="utf-8")
                 complete_args = host.build_parser().parse_args([
                     "complete", str(run_dir), "--run-root", str(run_root), "--repo-root", str(root),
                 ])
+                complete_args.synthesis = draft
                 with self.assertRaisesRegex(SystemExit, "resynthesize"):
                     host.complete(complete_args)
                 self.assertTrue(guard.exists())
@@ -2610,7 +2631,7 @@ class HostV2Tests(TestCase):
                 self.assertIn("tracked.txt", refreshed["workspace_mutation"]["changed_paths"])
                 synthesis = valid_host_synthesis(run_dir=run_dir)
                 synthesis["workspace_mutation_sha256"] = refreshed["workspace_mutation_sha256"]
-                (run_dir / "host-synthesis.json").write_text(json.dumps(synthesis))
+                complete_args.synthesis = author_synthesis_input(host, run_dir, synthesis)
                 with redirect_stdout(io.StringIO()):
                     self.assertEqual(host.complete(complete_args), 0)
                 self.assertFalse(guard.exists())
@@ -2743,7 +2764,7 @@ class HostV2Tests(TestCase):
                     json.dumps(valid_peer_process(run_dir, root, guard))
                 )
                 (run_dir / "provider-process.json").write_text(json.dumps(valid_provider_process()))
-                (run_dir / "host-first-pass.json").write_text(json.dumps(valid_host_first_pass()))
+                admit_host_input(host, run_dir, "host-first-pass.json", valid_host_first_pass())
                 (run_dir / "peer-report.json").write_text("{malformed")
                 finish_args = host.build_parser().parse_args([
                     "finish", str(run_dir), "--run-root", str(run_root), "--repo-root", str(root),
@@ -2791,7 +2812,7 @@ class HostV2Tests(TestCase):
                     json.dumps(valid_peer_process(run_dir, root, guard))
                 )
                 (run_dir / "provider-process.json").write_text(json.dumps(valid_provider_process()))
-                (run_dir / "host-first-pass.json").write_text(json.dumps(valid_host_first_pass()))
+                admit_host_input(host, run_dir, "host-first-pass.json", valid_host_first_pass())
                 (run_dir / "peer-report.json").write_text(json.dumps(valid_report()))
                 finish_args = host.build_parser().parse_args([
                     "finish", str(run_dir), "--run-root", str(run_root), "--repo-root", str(root),
@@ -2802,7 +2823,7 @@ class HostV2Tests(TestCase):
                     redirect_stdout(io.StringIO()),
                 ):
                     self.assertEqual(host.finish(finish_args), 0)
-                (run_dir / "host-synthesis.json").write_text(json.dumps(valid_host_synthesis(run_dir=run_dir)))
+                draft = author_synthesis_input(host, run_dir)
 
                 entered_wait = threading.Event()
                 release_wait = threading.Event()
@@ -2823,6 +2844,7 @@ class HostV2Tests(TestCase):
                 complete_args = host.build_parser().parse_args([
                     "complete", str(run_dir), "--run-root", str(run_root), "--repo-root", str(root),
                 ])
+                complete_args.synthesis = draft
                 with (
                     mock.patch.object(host, "wait_for_peer_report", side_effect=wait_then_exit),
                     mock.patch.object(host, "record_host_workspace_mutation", return_value=None),
@@ -3049,7 +3071,7 @@ class HostV2Tests(TestCase):
                         )
                     )
                 )
-                (run_dir / "host-first-pass.json").write_text(json.dumps(valid_host_first_pass()))
+                admit_host_input(host, run_dir, "host-first-pass.json", valid_host_first_pass())
                 (run_dir / "peer-report.json").write_text("")
                 args = host.build_parser().parse_args([
                     "finish", str(run_dir), "--run-root", str(run_root), "--repo-root", str(root),
