@@ -48,103 +48,39 @@ def _contains_any(text: str, needles: tuple[str, ...]) -> bool:
     )
 
 
+MODE_KEYWORDS = {
+    "review": (
+        'review', 'audit', 'diff', 'patch', 'pull request', 'pr', 'safe to ship', 'ship',
+        'missing test', 'regression', 'security', 'auth',
+    ),
+    "debug": (
+        'bug', 'crash', 'stack trace', 'traceback', 'exception', 'root cause', 'reproduce', 'repro',
+        'failing', 'failure', 'hung', 'hanging', 'timeout', 'broken', 'error',
+    ),
+    "plan": (
+        'plan', 'test strategy', 'rollout', 'checklist', 'sequence', 'steps', 'milestone',
+        'implementation order', 'execution order', 'rollback',
+    ),
+    "design": (
+        'architecture', 'architect', 'design', 'tradeoff', 'trade-off', 'alternative', 'approach',
+        'migration approach', 'moving storage', 'storage provider', 'api shape', 'schema design',
+    ),
+    "research": (
+        'research', 'official doc', 'official documentation', 'official api', 'source-backed',
+        'source backed', 'external evidence', 'current docs', 'changed recently', 'platform behavior',
+        'dependency behavior',
+    ),
+}
+
+
 def classify_mode(target: str, brief: str) -> str:
     text = f"{target}\n{brief}".casefold()
-    review_context = _contains_any(
-        text,
-        (
-            "review",
-            "audit",
-            "diff",
-            "patch",
-            "pull request",
-            "pr",
-            "safe to ship",
-            "ship",
-            "missing test",
-            "regression",
-            "security",
-            "auth",
-        ),
-    )
-    debug_context = _contains_any(
-        text,
-        (
-            "bug",
-            "crash",
-            "stack trace",
-            "traceback",
-            "exception",
-            "root cause",
-            "reproduce",
-            "repro",
-            "failing",
-            "failure",
-            "hung",
-            "hanging",
-            "timeout",
-            "broken",
-            "error",
-        ),
-    )
-    plan_context = _contains_any(
-        text,
-        (
-            "plan",
-            "test strategy",
-            "rollout",
-            "checklist",
-            "sequence",
-            "steps",
-            "milestone",
-            "implementation order",
-            "execution order",
-            "rollback",
-        ),
-    )
-    design_context = _contains_any(
-        text,
-        (
-            "architecture",
-            "architect",
-            "design",
-            "tradeoff",
-            "trade-off",
-            "alternative",
-            "approach",
-            "migration approach",
-            "moving storage",
-            "storage provider",
-            "api shape",
-            "schema design",
-        ),
-    )
-    research_context = _contains_any(
-        text,
-        (
-            "research",
-            "official doc",
-            "official documentation",
-            "official api",
-            "source-backed",
-            "source backed",
-            "external evidence",
-            "current docs",
-            "changed recently",
-            "platform behavior",
-            "dependency behavior",
-        ),
-    )
-
-    if debug_context and not plan_context:
-        return "debug"
-    if plan_context:
-        return "plan"
-    if design_context:
-        return "design"
-    if research_context and not review_context:
-        return "research"
-    return "review"
+    contexts = {mode: _contains_any(text, words) for mode, words in MODE_KEYWORDS.items()}
+    # Planning takes precedence over debugging; review suppresses research.
+    for mode in ("plan", "debug", "design"):
+        if contexts[mode]:
+            return mode
+    return "research" if contexts["research"] and not contexts["review"] else "review"
 
 
 def write_json(path: Path, data: dict[str, Any]) -> None:
@@ -2089,6 +2025,19 @@ def cancel(args: argparse.Namespace) -> int:
         return _cancel_locked(args, context)
 
 
+def cancellation_job_patch(run_dir: Path, result: dict[str, Any]) -> dict[str, Any]:
+    """Project persisted cancellation evidence without moving lifecycle operations."""
+    return {
+        **job_patch_from_run(run_dir, "cancelled", "cancelled"),
+        "pid": None,
+        "completed_at": result["completed_at"],
+        "cancel": {key: result[key] for key in (
+            "forced", "reason", "elapsed_seconds", "minimum_wait_seconds", "before_minimum_wait",
+        )},
+        "cancel_result": str(run_dir / "cancel-result.json"),
+    }
+
+
 def _cancel_locked(args: argparse.Namespace, context: tuple[Path, Path, Path]) -> int:
     repo_root, run_root, run_dir = context
     process_info = ARTIFACTS.load_json(run_dir / "peer-process.json")
@@ -2131,25 +2080,7 @@ def _cancel_locked(args: argparse.Namespace, context: tuple[Path, Path, Path]) -
                     f"immutable cancellation exists but process-tree quiescence is unproven: {exc}"
                 ) from exc
             released = str(REGISTRY.release_workspace_guard(peer_repo_root, request["run_id"], owner=process_info))
-        state.upsert_job(
-            run_root,
-            {
-                **job_patch_from_run(run_dir, "cancelled", "cancelled"),
-                "pid": None,
-                "completed_at": existing["completed_at"],
-                "cancel": {
-                    key: existing[key]
-                    for key in (
-                        "forced",
-                        "reason",
-                        "elapsed_seconds",
-                        "minimum_wait_seconds",
-                        "before_minimum_wait",
-                    )
-                },
-                "cancel_result": str(cancel_result_path),
-            },
-        )
+        state.upsert_job(run_root, cancellation_job_patch(run_dir, existing))
         output = {
             "schema_version": CONFIG.ARTIFACT_SCHEMA_VERSION,
             "run_id": request["run_id"],
@@ -2275,16 +2206,7 @@ def _cancel_locked(args: argparse.Namespace, context: tuple[Path, Path, Path]) -
             raise SystemExit(
                 "a concurrent cancellation committed different immutable evidence; manual inspection is required"
             )
-    state.upsert_job(
-        run_root,
-        {
-            **job_patch_from_run(run_dir, "cancelled", "cancelled"),
-            "pid": None,
-            "completed_at": completed_at,
-            "cancel": cancel_details,
-            "cancel_result": str(cancel_result_path),
-        },
-    )
+    state.upsert_job(run_root, cancellation_job_patch(run_dir, cancel_result))
     guard_path = REGISTRY.release_workspace_guard(peer_repo_root, request["run_id"], owner=process_info)
     output = {
         "schema_version": CONFIG.ARTIFACT_SCHEMA_VERSION,
@@ -2609,6 +2531,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Manage Agent Collab peer-first host run artifacts.")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    def add_boolean_override(command, option, help_text):
+        command.add_argument(option, action=argparse.BooleanOptionalAction, default=None, help=help_text)
+
     start_parser = sub.add_parser("start", help="Create a run directory and launch the cross-agent peer.")
     start_parser.add_argument("--host", choices=sorted(CONFIG.ORIGINS), required=True)
     start_parser.add_argument("--mode", choices=sorted(CONFIG.MODES))
@@ -2616,36 +2541,16 @@ def build_parser() -> argparse.ArgumentParser:
     start_parser.add_argument("--brief")
     start_parser.add_argument("--brief-file", type=Path)
     start_parser.add_argument("--edit-allowed", action="store_true")
-    start_parser.add_argument(
-        "--adjudicator",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="Override the host-local advisory adjudicator for this run.",
-    )
+    add_boolean_override(start_parser, '--adjudicator', 'Override the host-local advisory adjudicator for this run.')
     start_parser.add_argument("--peer-model", help="Override the resolved peer model for this run.")
     start_parser.add_argument(
         "--peer-effort",
         help="Override the resolved peer effort; live availability validation is authoritative.",
     )
-    start_parser.add_argument(
-        "--online-research",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="Override online research for this run.",
-    )
+    add_boolean_override(start_parser, '--online-research', 'Override online research for this run.')
     start_parser.add_argument("--max-local-subagents", type=CONFIG.cli_integer)
-    start_parser.add_argument(
-        "--local-subagents",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="Override native local helper availability for this run.",
-    )
-    start_parser.add_argument(
-        "--safe-mode",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="Override the resolved permission posture for this run.",
-    )
+    add_boolean_override(start_parser, '--local-subagents', 'Override native local helper availability for this run.')
+    add_boolean_override(start_parser, '--safe-mode', 'Override the resolved permission posture for this run.')
     start_parser.add_argument(
         "--workspace-mode", choices=["isolated", "direct"],
         help="Select a disposable copy-on-write workspace or direct host access for this run.",

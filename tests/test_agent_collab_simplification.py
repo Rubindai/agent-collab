@@ -17,6 +17,20 @@ tearDownModule = fixtures.tearDownModule
 
 
 class SettingsProjectionTests(TestCase):
+    def test_mode_selection_keeps_priority_and_word_boundaries(self):
+        host = fixtures.load_host()
+        for target, brief, expected in (
+            ('crash', 'design a fix', 'debug'),
+            ('crash', 'plan the fix', 'plan'),
+            ('architecture', 'research current docs', 'design'),
+            ('audit', 'research current docs', 'review'),
+            ('provider behavior', 'research current docs', 'research'),
+            ('relationship', 'explain the plantation layout', 'review'),
+            ('PATCH', 'inspect behavior', 'review'),
+        ):
+            with self.subTest(target=target, brief=brief):
+                self.assertEqual(host.classify_mode(target, brief), expected)
+
     def test_environment_roundtrip_preserves_explicit_choices(self):
         config = fixtures.load_host().CONFIG
         for enabled in (True, False):
