@@ -3,7 +3,7 @@
 ## Unreleased
 
 - **Breaking:** require explicit CLI admission for host reports and revision-bound synthesis, preserve the first admitted host pass, and verify the saved request against its launch-time digest. Close active runs before upgrading; old process artifacts lack the required request digest and admission receipt.
-- Disable Git clean/process filters during snapshots and track `.git/info/attributes`; create missing storage parents privately, reject malformed verdict types cleanly, and quote source text in Markdown review views.
+- Disable Git clean/process filters during snapshots, including initialized nested submodules, and track `.git/info/attributes`; create missing storage parents privately, reject malformed verdict types cleanly, and quote source text in Markdown review views.
 - Fix exact run selection across run roots, normalize explicit Git subdirectories to their worktree root, treat unreaped wrappers as exited, and preserve normalization failures across repeated `finish` calls.
 - **Breaking:** Linux process identities now require the observing PID namespace. Foreign or unreadable namespaces cannot authorize recovery or cleanup; finish active runs before upgrading. POSIX `ps` identities use UTC and the C locale.
 

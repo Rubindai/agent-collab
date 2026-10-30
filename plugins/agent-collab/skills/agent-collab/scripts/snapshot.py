@@ -163,6 +163,31 @@ def _printable(value: str) -> str:
     return value.encode("utf-8", "surrogateescape").decode("utf-8", "backslashreplace")
 
 
+def _git_filter_drivers(repo_root: Path, deadline: float) -> set[str]:
+    """Include initialized nested submodules before Git recursively reads them."""
+    drivers: set[str] = set()
+    pending = [repo_root]
+    visited: set[Path] = set()
+    while pending:
+        root = pending.pop().resolve()
+        if root in visited:
+            continue
+        visited.add(root)
+        result = _run_git(root, [
+            "config", "--null", "--name-only", "--get-regexp", r"^filter\..*\.(clean|process|required)$",
+        ], deadline)
+        if result.returncode not in {0, 1}:
+            raise RuntimeError(f"cannot inspect Git filter configuration: {result.stderr}")
+        drivers.update(key.rsplit(".", 1)[0] for key in result.stdout.split("\0") if key)
+        index = _git_stdout(root, ["ls-files", "--stage", "-z"], deadline)
+        for entry in index.split("\0"):
+            if entry.startswith("160000 ") and "\t" in entry:
+                child = root / entry.split("\t", 1)[1]
+                if (child / ".git").exists():
+                    pending.append(child)
+    return drivers
+
+
 def _start_git(args: list[str], *, deadline: float | None = None, **kwargs: Any) -> subprocess.Popen[Any]:
     """Start git inside the caller's supervision.
 
@@ -174,16 +199,13 @@ def _start_git(args: list[str], *, deadline: float | None = None, **kwargs: Any)
 
     overrides: list[str] = []
     if args and args[0] in {"status", "diff"}:
-        result = _run_git(Path(kwargs["cwd"]), [
-            "config", "--null", "--name-only", "--get-regexp", r"^filter\..*\.(clean|process|required)$",
-        ], _snapshot_deadline(deadline))
-        if result.returncode not in {0, 1}:
-            raise RuntimeError(f"cannot inspect Git filter configuration: {result.stderr}")
-        drivers = {key.rsplit(".", 1)[0] for key in result.stdout.split("\0") if key}
+        drivers = _git_filter_drivers(Path(kwargs["cwd"]), _snapshot_deadline(deadline))
         for driver in sorted(drivers):
             overrides.extend(["-c", f"{driver}.clean=", "-c", f"{driver}.process=",
                               "-c", f"{driver}.required=false"])
     command = [*GIT_BASE_COMMAND, *overrides, *args]
+    if deadline is not None:
+        _remaining_seconds(deadline)
     if os.name == "nt":
         return SAFETY.popen_group(command, **kwargs)
     return subprocess.Popen(command, **kwargs)
@@ -213,6 +235,7 @@ def _run_git(repo_root: Path, args: list[str], deadline: float) -> subprocess.Co
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
+        timeout = max(0.0, deadline - time.monotonic())
     except TimeoutError:
         raise
     except OSError as exc:

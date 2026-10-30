@@ -74,7 +74,8 @@ In direct mode, before peer launch, the host admits only a canonical baseline sn
 is represented by streamed digests. Large status and file manifests retain complete digests and
 counts with bounded path samples; changes beyond a sample remain detectable, but exact paths
 may be unavailable. The scan itself still reads the included file contents and can hit its
-finite deadline. Snapshot Git commands disable configured clean/process filters, fsmonitor,
+finite deadline. Snapshot Git commands disable configured clean/process filters, including
+drivers defined only in initialized nested submodules, plus fsmonitor,
 external diff and textconv; they compare unfiltered content and include `.git/info/attributes`
 among the selected Git-control surfaces. After snapshots may be larger.
 Isolated mode uses a small boundary receipt instead of reading file contents. Its writable

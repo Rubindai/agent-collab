@@ -161,6 +161,36 @@ class AuditRegressionTests(TestCase):
                 host.CONFIG.load_state_runtime().remove_job(local, 'review')
                 self.assertEqual(host.resolve_run_reference(root, 'review', local), exact)
 
+    def test_snapshot_filters_are_disabled_in_nested_submodules(self):
+        snapshot = fixtures.load_snapshot()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            middle = root / 'middle'
+            leaf = middle / 'leaf'
+            leaf.mkdir(parents=True)
+            def git(path, *args):
+                return subprocess.run(['git', '-C', str(path), '-c', 'user.name=Test',
+                    '-c', 'user.email=test@example.invalid', *args], check=True, capture_output=True)
+            for path in (root, middle, leaf):
+                git(path, 'init', '-q')
+            tracked = leaf / 'file'
+            tracked.write_text('before\n')
+            for path, name in ((leaf, 'file'), (middle, 'leaf'), (root, 'middle')):
+                git(path, 'add', name)
+                git(path, 'commit', '-qm', 'initial')
+            (leaf / '.git/info/attributes').write_text('file filter=child\n')
+            git(leaf, 'config', 'filter.child.clean', 'echo ran > filter-ran; cat')
+            git(leaf, 'config', 'filter.child.required', 'true')
+            before = snapshot.mutation_snapshot(root)
+            tracked.write_text('after\n')
+            after = snapshot.mutation_snapshot(root)
+            snapshot.snapshot_text(root, snapshot_data=after)
+            self.assertNotEqual(before['digest'], after['digest'])
+            self.assertFalse((leaf / 'filter-ran').exists())
+            git(leaf, 'config', 'filter.child.process', 'echo ran > filter-ran; cat')
+            snapshot.mutation_snapshot(root)
+            self.assertFalse((leaf / 'filter-ran').exists())
+
     def test_cli_normalizes_explicit_git_subdirectory(self):
         host = fixtures.load_host()
         with tempfile.TemporaryDirectory() as tmp:
