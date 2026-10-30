@@ -227,7 +227,10 @@ class CrossPlatformIdentityTests(TestCase):
             data = fixtures.valid_peer_process(run_dir, Path(tmp), Path(tmp) / "guard.json")
             host.ARTIFACTS.validate_peer_process(data, request, run_dir)
             kind = next(iter(host.CONFIG.SAFETY.PROCESS_IDENTITY_KINDS - {host.CONFIG.SAFETY.local_identity_kind()}))
-            data["process_identity"] = {**data["process_identity"], "kind": kind}
+            data["process_identity"] = {key: value for key, value in data["process_identity"].items() if key != "pid_namespace"}
+            data["process_identity"]["kind"] = kind
+            if kind == "linux_proc":
+                data["process_identity"]["pid_namespace"] = "pid:[1]"
             with self.assertRaisesRegex(host.ARTIFACTS.ArtifactValidationError, "started on another platform"):
                 host.ARTIFACTS.validate_peer_process(data, request, run_dir)
 

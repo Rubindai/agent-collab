@@ -936,6 +936,13 @@ def normalize_peer_report_from_artifacts(
             if normalization_path.exists() and normalization_path.stat().st_size:
                 previous = load_json(normalization_path)
                 validate_peer_normalization(previous)
+                # A canonical runtime failure envelope is valid JSON, but that
+                # does not turn the provider output that caused it into a
+                # successful normalization. Keep its original failure receipt.
+                if (previous["validation_status"] != "ok"
+                        and normalized.report["status"] == "peer_failed"
+                        and normalized.report["error"]["kind"] == previous["validation_status"]):
+                    return normalized.report, previous["validation_status"]
                 metadata["warnings"] = list(dict.fromkeys(previous["warnings"] + metadata["warnings"]))
             metadata["artifact_source"] = "peer_report"
             metadata["validation_status"] = "ok"
@@ -953,6 +960,7 @@ def normalize_peer_report_from_artifacts(
     else:
         failure_kind = "invalid_json"
     peer_report = peer_runtime.failure(failure_kind, message, request)
+    input_bytes = peer_report_path.stat().st_size if peer_report_path.exists() else 0
     CONFIG.STRICT_JSON.write(peer_report_path, peer_report)
     CONFIG.STRICT_JSON.write(
         normalization_path,
@@ -960,7 +968,7 @@ def normalize_peer_report_from_artifacts(
             "schema_version": CONFIG.ARTIFACT_SCHEMA_VERSION,
             "source": "none",
             "artifact_source": "peer_report",
-            "input_bytes": peer_report_path.stat().st_size if peer_report_path.exists() else 0,
+            "input_bytes": input_bytes,
             "warnings": [],
             "validation_status": failure_kind,
             "error": message,

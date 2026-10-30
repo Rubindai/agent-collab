@@ -111,6 +111,10 @@ def _load_sibling(name: str) -> Any:
 
 
 def _read_linux_start_time(pid: int) -> str:
+    return _read_linux_stat(pid)[19]
+
+
+def _read_linux_stat(pid: int) -> list[str]:
     raw = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
     closing_paren = raw.rfind(")")
     if closing_paren < 0:
@@ -120,7 +124,16 @@ def _read_linux_start_time(pid: int) -> str:
     # slice begins at field 3, so its zero-based index is 19.
     if len(fields_after_comm) <= 19:
         raise ValueError(f"incomplete /proc/{pid}/stat")
-    return fields_after_comm[19]
+    return fields_after_comm
+
+
+def pid_namespace() -> str:
+    """Identify the namespace in which recorded numeric PIDs are observed."""
+    return os.readlink("/proc/self/ns/pid")
+
+
+def ps_environment() -> dict[str, str]:
+    return {**os.environ, "TZ": "UTC", "LC_ALL": "C"}
 
 
 def process_identity(pid: int) -> dict[str, Any]:
@@ -145,10 +158,12 @@ def process_identity(pid: int) -> dict[str, Any]:
             "pgid": pgid,
             "boot_id": boot_id_path.read_text(encoding="utf-8").strip(),
             "start_time": _read_linux_start_time(pid),
+            "pid_namespace": pid_namespace(),
         }
 
     completed = subprocess.run(
         ["ps", "-o", "lstart=", "-p", str(pid)],
+        env=ps_environment(),
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -185,10 +200,16 @@ def identity_is_foreign(value: Mapping[str, Any]) -> bool:
 
 
 def validate_process_identity(value: Any) -> None:
-    if not isinstance(value, dict) or set(value) != PROCESS_IDENTITY_KEYS:
-        raise ValueError(f"process identity must contain exactly {sorted(PROCESS_IDENTITY_KEYS)}")
-    if value["kind"] not in PROCESS_IDENTITY_KINDS:
+    if not isinstance(value, dict) or not isinstance(value.get("kind"), str) or value["kind"] not in PROCESS_IDENTITY_KINDS:
         raise ValueError("process identity kind is invalid")
+    keys = PROCESS_IDENTITY_KEYS | ({"pid_namespace"} if value["kind"] == "linux_proc" else set())
+    if set(value) != keys:
+        raise ValueError(f"process identity must contain exactly {sorted(keys)}")
+    if value["kind"] == "linux_proc" and (
+        not isinstance(value["pid_namespace"], str)
+        or re.fullmatch(r"pid:\[[0-9]+\]", value["pid_namespace"]) is None
+    ):
+        raise ValueError("process identity pid_namespace must identify a Linux PID namespace")
     for key in ("pid", "pgid"):
         if type(value[key]) is not int or value[key] <= 0:
             raise ValueError(f"process identity {key} must be a positive integer")
@@ -206,6 +227,12 @@ def process_identity_state(expected: Any) -> str:
     if identity_is_foreign(expected):
         # For example native Windows and WSL sharing a worktree.
         return "unknown"
+    if expected["kind"] == "linux_proc":
+        try:
+            if expected["pid_namespace"] != pid_namespace():
+                return "unknown"
+        except OSError:
+            return "unknown"
     try:
         observed = process_identity(expected["pid"])
     except ProcessLookupError:
@@ -219,7 +246,7 @@ def process_identity_state(expected: Any) -> str:
         except OSError:
             pass
         return "unknown"
-    return "matching" if observed == expected else "dead_or_replaced"
+    return "matching" if observed == expected and pid_alive(expected["pid"]) else "dead_or_replaced"
 
 
 def pid_alive(pid: int) -> bool:
@@ -234,6 +261,22 @@ def pid_alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True
+    if sys.platform.startswith("linux"):
+        try:
+            return _read_linux_stat(pid)[0] != "Z"
+        except (FileNotFoundError, ProcessLookupError):
+            return False
+        except (OSError, ValueError):
+            return True
+    try:
+        completed = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(pid)], env=ps_environment(),
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, check=False,
+        )
+        if completed.returncode == 0 and completed.stdout.strip():
+            return not completed.stdout.strip().startswith("Z")
+    except (OSError, subprocess.SubprocessError):
+        pass
     return True
 
 

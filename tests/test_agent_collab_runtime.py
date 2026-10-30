@@ -375,6 +375,7 @@ def valid_process_identity(pid=43210, pgid=43210):
         "pid": pid,
         "pgid": pgid,
         "boot_id": "test-boot-id",
+        **({"pid_namespace": os.readlink("/proc/self/ns/pid")} if local_kind == "linux_proc" else {}),
         "start_time": "12345",
     }
 
@@ -1975,7 +1976,7 @@ class HostV2Tests(TestCase):
                 mock.patch.object(host.CONFIG, "require_peer_cli_version", return_value="2.1.257"),
                 mock.patch.object(host.CONFIG, "load_availability_runtime", return_value=availability_runtime),
                 mock.patch.object(host.REGISTRY, "acquire_workspace_guard") as acquire,
-                mock.patch.object(host.subprocess, "Popen") as popen,
+                mock.patch.object(host.CONFIG.SAFETY, "popen_group") as popen,
                 self.assertRaises(SystemExit) as raised,
             ):
                 host.start(args)
@@ -2062,7 +2063,7 @@ class HostV2Tests(TestCase):
                 mock.patch.object(host.CONFIG, "require_peer_cli_version") as cli_version,
                 mock.patch.object(host.CONFIG, "load_availability_runtime") as availability,
                 mock.patch.object(host.REGISTRY, "acquire_workspace_guard") as acquire,
-                mock.patch.object(host.subprocess, "Popen") as popen,
+                mock.patch.object(host.CONFIG.SAFETY, "popen_group") as popen,
                 self.assertRaises(SystemExit) as raised,
             ):
                 host.start(args)
@@ -2107,7 +2108,7 @@ class HostV2Tests(TestCase):
                 mock.patch.object(host.REGISTRY, "workspace_guard_path", return_value=root / "active-v2.json"),
                 mock.patch.object(host.CONFIG.SAFETY, "sandbox_preflight") as sandbox_preflight,
                 mock.patch.object(host.CONFIG.SAFETY, "process_identity", return_value=valid_process_identity()),
-                mock.patch.object(host.subprocess, "Popen", return_value=FakePopen()),
+                mock.patch.object(host.CONFIG.SAFETY, "popen_group", return_value=FakePopen()),
                 redirect_stdout(io.StringIO()),
             ):
                 self.assertEqual(host.start(args), 0)
@@ -2178,7 +2179,7 @@ class HostV2Tests(TestCase):
             with (
                 mock.patch.object(host.REGISTRY, "workspace_guard_path", return_value=guard),
                 mock.patch.object(host.REGISTRY, "acquire_workspace_guard") as acquire,
-                mock.patch.object(host.subprocess, "Popen") as popen,
+                mock.patch.object(host.CONFIG.SAFETY, "popen_group") as popen,
                 self.assertRaises(SystemExit) as raised,
             ):
                 host.start(args)
@@ -2349,7 +2350,7 @@ class HostV2Tests(TestCase):
                 mock.patch.object(host.CONFIG, "require_peer_cli_version", return_value="2.1.257"),
                 mock.patch.object(host.CONFIG, "load_availability_runtime", return_value=availability_runtime),
                 mock.patch.object(host, "run_snapshot"),
-                mock.patch.object(host.subprocess, "Popen", side_effect=OSError("launch failed")),
+                mock.patch.object(host.CONFIG.SAFETY, "popen_group", side_effect=OSError("launch failed")),
                 self.assertRaises(OSError),
             ):
                 host.start(args)
@@ -2395,7 +2396,7 @@ class HostV2Tests(TestCase):
                 mock.patch.object(host.CONFIG, "require_peer_cli_version", return_value="2.1.257"),
                 mock.patch.object(host.CONFIG, "load_availability_runtime", return_value=availability_runtime),
                 mock.patch.object(host, "run_snapshot"),
-                mock.patch.object(host.subprocess, "Popen", return_value=SpawnedProcess()),
+                mock.patch.object(host.CONFIG.SAFETY, "popen_group", return_value=SpawnedProcess()),
                 mock.patch.object(
                     host.CONFIG.SAFETY,
                     "process_identity",

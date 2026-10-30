@@ -208,6 +208,8 @@ Independent sessions can run Agent Collab in the same worktree. Each registry en
 
 Use `host.py status --active --repo-root PATH` to list all active owners, including other run roots. `result` requires an explicit run ID or directory. Startup no longer scans every other launcher's process identity. Use `host.py recover RUN_ID --repo-root PATH` for an abandoned **starting** entry: recovery requires a proven dead launcher, preserves artifacts, and refuses running entries or unknown identity evidence. Finish or cancel established runs normally.
 
+Exact active IDs take precedence over local history and unique prefixes; an explicit run directory selects that directory. Git subdirectories passed through `--repo-root` resolve to the worktree root. Linux process identities include the observing PID namespace: a different or unreadable namespace is unknown, never proof that a launcher exited. Unreaped zombie wrappers are terminal, and repeated `finish` calls preserve normalization failure evidence and the same review revision.
+
 ## Permissions and recursion
 
 Full capability and edit authorization are separate. By default, Codex uses `danger-full-access` and Claude uses `bypassPermissions`, while `edit_allowed=false` instructs the peer not to edit. That instruction and mutation detection are not preventive enforcement. Anthropic recommends `bypassPermissions` only in isolated containers, VMs, or development containers without internet access where host damage is impossible.

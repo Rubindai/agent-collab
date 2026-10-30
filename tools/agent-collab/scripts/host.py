@@ -425,7 +425,7 @@ def guarded_run_dir(repo_root: Path, run_id: str) -> Path | None:
 def resolve_run_context(args: argparse.Namespace) -> tuple[Path, Path, Path]:
     """Resolve repo root, owning run root, and run directory once for a run command."""
 
-    repo_root = (args.repo_root or CONFIG.default_repo_root()).resolve()
+    repo_root = CONFIG.canonical_repo_root(args.repo_root or CONFIG.default_repo_root())
     default_root = (args.run_root or CONFIG.default_run_root(repo_root)).resolve()
     run_dir = resolve_run_reference(repo_root, args.run, default_root)
     # Runs are direct children of the run root whose state index tracks them.
@@ -438,17 +438,19 @@ def resolve_run_reference(repo_root: Path, reference: str | None, run_root: Path
         candidate = Path(reference).expanduser()
         if (candidate.is_absolute() or len(candidate.parts) > 1) and candidate.exists():
             return ensure_run_dir(candidate, root, allow_external=True)
+        # The registry's exact active owner wins even over historical entries
+        # with the same ID in this root. Prefix lookup is strictly last.
+        guarded = guarded_run_dir(repo_root, reference)
+        if guarded is not None:
+            return guarded
+        candidate = root / reference
+        if candidate.exists():
+            return ensure_run_dir(candidate, root)
         state = CONFIG.load_state_runtime()
         if CONFIG.is_safe_run_id(reference):
             job = state.find_job(root, reference)
             if job and job.get("run_dir"):
                 return ensure_run_dir(Path(str(job["run_dir"])).expanduser(), root)
-        candidate = root / reference
-        if candidate.exists():
-            return ensure_run_dir(candidate, root)
-        guarded = guarded_run_dir(repo_root, reference)
-        if guarded is not None:
-            return guarded
         raise SystemExit(f"unknown Agent Collab run: {reference}")
 
     state = CONFIG.load_state_runtime()
@@ -644,7 +646,7 @@ def wait_for_peer_report(
 
 def check_availability(args: argparse.Namespace) -> int:
     availability = CONFIG.load_availability_runtime()
-    repo_root = (args.repo_root or CONFIG.default_repo_root()).resolve()
+    repo_root = CONFIG.canonical_repo_root(args.repo_root or CONFIG.default_repo_root())
     try:
         availability.bounded_timeout(args.timeout_seconds)
     except ValueError as exc:
@@ -1070,7 +1072,7 @@ def start(args: argparse.Namespace) -> int:
     peer_runtime = CONFIG.load_peer_runtime()
     if peer_runtime.nested_invocation_requested(dict(os.environ)):
         raise SystemExit("nested Agent Collab invocation refused by the cross-agent depth guard")
-    repo_root = (args.repo_root or CONFIG.default_repo_root()).resolve()
+    repo_root = CONFIG.canonical_repo_root(args.repo_root or CONFIG.default_repo_root())
     run_root = (args.run_root or CONFIG.default_run_root(repo_root)).resolve()
     state = CONFIG.load_state_runtime()
     try:
@@ -1568,14 +1570,14 @@ def _complete_locked(args: argparse.Namespace, context: tuple[Path, Path, Path])
 
 
 def recover(args: argparse.Namespace) -> int:
-    repo_root = (args.repo_root or CONFIG.default_repo_root()).resolve()
+    repo_root = CONFIG.canonical_repo_root(args.repo_root or CONFIG.default_repo_root())
     path = REGISTRY.recover_workspace_guard(repo_root, args.run)
     print(CONFIG.STRICT_JSON.dumps({"status": "recovered", "run_id": args.run, "registry": str(path)}))
     return 0
 
 
 def status(args: argparse.Namespace) -> int:
-    repo_root = (args.repo_root or CONFIG.default_repo_root()).resolve()
+    repo_root = CONFIG.canonical_repo_root(args.repo_root or CONFIG.default_repo_root())
     run_root = (args.run_root or CONFIG.default_run_root(repo_root)).resolve()
     state = CONFIG.load_state_runtime()
 
@@ -1614,7 +1616,7 @@ def status(args: argparse.Namespace) -> int:
 
 
 def result(args: argparse.Namespace) -> int:
-    repo_root = (args.repo_root or CONFIG.default_repo_root()).resolve()
+    repo_root = CONFIG.canonical_repo_root(args.repo_root or CONFIG.default_repo_root())
     run_root = (args.run_root or CONFIG.default_run_root(repo_root)).resolve()
     run_dir = resolve_run_reference(repo_root, args.run, run_root)
     if getattr(args, "format", "json") == "markdown":
@@ -1747,7 +1749,7 @@ def resolve_history_retain(args: argparse.Namespace, default_retained: int = CON
 
 
 def build_clear_history_output(args: argparse.Namespace, default_retained: int = CONFIG.DEFAULT_HISTORY_RETAINED_RUNS) -> tuple[int, dict[str, Any] | None]:
-    repo_root = (args.repo_root or CONFIG.default_repo_root()).resolve()
+    repo_root = CONFIG.canonical_repo_root(args.repo_root or CONFIG.default_repo_root())
     run_root = (args.run_root or CONFIG.default_run_root(repo_root)).resolve()
     state_runtime = CONFIG.load_state_runtime()
     active_statuses = state_runtime.ACTIVE_STATUSES
@@ -1848,7 +1850,7 @@ def build_clear_history_output(args: argparse.Namespace, default_retained: int =
 
 
 def clear_history(args: argparse.Namespace) -> int:
-    repo_root = (args.repo_root or CONFIG.default_repo_root()).resolve()
+    repo_root = CONFIG.canonical_repo_root(args.repo_root or CONFIG.default_repo_root())
     resolved = CONFIG.resolve_settings(repo_root)
     CONFIG.require_valid_settings(resolved)
     settings = resolved["settings"]
@@ -2256,7 +2258,7 @@ def reset_settings(args: argparse.Namespace, repo_root: Path) -> int:
 
 
 def setup(args: argparse.Namespace) -> int:
-    repo_root = (args.repo_root or CONFIG.default_repo_root()).resolve()
+    repo_root = CONFIG.canonical_repo_root(args.repo_root or CONFIG.default_repo_root())
     if args.reset:
         return reset_settings(args, repo_root)
 
@@ -2364,7 +2366,7 @@ def summarize_claude_auth(report: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def doctor(args: argparse.Namespace) -> int:
-    repo_root = (args.repo_root or CONFIG.default_repo_root()).resolve()
+    repo_root = CONFIG.canonical_repo_root(args.repo_root or CONFIG.default_repo_root())
     run_root = (args.run_root or CONFIG.default_run_root(repo_root)).resolve()
     peer_runtime = CONFIG.load_peer_runtime()
     resolved = CONFIG.resolve_settings(repo_root)

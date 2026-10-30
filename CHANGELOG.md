@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Fix exact run selection across run roots, normalize explicit Git subdirectories to their worktree root, treat unreaped wrappers as exited, and preserve normalization failures across repeated `finish` calls.
+- **Breaking:** Linux process identities now require the observing PID namespace. Foreign or unreadable namespaces cannot authorize recovery or cleanup; finish active runs before upgrading. POSIX `ps` identities use UTC and the C locale.
+
 - Accept compact first-pass, helper, and adjudicator judgments through `finish` flags. Generate revision-bound synthesis inputs and fill canonical metadata and evidence hashes through `complete --synthesis`; render pinned evidence with `result --format markdown --review`.
 
 - Bind registry mutations to exact run instances, reserve lifecycle capacity before admission, and replace startup-wide recovery scans with targeted recovery. Add `status --active` and `recover RUN_ID`; `result` now requires an explicit run.

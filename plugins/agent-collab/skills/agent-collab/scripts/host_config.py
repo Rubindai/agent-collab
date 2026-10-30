@@ -195,6 +195,17 @@ def default_repo_root() -> Path:
     return Path.cwd().resolve()
 
 
+def canonical_repo_root(path: Path) -> Path:
+    """Use one owner/storage identity for every directory in a Git worktree."""
+    path = path.resolve()
+    completed = run_git_probe(["rev-parse", "--show-toplevel"], cwd=path)
+    if completed is not None and completed.returncode == 0 and completed.stdout.strip():
+        return Path(completed.stdout.strip()).resolve()
+    if load_snapshot_runtime().has_git_metadata(path):
+        raise SystemExit(f"cannot resolve Git worktree root for {path}; check Git and repository metadata")
+    return path
+
+
 def parse_cli_version(text: str) -> tuple[int, int, int] | None:
     match = re.search(r"(?<!\d)(\d+)\.(\d+)\.(\d+)(?!\d)", text)
     if match is None:

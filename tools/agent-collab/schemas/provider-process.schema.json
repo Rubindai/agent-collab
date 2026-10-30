@@ -31,8 +31,14 @@
             "pid": {"type": "integer", "minimum": 1},
             "pgid": {"type": "integer", "minimum": 1},
             "boot_id": {"type": "string", "minLength": 1},
-            "start_time": {"type": "string", "minLength": 1}
-          }
+            "start_time": {"type": "string", "minLength": 1},
+            "pid_namespace": {"type": "string", "pattern": "^pid:\\[[0-9]+\\]$"}
+          },
+          "allOf": [{
+            "if": {"properties": {"kind": {"const": "linux_proc"}}},
+            "then": {"required": ["pid_namespace"]},
+            "else": {"not": {"required": ["pid_namespace"]}}
+          }]
         }
       ]
     },
