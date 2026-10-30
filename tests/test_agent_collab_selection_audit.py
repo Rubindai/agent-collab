@@ -71,7 +71,7 @@ class SelectionAuditTests(TestCase):
             return SimpleNamespace(returncode=0, stdout=report, stderr='')
         with (tempfile.TemporaryDirectory() as tmp,
               mock.patch.object(peer, 'git_mutation_snapshot', return_value={'mode': 'git', 'same': True}),
-              mock.patch.object(peer.shutil, 'which', return_value='/usr/bin/claude'),
+              mock.patch.object(peer.SAFETY.shutil, 'which', return_value='/usr/bin/claude'),
               mock.patch.object(peer, 'run_peer_command', side_effect=run)):
             result = peer.run_request(fixtures.request(), Path(tmp), raw_output_path=Path(tmp) / 'raw.json')
         self.assertEqual(result['error']['kind'], 'effort_unverified')
@@ -112,7 +112,7 @@ class SelectionAuditTests(TestCase):
                     return SimpleNamespace(returncode=0, stdout=report, stderr="")
                 with (
                     mock.patch.object(peer, "git_mutation_snapshot", return_value={"mode": "git", "same": True}),
-                    mock.patch.object(peer.shutil, "which", return_value="/usr/bin/claude"),
+                    mock.patch.object(peer.SAFETY.shutil, "which", return_value="/usr/bin/claude"),
                     mock.patch.object(peer, "run_peer_command", side_effect=run),
                 ):
                     raw = Path(tmp) / "peer.raw.json"

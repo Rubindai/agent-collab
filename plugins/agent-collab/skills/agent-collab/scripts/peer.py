@@ -8,7 +8,6 @@ import math
 import os
 import re
 import signal
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -60,7 +59,6 @@ REQUEST_FIELDS = {
 }
 REQUIRED_REQUEST_KEYS = set(REQUEST_FIELDS)
 REQUEST_KEYS = REQUIRED_REQUEST_KEYS
-RUN_ID_SAFE_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
 MIN_AGENT_TIMEOUT_SECONDS = 60
 MAX_PEER_OUTPUT_BYTES = 16 * 1024 * 1024
 # The host attests before it creates the run, then takes a bounded baseline
@@ -1446,6 +1444,11 @@ def check_provider_result(request: dict[str, Any], completed: Any, raw_output_pa
                 },
             )
 
+    def reject(kind: str, message: str, details: Any) -> dict[str, Any]:
+        if raw_output_path is not None:
+            STRICT_JSON.write_text(raw_output_path, completed.stdout)
+        return failure(kind, message, request, details)
+
     if request["peer"] == "codex" and raw_output_path is not None:
         # Keep bounded lifecycle/usage evidence separately from the required
         # final report. Telemetry must never become a report fallback.
@@ -1457,40 +1460,16 @@ def check_provider_result(request: dict[str, Any], completed: Any, raw_output_pa
         else None
     )
     if claude_error is not None:
-        if raw_output_path is not None:
-            STRICT_JSON.write_text(raw_output_path, completed.stdout)
-        kind, message, details = claude_error
-        return failure(kind, message, request, details)
+        return reject(*claude_error)
 
     if completed.returncode != 0:
-        if raw_output_path is not None:
-            STRICT_JSON.write_text(raw_output_path, completed.stdout)
         model_error = model_unavailable_message(
-            completed.stdout,
-            completed.stderr,
-            request["peer_model"],
-            request["peer_effort"],
+            completed.stdout, completed.stderr, request["peer_model"], request["peer_effort"],
         )
+        details = {"stdout_tail": completed.stdout[-4000:], "stderr_tail": completed.stderr[-4000:]}
         if model_error is not None:
-            return failure(
-                    "model_unavailable",
-                    model_error,
-                    request,
-                    {
-                        "requested_model": request["peer_model"],
-                        "stdout_tail": completed.stdout[-4000:],
-                        "stderr_tail": completed.stderr[-4000:],
-                    },
-                )
-        return failure(
-                "peer_nonzero_exit",
-                f"Peer CLI exited with status {completed.returncode}",
-                request,
-                {
-                    "stdout_tail": completed.stdout[-4000:],
-                    "stderr_tail": completed.stderr[-4000:],
-                },
-            )
+            return reject("model_unavailable", model_error, {"requested_model": request["peer_model"], **details})
+        return reject("peer_nonzero_exit", f"Peer CLI exited with status {completed.returncode}", details)
 
     if request["peer"] == "claude":
         try:
@@ -1507,40 +1486,20 @@ def check_provider_result(request: dict[str, Any], completed: Any, raw_output_pa
                 "reason": f"Claude actual-run Stop effort evidence is unavailable: {exc}",
             }
         if effort_mismatch is not None:
-            if raw_output_path is not None:
-                STRICT_JSON.write_text(raw_output_path, completed.stdout)
-            return failure(
-                "effort_unverified", effort_mismatch["reason"], request, effort_mismatch,
-            )
+            return reject("effort_unverified", effort_mismatch["reason"], effort_mismatch)
         mismatch = claude_selection_mismatch_details(
             completed.stdout.strip(),
             request["peer_model"],
             request["peer_effort"],
         )
-        if mismatch is not None:
-            if raw_output_path is not None:
-                STRICT_JSON.write_text(raw_output_path, completed.stdout)
-            return failure(
-                    "model_mismatch",
-                    mismatch["reason"],
-                    request,
-                    mismatch,
-                )
     else:
         mismatch = codex_selection_mismatch_details(
             completed.stdout,
             request["peer_model"],
             request["peer_effort"],
         )
-        if mismatch is not None:
-            if raw_output_path is not None:
-                STRICT_JSON.write_text(raw_output_path, completed.stdout)
-            return failure(
-                    "model_mismatch",
-                    mismatch["reason"],
-                    request,
-                    mismatch,
-                )
+    if mismatch is not None:
+        return reject("model_mismatch", mismatch["reason"], mismatch)
     return None
 
 
@@ -1600,26 +1559,17 @@ def normalize_provider_result(request: dict[str, Any], completed: Any, output_pa
             )
         return failure(failure_kind, f"Peer output violated its contract: {exc}", request)
 
+    validation_status = "schema_validation_failed"
     try:
         validate_peer_report(report)
-    except PeerReportValidationError as exc:
-        if normalization_output_path is not None:
-            metadata = dict(normalized.metadata)
-            metadata["validation_status"] = "schema_validation_failed"
-            metadata["error"] = str(exc)
-            write_provider_normalization(normalization_output_path, metadata)
-        return failure("schema_validation_failed", str(exc), request, report)
-
-    report, target_was_canonicalized = canonicalize_peer_report_target(report, request)
-    try:
+        report, target_was_canonicalized = canonicalize_peer_report_target(report, request)
+        validation_status = "peer_report_mismatch"
         validate_peer_report_matches_request(report, request)
     except PeerReportValidationError as exc:
         if normalization_output_path is not None:
-            metadata = dict(normalized.metadata)
-            metadata["validation_status"] = "peer_report_mismatch"
-            metadata["error"] = str(exc)
+            metadata = {**normalized.metadata, "validation_status": validation_status, "error": str(exc)}
             write_provider_normalization(normalization_output_path, metadata)
-        return failure("peer_report_mismatch", str(exc), request, report)
+        return failure(validation_status, str(exc), request, report)
 
     if normalization_output_path is not None:
         metadata = dict(normalized.metadata)

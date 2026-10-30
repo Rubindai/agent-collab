@@ -1133,7 +1133,7 @@ class PeerV2Tests(TestCase):
                 with (
                     tempfile.TemporaryDirectory() as tmp,
                     mock.patch.object(peer, "git_mutation_snapshot", return_value={"mode": "git", "same": True}),
-                    mock.patch.object(peer.shutil, "which", return_value="/usr/bin/claude"),
+                    mock.patch.object(peer.SAFETY.shutil, "which", return_value="/usr/bin/claude"),
                     mock.patch.object(peer.SAFETY, "sandbox_preflight") as sandbox_preflight,
                     mock.patch.object(peer, "run_peer_command", side_effect=fake_run),
                 ):
@@ -1179,7 +1179,7 @@ class PeerV2Tests(TestCase):
         with (
             tempfile.TemporaryDirectory() as tmp_name,
             mock.patch.object(peer, "git_mutation_snapshot", return_value={"mode": "git", "same": True}),
-            mock.patch.object(peer.shutil, "which", return_value="/usr/bin/claude"),
+            mock.patch.object(peer.SAFETY.shutil, "which", return_value="/usr/bin/claude"),
             mock.patch.object(peer, "run_peer_command", side_effect=claude_result_runner(completed)),
         ):
             tmp = Path(tmp_name)
@@ -1232,7 +1232,7 @@ class PeerV2Tests(TestCase):
         with (
             tempfile.TemporaryDirectory() as tmp,
             mock.patch.object(peer, "git_mutation_snapshot", return_value={"mode": "git", "same": True}),
-            mock.patch.object(peer.shutil, "which", return_value="/usr/bin/codex"),
+            mock.patch.object(peer.SAFETY.shutil, "which", return_value="/usr/bin/codex"),
             mock.patch.object(peer, "run_peer_command", return_value=success),
         ):
             result = peer.run_request(req, Path(tmp))
@@ -1256,7 +1256,7 @@ class PeerV2Tests(TestCase):
         with (
             tempfile.TemporaryDirectory() as tmp,
             mock.patch.object(peer, "git_mutation_snapshot", return_value={"mode": "git", "same": True}),
-            mock.patch.object(peer.shutil, "which", return_value="/usr/bin/codex"),
+            mock.patch.object(peer.SAFETY.shutil, "which", return_value="/usr/bin/codex"),
             mock.patch.object(peer, "run_peer_command", side_effect=fake_run),
         ):
             raw = Path(tmp) / "run" / "peer-raw.txt"
@@ -1350,7 +1350,7 @@ class PeerV2Tests(TestCase):
         with (
             tempfile.TemporaryDirectory() as tmp_name,
             mock.patch.object(peer, "git_mutation_snapshot", return_value={"mode": "git", "same": True}),
-            mock.patch.object(peer.shutil, "which", return_value="/usr/bin/claude"),
+            mock.patch.object(peer.SAFETY.shutil, "which", return_value="/usr/bin/claude"),
             mock.patch.object(
                 peer,
                 "run_peer_command",
@@ -1380,7 +1380,7 @@ class PeerV2Tests(TestCase):
                         side_effect=[{"mode": "git", "digest": "before"}, {"mode": "git", "digest": "after"}],
                     ),
                     mock.patch.object(peer, "mutation_error_details", return_value={"source": "peer_snapshot"}),
-                    mock.patch.object(peer.shutil, "which", return_value="/usr/bin/claude"),
+                    mock.patch.object(peer.SAFETY.shutil, "which", return_value="/usr/bin/claude"),
                     mock.patch.object(peer, "run_peer_command", side_effect=claude_result_runner(completed)),
                 ):
                     result = peer.run_request(
@@ -1655,7 +1655,7 @@ class PeerV2Tests(TestCase):
         with (
             tempfile.TemporaryDirectory() as tmp,
             mock.patch.object(peer, "git_mutation_snapshot", return_value={"mode": "git", "same": True}),
-            mock.patch.object(peer.shutil, "which", return_value="/usr/bin/claude"),
+            mock.patch.object(peer.SAFETY.shutil, "which", return_value="/usr/bin/claude"),
             mock.patch.object(
                 peer,
                 "run_peer_command",
@@ -1679,7 +1679,7 @@ class PeerV2Tests(TestCase):
         with (
             tempfile.TemporaryDirectory() as tmp,
             mock.patch.object(peer, "git_mutation_snapshot", return_value={"mode": "filesystem", "same": True}),
-            mock.patch.object(peer.shutil, "which", return_value="/usr/bin/codex"),
+            mock.patch.object(peer.SAFETY.shutil, "which", return_value="/usr/bin/codex"),
             mock.patch.object(peer, "run_peer_command", side_effect=fake_codex_run),
         ):
             codex_result = peer.run_request(codex_request, Path(tmp))
@@ -1692,7 +1692,7 @@ class PeerV2Tests(TestCase):
         with (
             tempfile.TemporaryDirectory() as tmp,
             mock.patch.object(peer, "git_mutation_snapshot", return_value={"mode": "git", "same": True}),
-            mock.patch.object(peer.shutil, "which", return_value=None),
+            mock.patch.object(peer.SAFETY.shutil, "which", return_value=None),
         ):
             missing = peer.run_request(request(), Path(tmp), env={"PATH": ""})
         self.assertEqual(missing["error"]["kind"], "missing_cli")
@@ -1704,7 +1704,7 @@ class PeerV2Tests(TestCase):
         with (
             tempfile.TemporaryDirectory() as tmp,
             mock.patch.object(peer, "git_mutation_snapshot", return_value={"mode": "git", "same": True}),
-            mock.patch.object(peer.shutil, "which", return_value="/usr/bin/claude"),
+            mock.patch.object(peer.SAFETY.shutil, "which", return_value="/usr/bin/claude"),
             mock.patch.object(peer, "run_peer_command", side_effect=claude_result_runner(completed)),
         ):
             result = peer.run_request(request(), Path(tmp))
@@ -1739,7 +1739,7 @@ class PeerV2Tests(TestCase):
         with (
             tempfile.TemporaryDirectory() as tmp,
             mock.patch.object(peer, "git_mutation_snapshot", return_value={"mode": "git", "same": True}),
-            mock.patch.object(peer.shutil, "which", return_value="/usr/bin/claude"),
+            mock.patch.object(peer.SAFETY.shutil, "which", return_value="/usr/bin/claude"),
             mock.patch.object(peer, "run_peer_command", side_effect=claude_result_runner(completed)),
         ):
             result = peer.run_request(request(), Path(tmp))

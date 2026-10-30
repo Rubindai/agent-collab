@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Reduce runtime duplication with shared module imports, strict field validation, and provider-result handling. Malformed request fields now produce structured failures, and executable entry points resolve sibling modules with Python safe-path mode enabled.
 - Add a resumable `start`/`advance` host workflow with explicit next actions, resolved host policy, bounded 60-second guided waits, and successful waiting responses. Keep the normal instructions self-contained within 8 KB and make recovery diagnostics use the guided interface.
 - Save readable, revision-bound Markdown evidence separately from compact control output, preserving all original reports while omitting duplicate matrix rows and admission hashes from the reading surface. Review receipts now bind rendered bytes; refresh older drafts through `advance` before synthesis.
 - Count advisory reports within the host helper-report bound and route exhausted budgets to synthesis with the missing advisory visible.

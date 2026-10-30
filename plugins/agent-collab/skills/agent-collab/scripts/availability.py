@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any
 import validation as V
@@ -318,26 +319,18 @@ def known_claude_efforts(model: str) -> tuple[str, ...] | None:
 
 
 def static_failure(peer: str, model: str, effort: str) -> dict[str, Any] | None:
+    report = partial(result, peer=peer, model=model, effort=effort, source="request_contract", cli_version=None)
     if not isinstance(model, str) or not model.strip():
-        return result(
+        return report(
             status="unavailable",
-            peer=peer,
             model=str(model),
-            effort=effort,
-            source="request_contract",
-            cli_version=None,
             details="requested model must be a non-empty exact model identifier",
             evidence="empty model identifier",
             supported_efforts=sorted(CLAUDE_EFFORT_CHOICES) if peer == "claude" else [],
         )
     if not isinstance(effort, str) or not effort.strip():
-        return result(
+        return report(
             status="unavailable",
-            peer=peer,
-            model=model,
-            effort=effort,
-            source="request_contract",
-            cli_version=None,
             details="requested effort must be a non-empty exact effort identifier",
             evidence=f"empty effort: {effort!r}",
             supported_efforts=sorted(CLAUDE_EFFORT_CHOICES) if peer == "claude" else [],
@@ -348,26 +341,16 @@ def static_failure(peer: str, model: str, effort: str) -> dict[str, Any] | None:
     if peer == "codex":
         return None
     if effort not in CLAUDE_EFFORT_CHOICES:
-        return result(
+        return report(
             status="unavailable",
-            peer=peer,
-            model=model,
-            effort=effort,
-            source="request_contract",
-            cli_version=None,
             details="requested effort is not a documented Claude Code effort choice",
             evidence=f"unsupported Claude effort: {effort}",
             supported_efforts=sorted(CLAUDE_EFFORT_CHOICES),
         )
     known_efforts = known_claude_efforts(model) if peer == "claude" else None
     if known_efforts is not None and effort not in known_efforts:
-        return result(
+        return report(
             status="unavailable",
-            peer=peer,
-            model=model,
-            effort=effort,
-            source="request_contract",
-            cli_version=None,
             details="requested effort is known to be unsupported by this exact Claude model family",
             evidence=f"known unsupported model/effort pair: {model}/{effort}",
             supported_efforts=list(known_efforts),
@@ -446,6 +429,7 @@ def codex_availability(
     runner: Any = subprocess.run,
     env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
+    report = partial(result, peer="codex", model=model, effort=effort, source="codex_debug_models", cli_version=cli_version)
     effective_runner = run_bounded_command if runner is subprocess.run else runner
     try:
         completed = effective_runner(
@@ -460,86 +444,51 @@ def codex_availability(
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
-        return result(
+        return report(
             status="unknown",
-            peer="codex",
-            model=model,
-            effort=effort,
-            source="codex_debug_models",
-            cli_version=cli_version,
             details=f"Codex debug models did not finish within {timeout_seconds:g} seconds",
             evidence=f"timeout:{exc}",
         )
     except OSError as exc:
-        return result(
+        return report(
             status="unknown",
-            peer="codex",
-            model=model,
-            effort=effort,
-            source="codex_debug_models",
-            cli_version=cli_version,
             details=f"Codex debug models could not be executed: {exc}",
             evidence=str(exc),
         )
 
     evidence = f"{completed.stdout}\n{completed.stderr}"
     if completed.returncode != 0:
-        return result(
+        return report(
             status="unknown",
-            peer="codex",
-            model=model,
-            effort=effort,
-            source="codex_debug_models",
-            cli_version=cli_version,
             details=f"Codex debug models exited with status {completed.returncode}",
             evidence=evidence,
         )
     try:
         models = parse_codex_model_catalog(completed.stdout, requested_model=model)
     except ValueError as exc:
-        return result(
+        return report(
             status="unknown",
-            peer="codex",
-            model=model,
-            effort=effort,
-            source="codex_debug_models",
-            cli_version=cli_version,
             details=str(exc),
             evidence=evidence,
         )
     matching = [item for item in models if item["model"] == model]
     if not matching:
-        return result(
+        return report(
             status="unavailable",
-            peer="codex",
-            model=model,
-            effort=effort,
-            source="codex_debug_models",
-            cli_version=cli_version,
             details="requested exact model is absent from the live Codex model catalog",
             evidence=evidence,
         )
     supported = matching[0]["supported_efforts"]
     if effort not in supported:
-        return result(
+        return report(
             status="unavailable",
-            peer="codex",
-            model=model,
-            effort=effort,
-            source="codex_debug_models",
-            cli_version=cli_version,
             details="requested effort is not advertised for the exact model by live Codex debug models",
             evidence=evidence,
             supported_efforts=supported,
             effort_evidence="catalog_advertised",
         )
-    return result(
+    return report(
         status="available",
-        peer="codex",
-        model=model,
-        effort=effort,
-        source="codex_debug_models",
-        cli_version=cli_version,
         details="exact model and effort are advertised by live Codex debug models",
         evidence=evidence,
         supported_efforts=supported,
@@ -679,6 +628,7 @@ def claude_availability(
     runner: Any = subprocess.run,
     env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
+    report = partial(result, peer="claude", model=model, effort=effort, source="claude_cli_probe", cli_version=cli_version)
     probe_env = dict(os.environ if env is None else env)
     for key in CLAUDE_EFFORT_ENV_OVERRIDES:
         probe_env.pop(key, None)
@@ -758,24 +708,14 @@ def claude_availability(
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
-            return result(
+            return report(
                 status="unknown",
-                peer="claude",
-                model=model,
-                effort=effort,
-                source="claude_cli_probe",
-                cli_version=cli_version,
                 details=f"Claude live availability probe did not finish within {timeout_seconds:g} seconds",
                 evidence=f"timeout:{exc}",
             )
         except OSError as exc:
-            return result(
+            return report(
                 status="unknown",
-                peer="claude",
-                model=model,
-                effort=effort,
-                source="claude_cli_probe",
-                cli_version=cli_version,
                 details=f"Claude live availability probe could not be executed: {exc}",
                 evidence=str(exc),
             )
@@ -804,35 +744,20 @@ def claude_availability(
             evidence,
             completed.returncode,
         )
-        return result(
+        return report(
             status=failure_status,
-            peer="claude",
-            model=model,
-            effort=effort,
-            source="claude_cli_probe",
-            cli_version=cli_version,
             details=failure_details,
             evidence=evidence,
         )
     if capture_error:
-        return result(
+        return report(
             status="unknown",
-            peer="claude",
-            model=model,
-            effort=effort,
-            source="claude_cli_probe",
-            cli_version=cli_version,
             details=f"Claude availability hook telemetry was unavailable: {capture_error}",
             evidence=evidence,
         )
     if not isinstance(envelope, dict):
-        return result(
+        return report(
             status="unknown",
-            peer="claude",
-            model=model,
-            effort=effort,
-            source="claude_cli_probe",
-            cli_version=cli_version,
             details="Claude live probe did not return one JSON result envelope",
             evidence=evidence,
         )
@@ -840,13 +765,8 @@ def claude_availability(
     if not isinstance(model_usage, dict) or not model_usage or not all(
         isinstance(item, str) and item for item in model_usage
     ):
-        return result(
+        return report(
             status="unknown",
-            peer="claude",
-            model=model,
-            effort=effort,
-            source="claude_cli_probe",
-            cli_version=cli_version,
             details="Claude live probe did not expose an unambiguous modelUsage object",
             evidence=evidence,
         )
@@ -854,13 +774,8 @@ def claude_availability(
     try:
         reported_effort = parse_claude_stop(captures["Stop"])
     except ValueError as exc:
-        return result(
+        return report(
             status="unknown",
-            peer="claude",
-            model=model,
-            effort=effort,
-            source="claude_cli_probe",
-            cli_version=cli_version,
             details=str(exc),
             evidence=evidence,
         )
@@ -877,13 +792,8 @@ def claude_availability(
     if model_mismatch or reported_effort != expected_reported_effort or any(
         observed != expected_reported_effort for observed in envelope_efforts
     ):
-        return result(
+        return report(
             status="unavailable",
-            peer="claude",
-            model=model,
-            effort=effort,
-            source="claude_cli_probe",
-            cli_version=cli_version,
             details=(
                 "Claude resolved a model or effective effort different from the exact requested pair; "
                 f"modelUsage={usage_models}; requested_cli_effort={effort}; "
@@ -894,13 +804,8 @@ def claude_availability(
             supported_efforts=[effort] if reported_effort == expected_reported_effort else [],
             effort_evidence="stop_hook_observed",
         )
-    return result(
+    return report(
         status="available",
-        peer="claude",
-        model=model,
-        effort=effort,
-        source="claude_cli_probe",
-        cli_version=cli_version,
         details=(
             "Claude live modelUsage reported the exact requested model and the Stop hook reported "
             f"effective provider effort {reported_effort} for CLI effort {effort}"
