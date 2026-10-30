@@ -16,6 +16,8 @@ from typing import Any, Mapping
 
 
 sys.dont_write_bytecode = True
+if __name__ == "__main__":
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 MAX_LOCAL_SUBAGENTS = 64
 # A cold interpreter start can take seconds on Windows and macOS; a timed-out

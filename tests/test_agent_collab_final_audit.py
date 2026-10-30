@@ -90,7 +90,7 @@ class FinalAuditTests(TestCase):
             }
             host.ARTIFACTS.validate_cancel_result(report, request, Path(tmp))
             report['preserved_artifacts']['peer_report'] = int('1' * 64)
-            with self.assertRaisesRegex(host.ARTIFACTS.ArtifactValidationError, 'artifact hashes'):
+            with self.assertRaisesRegex(host.ARTIFACTS.ArtifactValidationError, 'preserved_artifacts peer_report'):
                 host.ARTIFACTS.validate_cancel_result(report, request, Path(tmp))
 
     def test_process_run_directory_cannot_be_coerced_from_a_number(self):

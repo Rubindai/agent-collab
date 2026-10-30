@@ -7,6 +7,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+import validation as V
 import host_config as CONFIG
 
 MAX_JSON_ARTIFACT_BYTES = 16 * 1024 * 1024
@@ -19,13 +20,7 @@ COVERAGE_LIMITATIONS = [
 ]
 
 
-CLAIM_STATUSES = {
-    "confirmed",
-    "plausible_unverified",
-    "rejected",
-    "product_decision",
-    "needs_human_input",
-}
+CLAIM_STATUSES = V.CLAIM_STATUSES
 
 
 CLAIM_SHAPE_CONTRACT = (
@@ -41,27 +36,13 @@ CLAIM_SOURCES = {"host", "peer", "helper", "adjudicator"}
 ADJUDICATOR_STATUSES = {"advisory_pending", "ok", "needs_human_input", "blocked"}
 
 
-RECOMMENDED_VERDICTS = {
-    "pass",
-    "pass_with_concerns",
-    "changes_recommended",
-    "ready",
-    "needs_revision",
-    "blocked",
-    "informational",
-}
+RECOMMENDED_VERDICTS = V.VERDICTS
 
 
-VALIDATION_STATUSES = {
-    "ok",
-    "invalid_json",
-    "noncanonical_output",
-    "schema_validation_failed",
-    "peer_report_mismatch",
-}
+VALIDATION_STATUSES = V.VALIDATION_STATUSES
 
 
-FINISH_TIMEOUT_SOURCES = {"explicit", "peer_timeout_plus_grace", "guided_default"}
+FINISH_TIMEOUT_SOURCES = V.FINISH_TIMEOUT_SOURCES
 
 
 PROVIDER_PROCESS_KEYS = {
@@ -177,74 +158,25 @@ def preserved_artifact_hashes(run_dir: Path) -> dict[str, str | None]:
 
 
 def validate_cleanup_evidence(value: Any, label: str) -> None:
-    required = {"outcome", "quiescent"}
-    allowed = required | {"pgid", "details"}
-    if not isinstance(value, dict) or not required <= set(value) or set(value) - allowed:
-        raise ArtifactValidationError(
-            f"{label} must contain outcome and quiescent with only optional pgid/details"
-        )
-    if not isinstance(value["outcome"], str) or not value["outcome"]:
-        raise ArtifactValidationError(f"{label} outcome must be a non-empty string")
-    if type(value["quiescent"]) is not bool:
-        raise ArtifactValidationError(f"{label} quiescent must be a JSON boolean")
-    if "pgid" in value and (type(value["pgid"]) is not int or value["pgid"] <= 0):
-        raise ArtifactValidationError(f"{label} pgid must be a positive integer")
-    if "details" in value and (not isinstance(value["details"], str) or not value["details"]):
-        raise ArtifactValidationError(f"{label} details must be a non-empty string")
+    V.record(value, {"outcome": V.NONEMPTY, "quiescent": bool}, label,
+             optional={"pgid": V.integer(1), "details": V.NONEMPTY}, error=ArtifactValidationError)
 
 
 def validate_cancel_result(report: dict[str, Any], request: dict[str, Any], run_dir: Path) -> None:
-    required = {
-        "schema_version",
-        "run_id",
-        "status",
-        "outcome",
-        "forced",
-        "reason",
-        "elapsed_seconds",
-        "minimum_wait_seconds",
-        "before_minimum_wait",
-        "peer_was_alive",
-        "process_cleanup",
-        "preserved_artifacts",
-        "workspace_mutation",
-        "workspace_mutation_sha256",
-        "completed_at",
-    }
-    if not isinstance(report, dict) or set(report) != required:
-        raise ArtifactValidationError(f"cancel-result must contain exactly {sorted(required)}")
-    if report["schema_version"] != CONFIG.ARTIFACT_SCHEMA_VERSION or report["run_id"] != request["run_id"]:
-        raise ArtifactValidationError("cancel-result schema_version/run_id does not match the request")
-    if report["status"] != "cancelled" or report["outcome"] != "cancelled_quiescent":
-        raise ArtifactValidationError("cancel-result status/outcome is invalid")
-    for key in ("forced", "before_minimum_wait", "peer_was_alive"):
-        if type(report[key]) is not bool:
-            raise ArtifactValidationError(f"cancel-result {key} must be a JSON boolean")
-    if not isinstance(report["reason"], str) or not report["reason"]:
-        raise ArtifactValidationError("cancel-result reason must be a non-empty string")
-    elapsed = report["elapsed_seconds"]
-    if elapsed is not None and (
-        type(elapsed) not in {int, float} or not math.isfinite(float(elapsed)) or float(elapsed) < 0
-    ):
-        raise ArtifactValidationError("cancel-result elapsed_seconds must be a non-negative finite number or null")
-    minimum_wait = report["minimum_wait_seconds"]
-    if type(minimum_wait) not in {int, float} or float(minimum_wait) != CONFIG.MIN_PEER_WAIT_SECONDS:
-        raise ArtifactValidationError("cancel-result minimum_wait_seconds is invalid")
+    validate_artifact(report, request, "cancel-result", {
+        "status": {"cancelled"}, "outcome": {"cancelled_quiescent"},
+        "forced": bool, "before_minimum_wait": bool, "peer_was_alive": bool, "reason": V.NONEMPTY,
+        "elapsed_seconds": (V.Rule(lambda v: V.NUMBER.accepts(v) and v >= 0, "a non-negative finite number"), type(None)),
+        "minimum_wait_seconds": V.number(CONFIG.MIN_PEER_WAIT_SECONDS, CONFIG.MIN_PEER_WAIT_SECONDS),
+        "process_cleanup": {"quiescent": {True}, "provider": dict, "wrapper": dict},
+        "preserved_artifacts": dict.fromkeys(CANCEL_PRESERVED_ARTIFACTS, (V.DIGEST, type(None))),
+        "workspace_mutation": (str, type(None)), "workspace_mutation_sha256": V.DIGEST, "completed_at": str,
+    })
     cleanup = report["process_cleanup"]
-    if not isinstance(cleanup, dict) or set(cleanup) != {"quiescent", "provider", "wrapper"}:
-        raise ArtifactValidationError("cancel-result process_cleanup keys are invalid")
-    if cleanup["quiescent"] is not True:
-        raise ArtifactValidationError("cancel-result must prove process-tree quiescence")
     validate_cleanup_evidence(cleanup["provider"], "cancel-result provider cleanup")
     validate_cleanup_evidence(cleanup["wrapper"], "cancel-result wrapper cleanup")
     if cleanup["provider"]["quiescent"] is not True or cleanup["wrapper"]["quiescent"] is not True:
         raise ArtifactValidationError("cancel-result provider and wrapper cleanup must be quiescent")
-    preserved = report["preserved_artifacts"]
-    if not isinstance(preserved, dict) or set(preserved) != set(CANCEL_PRESERVED_ARTIFACTS):
-        raise ArtifactValidationError("cancel-result preserved_artifacts keys are invalid")
-    for value in preserved.values():
-        if value is not None and (not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None):
-            raise ArtifactValidationError("cancel-result artifact hashes must be lowercase SHA-256 or null")
     mutation = report["workspace_mutation"]
     mutation_path = run_dir / "cancel-workspace-mutation.json"
     if mutation is not None:
@@ -300,51 +232,24 @@ def require_artifact_version(data: dict[str, Any], label: str) -> None:
 
 
 def validate_peer_process(data: dict[str, Any], request: dict[str, Any], run_dir: Path) -> None:
-    required = {
-        "schema_version",
-        "pid",
-        "pgid",
-        "process_identity",
-        "run_id",
-        "run_dir",
-        "repo_root",
-        "host",
-        "peer",
-        "adjudicator_enabled",
-        "started_at",
-        "started_at_epoch",
-        "peer_timeout_seconds",
-        "peer_cli_version",
-        "workspace_guard",
-        "owner_token",
-        "request_sha256",
-        "settings",
-        "peer_report",
-        "peer_raw",
-        "peer_normalization",
-        "provider_process",
-        "host_first_pass",
-    }
-    if set(data) != required:
-        raise ArtifactValidationError(
-            f"peer-process keys must match v2 exactly; missing={sorted(required - set(data))}, unknown={sorted(set(data) - required)}"
-        )
-    if data["schema_version"] != CONFIG.ARTIFACT_SCHEMA_VERSION:
-        raise ArtifactValidationError("peer-process schema_version must be 2.0; legacy artifacts are not supported")
+    validate_artifact(data, request, "peer-process", {
+        "pid": V.integer(1), "pgid": V.integer(1), "process_identity": dict,
+        "run_dir": str, "host": V.ORIGINS, "peer": V.ORIGINS, "adjudicator_enabled": bool,
+        "started_at": str, "started_at_epoch": V.NUMBER,
+        "peer_timeout_seconds": V.number(CONFIG.MIN_PEER_WAIT_SECONDS, CONFIG.SAFETY.MAX_AGENT_TIMEOUT_SECONDS),
+        "owner_token": V.Rule(lambda v: type(v) is str and re.fullmatch(r"[0-9a-f]{32}", v) is not None,
+                              "32 lowercase hexadecimal characters"),
+        "request_sha256": V.DIGEST, "settings": {"local": V.NONEMPTY, "global": V.NONEMPTY},
+        **dict.fromkeys(("repo_root", "peer_cli_version", "workspace_guard", "peer_report", "peer_raw",
+                         "peer_normalization", "provider_process", "host_first_pass"), V.NONEMPTY),
+    })
     if data["request_sha256"] != canonical_artifact_sha256(request):
         raise ArtifactValidationError("host-request differs from the launch-time request digest")
-    if not isinstance(data["owner_token"], str) or re.fullmatch(r"[0-9a-f]{32}", data["owner_token"]) is None:
-        raise ArtifactValidationError("peer-process owner_token must be 32 lowercase hexadecimal characters")
     for key in ("run_id", "host", "peer", "adjudicator_enabled"):
         if data[key] != request[key]:
             raise ArtifactValidationError(f"peer-process {key} does not match host request")
-    if type(data["adjudicator_enabled"]) is not bool:
-        raise ArtifactValidationError("peer-process adjudicator_enabled must be a JSON boolean")
-    if not isinstance(data["run_dir"], str) or Path(data["run_dir"]).resolve() != run_dir.resolve():
+    if Path(data["run_dir"]).resolve() != run_dir.resolve():
         raise ArtifactValidationError("peer-process run_dir does not match the resolved run directory")
-    for key in ("pid", "pgid"):
-        if type(data[key]) is not int or data[key] <= 0:
-            raise ArtifactValidationError(f"peer-process {key} must be a positive integer")
     try:
         CONFIG.SAFETY.validate_process_identity(data["process_identity"])
     except ValueError as exc:
@@ -360,39 +265,12 @@ def validate_peer_process(data: dict[str, Any], request: dict[str, Any], run_dir
         )
     if not isinstance(data["started_at"], str) or parse_utc_timestamp(data["started_at"]) is None:
         raise ArtifactValidationError("peer-process started_at must be an ISO-8601 timestamp")
-    if not isinstance(data["started_at_epoch"], (int, float)) or isinstance(data["started_at_epoch"], bool):
-        raise ArtifactValidationError("peer-process started_at_epoch must be numeric")
-    if not math.isfinite(float(data["started_at_epoch"])):
-        raise ArtifactValidationError("peer-process started_at_epoch must be finite")
     timeout = data["peer_timeout_seconds"]
-    if (
-        not isinstance(timeout, (int, float))
-        or isinstance(timeout, bool)
-        or not CONFIG.MIN_PEER_WAIT_SECONDS <= float(timeout) <= CONFIG.SAFETY.MAX_AGENT_TIMEOUT_SECONDS
-    ):
-        raise ArtifactValidationError("peer-process peer_timeout_seconds must be a finite bounded number")
     if float(timeout) != float(request["peer_timeout_seconds"]):
         raise ArtifactValidationError("peer-process peer_timeout_seconds does not match host request")
     started_at = parse_utc_timestamp(data["started_at"])
     if abs(started_at - float(data["started_at_epoch"])) > 2:
         raise ArtifactValidationError("peer-process started_at and started_at_epoch disagree")
-    for key in (
-        "repo_root",
-        "peer_cli_version",
-        "workspace_guard",
-        "peer_report",
-        "peer_raw",
-        "peer_normalization",
-        "provider_process",
-        "host_first_pass",
-    ):
-        if not isinstance(data[key], str) or not data[key]:
-            raise ArtifactValidationError(f"peer-process {key} must be a non-empty string")
-    settings = data["settings"]
-    if not isinstance(settings, dict) or set(settings) != {"local", "global"}:
-        raise ArtifactValidationError("peer-process settings must contain exactly local and global paths")
-    if not all(isinstance(value, str) and value for value in settings.values()):
-        raise ArtifactValidationError("peer-process settings paths must be non-empty strings")
     expected_paths = {
         "peer_report": run_dir / "peer-report.json",
         "peer_raw": run_dir / "peer.raw.json",
@@ -477,202 +355,73 @@ class PeerReportRequestMismatch(ArtifactValidationError):
     pass
 
 
-def validate_claim_shape(
-    claim: Any,
-    context: str,
-    require_source: bool = False,
-    allow_extra: bool = False,
-) -> None:
-    if not isinstance(claim, dict):
-        raise ArtifactValidationError(f"{context} claim must be an object; {CLAIM_SHAPE_CONTRACT}")
-    for key in ("claim", "status", "evidence"):
-        if key not in claim:
-            raise ArtifactValidationError(f"{context} claim missing {key}; {CLAIM_SHAPE_CONTRACT}")
-        if not isinstance(claim[key], str):
-            raise ArtifactValidationError(f"{context} claim {key} must be a string; {CLAIM_SHAPE_CONTRACT}")
-    if claim["status"] not in CLAIM_STATUSES:
-        raise ArtifactValidationError(f"{context} claim status is invalid; {CLAIM_SHAPE_CONTRACT}")
-    if require_source:
-        if claim.get("source") not in CLAIM_SOURCES:
-            raise ArtifactValidationError(f"{context} claim source is invalid")
-    if not allow_extra:
-        allowed = {"claim", "status", "evidence"}
-        if require_source:
-            allowed.add("source")
-        unknown = set(claim) - allowed
-        if unknown:
-            raise ArtifactValidationError(f"{context} claim has unknown keys: {sorted(unknown)}")
+def validate_claim_shape(claim: Any, context: str, require_source: bool = False, allow_extra: bool = False) -> None:
+    fields = {**V.CLAIM, **({"source": CLAIM_SOURCES} if require_source else {})}
+    try:
+        V.record(claim, fields, f"{context} claim", error=ArtifactValidationError, allow_extra=allow_extra)
+    except ArtifactValidationError as exc:
+        raise ArtifactValidationError(f"{exc}; {CLAIM_SHAPE_CONTRACT}") from exc
+
+
+def validate_artifact(report: Any, request: dict[str, Any], label: str, fields: dict[str, Any], *,
+                      optional: dict[str, Any] | None = None, sourced_claims: bool = False) -> None:
+    V.record(report, {"schema_version": V.VERSION, "run_id": str, **fields}, label,
+             optional=optional, error=ArtifactValidationError)
+    if report["run_id"] != request["run_id"]:
+        raise ArtifactValidationError(f"{label} run_id does not match host request")
+    for claim in report.get("claims", []):
+        validate_claim_shape(claim, label, require_source=sourced_claims)
 
 
 def validate_host_first_pass(report: dict[str, Any], request: dict[str, Any]) -> None:
-    required = {"schema_version", "run_id", "summary", "claims"}
-    missing = required - report.keys()
-    if missing:
-        raise ArtifactValidationError(f"host-first-pass missing required keys: {sorted(missing)}")
-    unknown = set(report) - required
-    if unknown:
-        raise ArtifactValidationError(f"host-first-pass has unknown keys: {sorted(unknown)}")
-    if report["schema_version"] != CONFIG.ARTIFACT_SCHEMA_VERSION:
-        raise ArtifactValidationError("host-first-pass schema_version must be 2.0; legacy artifacts are not supported")
-    if report["run_id"] != request.get("run_id"):
-        raise ArtifactValidationError("host-first-pass run_id does not match host request")
-    if not isinstance(report["summary"], str):
-        raise ArtifactValidationError("host-first-pass summary must be a string")
-    if not isinstance(report["claims"], list):
-        raise ArtifactValidationError("host-first-pass claims must be an array")
-    for claim in report["claims"]:
-        validate_claim_shape(claim, "host-first-pass")
+    validate_artifact(report, request, "host-first-pass", {"summary": str, "claims": list})
 
 
 def validate_host_synthesis(report: dict[str, Any], request: dict[str, Any]) -> None:
-    required = {
-        "schema_version",
-        "run_id",
-        "summary",
-        "verdict",
-        "claims",
-        "unresolved_risks",
-        "workspace_mutation_sha256",
-        "claim_matrix_sha256",
-        "final_answer_ready",
-    }
-    if not isinstance(report, dict) or set(report) != required:
-        raise ArtifactValidationError(f"host-synthesis must contain exactly {sorted(required)}")
-    if report["schema_version"] != CONFIG.ARTIFACT_SCHEMA_VERSION:
-        raise ArtifactValidationError("host-synthesis schema_version must be 2.0; legacy artifacts are not supported")
-    if report["run_id"] != request["run_id"]:
-        raise ArtifactValidationError("host-synthesis run_id does not match host request")
-    if not isinstance(report["summary"], str) or not report["summary"].strip():
-        raise ArtifactValidationError("host-synthesis summary must be a non-empty string")
-    if not isinstance(report["verdict"], str) or report["verdict"] not in RECOMMENDED_VERDICTS:
-        raise ArtifactValidationError("host-synthesis verdict is invalid")
-    if not isinstance(report["claims"], list):
-        raise ArtifactValidationError("host-synthesis claims must be an array")
-    for claim in report["claims"]:
-        validate_claim_shape(claim, "host-synthesis")
-    if not isinstance(report["unresolved_risks"], list) or not all(
-        isinstance(item, str) for item in report["unresolved_risks"]
-    ):
-        raise ArtifactValidationError("host-synthesis unresolved_risks must be an array of strings")
-    for key in ("workspace_mutation_sha256", "claim_matrix_sha256"):
-        if not isinstance(report[key], str) or re.fullmatch(r"[0-9a-f]{64}", report[key]) is None:
-            raise ArtifactValidationError(f"host-synthesis {key} must be a lowercase SHA-256 digest")
-    if report["final_answer_ready"] is not True:
-        raise ArtifactValidationError("host-synthesis final_answer_ready must be true")
+    validate_artifact(report, request, "host-synthesis", {
+        "summary": V.NONBLANK, "verdict": RECOMMENDED_VERDICTS, "claims": list,
+        "unresolved_risks": [str], "workspace_mutation_sha256": V.DIGEST,
+        "claim_matrix_sha256": V.DIGEST, "final_answer_ready": {True},
+    })
 
 
 def validate_host_result(report: dict[str, Any], request: dict[str, Any], run_dir: Path) -> None:
     if not isinstance(report, dict):
         raise ArtifactValidationError("host-result must be an object")
     phase = report.get("phase")
+    V.check(phase, str, "host-result phase", ArtifactValidationError)
+    fields = {"run_dir": str, "phase": {"waiting_for_peer", "ready_for_synthesis", "done"},
+              "finish_wait_seconds": V.number(CONFIG.MIN_PEER_WAIT_SECONDS, CONFIG.SAFETY.MAX_AGENT_TIMEOUT_SECONDS + CONFIG.FINISH_TIMEOUT_GRACE_SECONDS),
+              "finish_timeout_source": FINISH_TIMEOUT_SOURCES}
     if phase == "waiting_for_peer":
-        required = {
-            "schema_version",
-            "run_id",
-            "run_dir",
-            "status",
-            "phase",
-            "peer_pid",
-            "finish_wait_seconds",
-            "finish_timeout_source",
-            "peer_report",
-            "message",
-        }
-        if set(report) != required:
-            raise ArtifactValidationError(
-                "waiting host-result keys must match schema 2.0 exactly; "
-                f"missing={sorted(required - set(report))}, unknown={sorted(set(report) - required)}"
-            )
-        if report["schema_version"] != CONFIG.ARTIFACT_SCHEMA_VERSION or report["run_id"] != request["run_id"]:
-            raise ArtifactValidationError("host-result schema_version/run_id does not match the v2 request")
-        if not isinstance(report["run_dir"], str) or Path(report["run_dir"]).resolve() != run_dir.resolve():
-            raise ArtifactValidationError("host-result run_dir does not match the resolved run directory")
-        if report["status"] != "peer_running":
-            raise ArtifactValidationError("waiting host-result status must be peer_running")
-        if type(report["peer_pid"]) is not int or report["peer_pid"] <= 0:
-            raise ArtifactValidationError("waiting host-result peer_pid must be a positive integer")
-        if not isinstance(report["peer_report"], str) or Path(report["peer_report"]).resolve() != (run_dir / "peer-report.json").resolve():
-            raise ArtifactValidationError("waiting host-result peer_report path is invalid")
-        if not isinstance(report["message"], str) or not report["message"].strip():
-            raise ArtifactValidationError("waiting host-result message must be a non-empty string")
+        fields.update(status={"peer_running"}, peer_pid=V.integer(1), peer_report=str, message=V.NONBLANK)
+        paths = {"peer_report": "peer-report.json"}
     elif phase in {"ready_for_synthesis", "done"}:
-        common = {
-            "schema_version",
-            "run_id",
-            "run_dir",
-            "phase",
-            "peer_status",
-            "validation_status",
-            "finish_wait_seconds",
-            "finish_timeout_source",
-            "normalization",
-            "claim_matrix",
-            "claim_matrix_sha256",
-            "adjudicator_report",
-            "workspace_mutation",
-            "workspace_mutation_sha256",
-        }
-        required = common | ({"completed_at"} if phase == "done" else set())
-        if set(report) != required:
-            raise ArtifactValidationError(
-                f"host-result keys must match phase {phase} exactly; "
-                f"missing={sorted(required - set(report))}, unknown={sorted(set(report) - required)}"
-            )
-        if report["schema_version"] != CONFIG.ARTIFACT_SCHEMA_VERSION or report["run_id"] != request["run_id"]:
-            raise ArtifactValidationError("host-result schema_version/run_id does not match the v2 request")
-        if not isinstance(report["run_dir"], str) or Path(report["run_dir"]).resolve() != run_dir.resolve():
-            raise ArtifactValidationError("host-result run_dir does not match the resolved run directory")
-        if report["peer_status"] not in {"ok", "peer_failed"}:
-            raise ArtifactValidationError("host-result peer_status is invalid")
-        expected_paths = {
-            "normalization": run_dir / "peer-normalization.json",
-            "claim_matrix": run_dir / "claim-matrix.json",
-        }
-        for key, expected in expected_paths.items():
-            if not isinstance(report[key], str) or not report[key]:
-                raise ArtifactValidationError(f"host-result {key} must be a non-empty string")
-            if Path(report[key]).resolve() != expected.resolve():
-                raise ArtifactValidationError(f"host-result {key} path does not match the run artifact")
+        fields.update(peer_status={"ok", "peer_failed"}, validation_status=VALIDATION_STATUSES,
+                      normalization=V.NONEMPTY, claim_matrix=V.NONEMPTY, claim_matrix_sha256=V.DIGEST,
+                      adjudicator_report=(str, type(None)), workspace_mutation=(dict, type(None)),
+                      workspace_mutation_sha256=V.DIGEST)
+        if phase == "done":
+            fields["completed_at"] = V.NONEMPTY
+        paths = {"normalization": "peer-normalization.json", "claim_matrix": "claim-matrix.json"}
+    else:
+        raise ArtifactValidationError("host-result phase must be waiting_for_peer, ready_for_synthesis, or done")
+    validate_artifact(report, request, "host-result", fields)
+    if Path(report["run_dir"]).resolve() != run_dir.resolve():
+        raise ArtifactValidationError("host-result run_dir does not match the resolved run directory")
+    if phase != "waiting_for_peer":
         if request["adjudicator_enabled"]:
-            adjudicator_path = report["adjudicator_report"]
-            if not isinstance(adjudicator_path, str) or not adjudicator_path:
-                raise ArtifactValidationError(
-                    "host-result adjudicator_report must be a non-empty string when adjudication is enabled"
-                )
-            if Path(adjudicator_path).resolve() != (run_dir / "adjudicator-report.json").resolve():
-                raise ArtifactValidationError(
-                    "host-result adjudicator_report path does not match the run artifact"
-                )
+            V.check(report["adjudicator_report"], V.NONEMPTY, "host-result adjudicator_report", ArtifactValidationError)
+            paths["adjudicator_report"] = "adjudicator-report.json"
         elif report["adjudicator_report"] is not None:
-            raise ArtifactValidationError(
-                "host-result adjudicator_report must be null when adjudication is disabled"
-            )
-        if report["validation_status"] not in VALIDATION_STATUSES:
-            raise ArtifactValidationError("host-result validation_status is invalid")
-        if report["workspace_mutation"] is not None and not isinstance(report["workspace_mutation"], dict):
-            raise ArtifactValidationError("host-result workspace_mutation must be an object or null")
-        expected_mutation_digest = workspace_mutation_sha256(report["workspace_mutation"])
-        if report["workspace_mutation_sha256"] != expected_mutation_digest:
+            raise ArtifactValidationError("host-result adjudicator_report must be null when adjudication is disabled")
+        if report["workspace_mutation_sha256"] != workspace_mutation_sha256(report["workspace_mutation"]):
             raise ArtifactValidationError("host-result workspace_mutation_sha256 is invalid")
-        matrix_digest = report["claim_matrix_sha256"]
-        if not isinstance(matrix_digest, str) or re.fullmatch(r"[0-9a-f]{64}", matrix_digest) is None:
-            raise ArtifactValidationError("host-result claim_matrix_sha256 must be a lowercase SHA-256 digest")
         if phase == "done" and parse_utc_timestamp(report["completed_at"]) is None:
             raise ArtifactValidationError("host-result completed_at must be an ISO-8601 timestamp")
-    else:
-        raise ArtifactValidationError(
-            "host-result phase must be waiting_for_peer, ready_for_synthesis, or done"
-        )
-    if report["finish_timeout_source"] not in FINISH_TIMEOUT_SOURCES:
-        raise ArtifactValidationError("host-result finish_timeout_source is invalid")
-    wait_seconds = report["finish_wait_seconds"]
-    if (
-        not isinstance(wait_seconds, (int, float))
-        or isinstance(wait_seconds, bool)
-        or not math.isfinite(float(wait_seconds))
-        or not CONFIG.MIN_PEER_WAIT_SECONDS <= float(wait_seconds) <= CONFIG.SAFETY.MAX_AGENT_TIMEOUT_SECONDS + CONFIG.FINISH_TIMEOUT_GRACE_SECONDS
-    ):
-        raise ArtifactValidationError("host-result finish_wait_seconds must be finite and bounded")
+    for key, filename in paths.items():
+        if Path(report[key]).resolve() != (run_dir / filename).resolve():
+            raise ArtifactValidationError(f"host-result {key} path does not match the run artifact")
 
 
 def validate_peer_report_matches_request(report: dict[str, Any], request: dict[str, Any]) -> None:
@@ -682,30 +431,13 @@ def validate_peer_report_matches_request(report: dict[str, Any], request: dict[s
 
 
 def validate_claim_matrix(report: dict[str, Any], request: dict[str, Any]) -> None:
-    required = {"schema_version", "run_id", "claims", "source_report_sha256"}
-    missing = required - report.keys()
-    if missing:
-        raise ArtifactValidationError(f"claim-matrix missing required keys: {sorted(missing)}")
-    unknown = set(report) - required
-    if unknown:
-        raise ArtifactValidationError(f"claim-matrix has unknown keys: {sorted(unknown)}")
-    if report["schema_version"] != CONFIG.ARTIFACT_SCHEMA_VERSION:
-        raise ArtifactValidationError("claim-matrix schema_version must be 2.0; legacy artifacts are not supported")
-    if report["run_id"] != request.get("run_id"):
-        raise ArtifactValidationError("claim-matrix run_id does not match host request")
-    if not isinstance(report["claims"], list):
-        raise ArtifactValidationError("claim-matrix claims must be an array")
-    for claim in report["claims"]:
-        validate_claim_shape(claim, "claim-matrix", require_source=True)
+    validate_artifact(report, request, "claim-matrix", {
+        "claims": list,
+        "source_report_sha256": {"host_first_pass": V.DIGEST, "peer_report": V.DIGEST,
+                                 "helper_reports": (V.DIGEST, type(None)),
+                                 "adjudicator_report": (V.DIGEST, type(None))},
+    }, sourced_claims=True)
     sources = report["source_report_sha256"]
-    keys = {"host_first_pass", "peer_report", "helper_reports", "adjudicator_report"}
-    if not isinstance(sources, dict) or set(sources) != keys:
-        raise ArtifactValidationError("claim-matrix source_report_sha256 must identify each canonical source")
-    for key, digest in sources.items():
-        if digest is None and key in {"helper_reports", "adjudicator_report"}:
-            continue
-        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
-            raise ArtifactValidationError(f"claim-matrix source {key} must have a lowercase SHA-256 digest")
     if request["adjudicator_enabled"] != (sources["adjudicator_report"] is not None):
         raise ArtifactValidationError("claim-matrix adjudicator source does not match the request")
     if sources["helper_reports"] is None and any(claim["source"] == "helper" for claim in report["claims"]):
@@ -713,42 +445,12 @@ def validate_claim_matrix(report: dict[str, Any], request: dict[str, Any]) -> No
 
 
 def validate_adjudicator_report(report: dict[str, Any], request: dict[str, Any]) -> None:
-    required = {
-        "schema_version",
-        "run_id",
-        "status",
-        "summary",
-        "false_positives",
-        "claims_needing_verification",
-        "recommended_verdict",
-    }
-    missing = required - report.keys()
-    if missing:
-        raise ArtifactValidationError(f"adjudicator-report missing required keys: {sorted(missing)}")
-    unknown = set(report) - (required | {"claims"})
-    if unknown:
-        raise ArtifactValidationError(f"adjudicator-report has unknown keys: {sorted(unknown)}")
-    if report["schema_version"] != CONFIG.ARTIFACT_SCHEMA_VERSION:
-        raise ArtifactValidationError("adjudicator-report schema_version must be 2.0; legacy artifacts are not supported")
-    if report["run_id"] != request.get("run_id"):
-        raise ArtifactValidationError("adjudicator-report run_id does not match host request")
-    for key in ("status", "summary", "recommended_verdict"):
-        if not isinstance(report[key], str):
-            raise ArtifactValidationError(f"adjudicator-report {key} must be a string")
-    if report["status"] not in ADJUDICATOR_STATUSES:
-        raise ArtifactValidationError("adjudicator-report status is invalid")
-    if report["recommended_verdict"] not in RECOMMENDED_VERDICTS:
-        raise ArtifactValidationError("adjudicator-report recommended_verdict is invalid")
-    for key in ("false_positives", "claims_needing_verification"):
-        if not isinstance(report[key], list) or not all(isinstance(item, str) for item in report[key]):
-            raise ArtifactValidationError(f"adjudicator-report {key} must be an array of strings")
+    validate_artifact(report, request, "adjudicator-report", {
+        "status": ADJUDICATOR_STATUSES, "summary": str, "recommended_verdict": RECOMMENDED_VERDICTS,
+        "false_positives": [str], "claims_needing_verification": [str],
+    }, optional={"claims": list})
     if report["status"] == "advisory_pending" and report != default_adjudicator_report(request, {"verdict": report["recommended_verdict"]}):
         raise ArtifactValidationError("advisory_pending must be the unmodified runtime placeholder")
-    if "claims" in report:
-        if not isinstance(report["claims"], list):
-            raise ArtifactValidationError("adjudicator-report claims must be an array")
-        for claim in report["claims"]:
-            validate_claim_shape(claim, "adjudicator-report", allow_extra=False)
 
 
 def claims_with_source(report: dict[str, Any], source: str) -> list[dict[str, Any]]:
@@ -805,35 +507,20 @@ def validate_host_helper_budget(helpers: dict[str, Any] | None, adjudicator: dic
 
 
 def validate_helper_evidence(data: dict[str, Any], request: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
-    required = {"schema_version", "run_id", "reports"}
-    if not isinstance(data, dict) or set(data) != required:
-        raise ArtifactValidationError(f"helper-reports must contain exactly {sorted(required)}")
-    if data["schema_version"] != CONFIG.ARTIFACT_SCHEMA_VERSION:
-        raise ArtifactValidationError("helper-reports schema_version must be 2.0; legacy artifacts are not supported")
-    if data["run_id"] != request["run_id"]:
-        raise ArtifactValidationError("helper-reports run_id does not match host request")
+    validate_artifact(data, request, "helper-reports", {"reports": list})
     reports = data["reports"]
-    if not isinstance(reports, list):
-        raise ArtifactValidationError("helper-reports reports must be an array")
     helper_limit = request["max_local_subagents"] if request["local_subagents_allowed"] else 0
     if len(reports) > helper_limit:
         raise ArtifactValidationError(
             f"helper-reports contains {len(reports)} reports; the resolved per-run limit is {helper_limit}"
         )
-
     claims: list[dict[str, Any]] = []
     helper_names: set[str] = set()
     for report in reports:
-        report_keys = {"name", "summary", "claims"}
-        if not isinstance(report, dict) or set(report) != report_keys:
-            raise ArtifactValidationError(f"helper report must contain exactly {sorted(report_keys)}")
-        if not isinstance(report["name"], str) or not report["name"]:
-            raise ArtifactValidationError("helper report name must be a non-empty string")
+        V.record(report, {"name": V.NONEMPTY, "summary": str, "claims": list}, "helper report", error=ArtifactValidationError)
         if report["name"] in helper_names:
             raise ArtifactValidationError(f"duplicate helper report name: {report['name']}")
         helper_names.add(report["name"])
-        if not isinstance(report["summary"], str) or not isinstance(report["claims"], list):
-            raise ArtifactValidationError("helper report summary must be a string and claims must be an array")
         for claim in report["claims"]:
             validate_claim_shape(claim, "helper-report")
             claims.append({**claim, "source": "helper"})

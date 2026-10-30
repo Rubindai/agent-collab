@@ -14,6 +14,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+import validation as V
 import strict_json as STRICT_JSON
 import safety as SAFETY
 
@@ -38,20 +39,13 @@ EFFORT_EVIDENCE = {
     "stop_hook_observed",
     "none",
 }
-RESULT_KEYS = {
-    "schema_version",
-    "status",
-    "peer",
-    "requested_model",
-    "requested_effort",
-    "supported_efforts",
-    "source",
-    "checked_at",
-    "cli_version",
-    "effort_evidence",
-    "evidence_sha256",
-    "details",
+RESULT_FIELDS = {
+    "schema_version": V.VERSION, "status": STATUSES, "peer": PEERS,
+    "requested_model": str, "requested_effort": str, "supported_efforts": [V.NONEMPTY],
+    "source": SOURCES, "checked_at": V.NONBLANK, "cli_version": (V.NONBLANK, type(None)),
+    "effort_evidence": EFFORT_EVIDENCE, "evidence_sha256": V.DIGEST, "details": V.NONBLANK,
 }
+RESULT_KEYS = set(RESULT_FIELDS)
 DEFAULT_TIMEOUT_SECONDS = 30.0
 MAX_TIMEOUT_SECONDS = 60.0
 MAX_PROBE_OUTPUT_BYTES = 16 * 1024 * 1024
@@ -284,36 +278,12 @@ def result(
 
 
 def validate_result(output: dict[str, Any], *, require_available: bool = False) -> None:
-    if not isinstance(output, dict) or set(output) != RESULT_KEYS:
-        raise ValueError("availability result must contain the exact schema 2.0 key set")
-    if output["schema_version"] != SCHEMA_VERSION:
-        raise ValueError(f"availability schema_version must be {SCHEMA_VERSION}")
-    if output["status"] not in STATUSES:
-        raise ValueError(f"availability status must be one of {sorted(STATUSES)}")
+    V.record(output, RESULT_FIELDS, "availability")
     if require_available and output["status"] != "available":
         raise ValueError("persisted availability attestation must have status available")
-    if output["peer"] not in PEERS:
-        raise ValueError("availability peer must be claude or codex")
-    for key in ("requested_model", "requested_effort"):
-        if not isinstance(output[key], str):
-            raise ValueError(f"availability {key} must be a string")
-    for key in ("checked_at", "details"):
-        if not isinstance(output[key], str) or not output[key].strip():
-            raise ValueError(f"availability {key} must be a non-empty string")
-    for key in ("cli_version",):
-        if output[key] is not None and (not isinstance(output[key], str) or not output[key].strip()):
-            raise ValueError(f"availability {key} must be null or a non-empty string")
     supported = output["supported_efforts"]
-    if not isinstance(supported, list) or not all(isinstance(item, str) and item for item in supported):
-        raise ValueError("availability supported_efforts must be an array of non-empty strings")
     if len(supported) != len(set(supported)):
         raise ValueError("availability supported_efforts must not contain duplicates")
-    if output["source"] not in SOURCES:
-        raise ValueError(f"availability source must be one of {sorted(SOURCES)}")
-    if output["effort_evidence"] not in EFFORT_EVIDENCE:
-        raise ValueError(f"availability effort_evidence must be one of {sorted(EFFORT_EVIDENCE)}")
-    if not isinstance(output["evidence_sha256"], str) or re.fullmatch(r"[0-9a-f]{64}", output["evidence_sha256"]) is None:
-        raise ValueError("availability evidence_sha256 must be a lowercase SHA-256 digest")
     if output["status"] == "available":
         if not output["requested_model"].strip() or not output["requested_effort"].strip():
             raise ValueError("available result must contain a non-empty requested model and effort")

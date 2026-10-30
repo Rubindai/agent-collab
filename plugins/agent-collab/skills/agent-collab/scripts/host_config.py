@@ -10,6 +10,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+import validation as V
 import peer as PEER
 import availability as AVAILABILITY
 import safety as SAFETY
@@ -20,16 +21,10 @@ import review as REVIEW
 import state as STATE
 
 
-ORIGINS = {"claude", "codex"}
+ORIGINS = V.ORIGINS
 
 
-MODES = {
-    "review",
-    "research",
-    "design",
-    "plan",
-    "debug",
-}
+MODES = V.MODES
 
 
 ARTIFACT_SCHEMA_VERSION = "2.0"
@@ -461,51 +456,22 @@ def normalize_settings(raw_settings: dict[str, Any], source: str) -> dict[str, A
 
 
 def validate_v2_settings_types(raw_settings: dict[str, Any], source: str) -> dict[str, Any]:
-    """Validate a persisted v2 settings object without legacy coercion."""
-    bool_keys = {
-        "local_subagents_allowed",
-        "adjudicator_enabled",
-        "safe_mode",
-        "online_research",
-    }
-    int_keys = {"max_local_subagents", "history_retained_runs"}
-    string_keys = {
-        "codex_model",
-        "codex_effort",
-        "claude_model",
-        "claude_effort",
-        "claude_tools",
-        "workspace_mode",
-    }
-    for key in bool_keys:
-        if type(raw_settings[key]) is not bool:
-            raise ValueError(f"{source} {key} must be a JSON boolean")
-    for key in int_keys:
-        if type(raw_settings[key]) is not int or raw_settings[key] < 0:
-            raise ValueError(f"{source} {key} must be a non-negative JSON integer")
-    if raw_settings["max_local_subagents"] > SAFETY.MAX_LOCAL_SUBAGENTS:
-        raise ValueError(
-            f"{source} max_local_subagents must not exceed {SAFETY.MAX_LOCAL_SUBAGENTS}"
-        )
-    for key in string_keys:
-        if not isinstance(raw_settings[key], str) or not raw_settings[key].strip():
-            raise ValueError(f"{source} {key} must be a non-empty JSON string")
+    """Validate persisted settings separately from the coercing environment path."""
+    V.record(raw_settings, {
+        **dict.fromkeys(("local_subagents_allowed", "adjudicator_enabled", "safe_mode", "online_research"), bool),
+        "max_local_subagents": V.integer(0, SAFETY.MAX_LOCAL_SUBAGENTS), "history_retained_runs": V.integer(),
+        **dict.fromkeys(("codex_model", "codex_effort", "claude_model", "claude_effort", "claude_tools"), V.NONBLANK),
+        "workspace_mode": {"isolated", "direct"},
+        "agent_timeout_seconds": V.number(MIN_PEER_WAIT_SECONDS, SAFETY.MAX_AGENT_TIMEOUT_SECONDS),
+        "codex_config": [V.Rule(lambda v: type(v) is str and re.match(r"^[^=]+=", v) is not None,
+                                "a key=value string")],
+    }, source)
     if is_fable_model(raw_settings["claude_model"]):
         raise ValueError(
             f"{source} claude_model cannot persist Fable; use a per-run --peer-model override"
         )
     validate_claude_tools(raw_settings["claude_tools"], source)
-    if raw_settings["workspace_mode"] not in {"isolated", "direct"}:
-        raise ValueError(f"{source} workspace_mode must be isolated or direct")
-    if type(raw_settings["agent_timeout_seconds"]) not in {int, float}:
-        raise ValueError(f"{source} agent_timeout_seconds must be a JSON number")
-    normalize_timeout(raw_settings["agent_timeout_seconds"])
-    codex_config = raw_settings["codex_config"]
-    if not isinstance(codex_config, list) or not all(
-        isinstance(item, str) and re.match(r"^[^=]+=", item) for item in codex_config
-    ):
-        raise ValueError(f"{source} codex_config must be a JSON array of key=value strings")
-    SAFETY.validate_codex_config_overrides(codex_config)
+    SAFETY.validate_codex_config_overrides(raw_settings["codex_config"])
     return {key: list(value) if isinstance(value, list) else value for key, value in raw_settings.items()}
 
 

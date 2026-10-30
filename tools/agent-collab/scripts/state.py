@@ -9,14 +9,15 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+import validation as V
 import strict_json as STRICT_JSON
 
 
 STATE_SCHEMA_VERSION = "2.0"
 MAX_JOBS = 50
 ACTIVE_STATUSES = {"running", "synthesizing"}
-ORIGINS = {"claude", "codex"}
-MODES = {"review", "research", "design", "plan", "debug"}
+ORIGINS = V.ORIGINS
+MODES = V.MODES
 PHASES_BY_STATUS = {
     "running": {"peer_running", "normalizing_peer", "waiting_for_peer"},
     "synthesizing": {"ready_for_synthesis"},
@@ -25,65 +26,32 @@ PHASES_BY_STATUS = {
     "cancelled": {"cancelled"},
 }
 PEER_STATUSES = {"ok", "peer_failed"}
-PEER_VERDICTS = {
-    "pass",
-    "pass_with_concerns",
-    "changes_recommended",
-    "ready",
-    "needs_revision",
-    "blocked",
-    "informational",
-}
-VALIDATION_STATUSES = {
-    "ok",
-    "invalid_json",
-    "noncanonical_output",
-    "schema_validation_failed",
-    "peer_report_mismatch",
-}
+PEER_VERDICTS = V.VERDICTS
+VALIDATION_STATUSES = V.VALIDATION_STATUSES
 NORMALIZATION_SOURCES = {"structured_output", "direct_json", "none"}
-FINISH_TIMEOUT_SOURCES = {
-    "explicit",
-    "peer_timeout_plus_grace", "guided_default",
-}
+FINISH_TIMEOUT_SOURCES = V.FINISH_TIMEOUT_SOURCES
 MIN_FINISH_WAIT_SECONDS = 60
 MAX_FINISH_WAIT_SECONDS = 86_430
 STATE_LOCK_TIMEOUT_SECONDS = 10.0
 STATE_LOCK_POLL_SECONDS = 0.02
-JOB_REQUIRED_KEYS = {
-    "created_at",
-    "updated_at",
-    "id",
-    "run_dir",
-    "repo_root",
-    "host",
-    "peer",
-    "mode",
-    "target",
-    "adjudicator_enabled",
-    "status",
-    "phase",
+JOB_REQUIRED_FIELDS = {
+    **dict.fromkeys(("created_at", "updated_at", "id", "run_dir", "repo_root", "target"), V.NONEMPTY),
+    "host": ORIGINS, "peer": ORIGINS, "mode": MODES, "adjudicator_enabled": bool,
+    "status": set(PHASES_BY_STATUS), "phase": str,
 }
-JOB_OPTIONAL_KEYS = {
-    "pid",
-    "edit_allowed",
-    "peer_report",
-    "peer_raw",
-    "peer_normalization",
-    "host_first_pass",
-    "peer_stderr",
-    "finish_wait_seconds",
-    "finish_timeout_source",
-    "peer_status",
-    "peer_verdict",
-    "validation_status",
-    "normalization_source",
-    "workspace_mutation",
-    "summary",
-    "completed_at",
-    "cancel",
-    "cancel_result",
+JOB_REQUIRED_KEYS = set(JOB_REQUIRED_FIELDS)
+JOB_OPTIONAL_FIELDS = {
+    **dict.fromkeys(("peer_report", "peer_raw", "peer_normalization", "host_first_pass", "peer_stderr",
+                    "completed_at", "cancel_result"), V.NONEMPTY),
+    "summary": str, "pid": (V.integer(1), type(None)), "edit_allowed": bool, "workspace_mutation": bool,
+    "finish_wait_seconds": (V.number(MIN_FINISH_WAIT_SECONDS, MAX_FINISH_WAIT_SECONDS), type(None)),
+    "finish_timeout_source": FINISH_TIMEOUT_SOURCES, "peer_status": PEER_STATUSES,
+    "peer_verdict": PEER_VERDICTS, "validation_status": VALIDATION_STATUSES,
+    "normalization_source": NORMALIZATION_SOURCES,
+    "cancel": {"forced": bool, "reason": V.NONEMPTY, "elapsed_seconds": (V.NUMBER, type(None)),
+               "minimum_wait_seconds": V.NUMBER, "before_minimum_wait": bool},
 }
+JOB_OPTIONAL_KEYS = set(JOB_OPTIONAL_FIELDS)
 JOB_KEYS = JOB_REQUIRED_KEYS | JOB_OPTIONAL_KEYS
 RUN_ID_SAFE_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
 
@@ -105,30 +73,17 @@ def default_state() -> dict[str, Any]:
 
 
 def is_number(value: Any) -> bool:
-    return type(value) in {int, float} and math.isfinite(value)
+    return V.NUMBER.accepts(value)
 
 
 def validate_job(job: Any, label: str = "state job") -> None:
-    if not isinstance(job, dict):
-        raise ValueError(f"{label} must be an object")
-    missing = JOB_REQUIRED_KEYS - job.keys()
-    unknown = set(job) - JOB_KEYS
-    if missing or unknown:
-        raise ValueError(f"{label} must match v2 exactly; missing={sorted(missing)} unknown={sorted(unknown)}")
-
-    for key in ("created_at", "updated_at", "id", "run_dir", "repo_root", "target"):
-        if not isinstance(job[key], str) or not job[key]:
-            raise ValueError(f"{label} {key} must be a non-empty string")
+    V.record(job, JOB_REQUIRED_FIELDS, label, optional=JOB_OPTIONAL_FIELDS)
     if any(char not in RUN_ID_SAFE_CHARS for char in job["id"]):
         raise ValueError(f"{label} id contains unsafe characters")
-    if job["host"] not in ORIGINS or job["peer"] not in ORIGINS or job["host"] == job["peer"]:
+    if job["host"] == job["peer"]:
         raise ValueError(f"{label} host and peer must be different current products")
-    if job["mode"] not in MODES:
-        raise ValueError(f"{label} mode is invalid")
-    if type(job["adjudicator_enabled"]) is not bool:
-        raise ValueError(f"{label} adjudicator_enabled must be a JSON boolean")
     status = job["status"]
-    if status not in PHASES_BY_STATUS or job["phase"] not in PHASES_BY_STATUS[status]:
+    if job["phase"] not in PHASES_BY_STATUS[status]:
         raise ValueError(f"{label} status/phase combination is invalid")
     if status == "cancelled":
         if "cancel" not in job or "cancel_result" not in job:
@@ -136,67 +91,10 @@ def validate_job(job: Any, label: str = "state job") -> None:
     elif "cancel" in job or "cancel_result" in job:
         raise ValueError(f"{label} cancellation evidence is allowed only for cancelled jobs")
 
-    for key in (
-        "peer_report",
-        "peer_raw",
-        "peer_normalization",
-        "host_first_pass",
-        "peer_stderr",
-        "completed_at",
-        "cancel_result",
-    ):
-        if key in job and (not isinstance(job[key], str) or not job[key]):
-            raise ValueError(f"{label} {key} must be a non-empty string")
-    if "summary" in job and not isinstance(job["summary"], str):
-        raise ValueError(f"{label} summary must be a string")
-    if "pid" in job and job["pid"] is not None and (type(job["pid"]) is not int or job["pid"] <= 0):
-        raise ValueError(f"{label} pid must be a positive JSON integer or null")
-    if "edit_allowed" in job and type(job["edit_allowed"]) is not bool:
-        raise ValueError(f"{label} edit_allowed must be a JSON boolean")
-    if "workspace_mutation" in job and type(job["workspace_mutation"]) is not bool:
-        raise ValueError(f"{label} workspace_mutation must be a JSON boolean")
-    if "finish_wait_seconds" in job:
-        wait = job["finish_wait_seconds"]
-        if wait is not None and (
-            not is_number(wait)
-            or not MIN_FINISH_WAIT_SECONDS <= float(wait) <= MAX_FINISH_WAIT_SECONDS
-        ):
-            raise ValueError(f"{label} finish_wait_seconds must be a finite bounded number or null")
-    if "finish_timeout_source" in job and job["finish_timeout_source"] not in FINISH_TIMEOUT_SOURCES:
-        raise ValueError(f"{label} finish_timeout_source is invalid")
-    if "peer_status" in job and job["peer_status"] not in PEER_STATUSES:
-        raise ValueError(f"{label} peer_status is invalid")
-    if "peer_verdict" in job and job["peer_verdict"] not in PEER_VERDICTS:
-        raise ValueError(f"{label} peer_verdict is invalid")
-    if "validation_status" in job and job["validation_status"] not in VALIDATION_STATUSES:
-        raise ValueError(f"{label} validation_status is invalid")
-    if "normalization_source" in job and job["normalization_source"] not in NORMALIZATION_SOURCES:
-        raise ValueError(f"{label} normalization_source is invalid")
-    if "cancel" in job:
-        cancel = job["cancel"]
-        cancel_keys = {"forced", "reason", "elapsed_seconds", "minimum_wait_seconds", "before_minimum_wait"}
-        if not isinstance(cancel, dict) or set(cancel) != cancel_keys:
-            raise ValueError(f"{label} cancel must match v2 exactly")
-        if type(cancel["forced"]) is not bool or type(cancel["before_minimum_wait"]) is not bool:
-            raise ValueError(f"{label} cancel booleans must be JSON booleans")
-        if not isinstance(cancel["reason"], str) or not cancel["reason"]:
-            raise ValueError(f"{label} cancel reason must be a non-empty string")
-        if cancel["elapsed_seconds"] is not None and not is_number(cancel["elapsed_seconds"]):
-            raise ValueError(f"{label} cancel elapsed_seconds must be a number or null")
-        if not is_number(cancel["minimum_wait_seconds"]):
-            raise ValueError(f"{label} cancel minimum_wait_seconds must be a number")
-
 
 def validate_state_payload(parsed: Any) -> dict[str, Any]:
-    if not isinstance(parsed, dict) or set(parsed) != {"schema_version", "jobs"}:
-        raise ValueError("Agent Collab state must contain exactly schema_version and jobs")
-    if parsed["schema_version"] != STATE_SCHEMA_VERSION:
-        raise ValueError(
-            f"Agent Collab state schema_version must be {STATE_SCHEMA_VERSION}; legacy state is unsupported"
-        )
+    V.record(parsed, {"schema_version": V.VERSION, "jobs": list}, "Agent Collab state")
     jobs = parsed["jobs"]
-    if not isinstance(jobs, list):
-        raise ValueError("Agent Collab state jobs must be an array")
     for index, job in enumerate(jobs):
         validate_job(job, f"Agent Collab state jobs[{index}]")
     job_ids = [job["id"] for job in jobs]

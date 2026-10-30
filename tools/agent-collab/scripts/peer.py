@@ -22,6 +22,9 @@ from typing import Any
 
 
 sys.dont_write_bytecode = True
+if __name__ == "__main__":
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+import validation as V
 import snapshot as SNAPSHOT
 import isolation as ISOLATION
 import availability as AVAILABILITY
@@ -29,73 +32,33 @@ import safety as SAFETY
 import strict_json as STRICT_JSON
 import claude_telemetry as CLAUDE_TELEMETRY
 
-ORIGINS = {"claude", "codex"}
-MODES = {
-    "review",
-    "research",
-    "design",
-    "plan",
-    "debug",
+ORIGINS = V.ORIGINS
+MODES = V.MODES
+VERDICTS = V.VERDICTS
+CLAIM_STATUSES = V.CLAIM_STATUSES
+REPORT_FIELDS = {
+    "schema_version": V.VERSION, "run_id": V.RUN_ID,
+    "origin": ORIGINS, "host": ORIGINS, "peer": ORIGINS, "mode": MODES,
+    "target": str, "status": {"ok", "peer_failed"}, "verdict": VERDICTS, "summary": str,
+    "findings": [{"severity": {"critical", "high", "medium", "low", "info"},
+                  "title": str, "details": str, "files": [str], "recommendation": str,
+                  "confidence": {"high", "medium", "low"}}],
+    "claims": [V.CLAIM], "limitations": [str], "next_actions": [str],
+    "error": ({"kind": str, "message": str, "details": (str, type(None))}, type(None)),
 }
-VERDICTS = {
-    "pass",
-    "pass_with_concerns",
-    "changes_recommended",
-    "ready",
-    "needs_revision",
-    "blocked",
-    "informational",
-}
-CLAIM_STATUSES = {
-    "confirmed",
-    "plausible_unverified",
-    "rejected",
-    "product_decision",
-    "needs_human_input",
-}
-TOP_LEVEL_KEYS = {
-    "schema_version",
-    "run_id",
-    "origin",
-    "host",
-    "peer",
-    "mode",
-    "target",
-    "status",
-    "verdict",
-    "summary",
-    "findings",
-    "claims",
-    "limitations",
-    "next_actions",
-    "error",
-}
+TOP_LEVEL_KEYS = set(REPORT_FIELDS)
 REQUIRED_REPORT_KEYS = TOP_LEVEL_KEYS
-REQUIRED_REQUEST_KEYS = {
-    "schema_version",
-    "origin",
-    "host",
-    "peer",
-    "mode",
-    "target",
-    "brief",
-    "edit_allowed",
-    "run_id",
-    "adjudicator_enabled",
-    "local_subagents_allowed",
-    "max_local_subagents",
-    "online_research",
-    "safe_mode",
-    "workspace_mode",
-    "peer_model",
-    "peer_effort",
-    "availability_attestation",
-    "peer_timeout_seconds",
-    "codex_config",
-    "claude_tools",
-    "claude_max_turns",
-    "helper_enforcement",
+REQUEST_FIELDS = {
+    "schema_version": V.VERSION, "origin": ORIGINS, "host": ORIGINS, "peer": ORIGINS, "mode": MODES,
+    "target": V.NONBLANK, "brief": V.NONBLANK, "run_id": V.RUN_ID,
+    "edit_allowed": bool, "adjudicator_enabled": bool, "local_subagents_allowed": bool,
+    "max_local_subagents": V.integer(0, SAFETY.MAX_LOCAL_SUBAGENTS),
+    "online_research": bool, "safe_mode": bool, "workspace_mode": {"isolated", "direct"},
+    "peer_model": V.NONBLANK, "peer_effort": V.NONBLANK, "claude_tools": V.NONBLANK,
+    "availability_attestation": dict, "peer_timeout_seconds": V.number(60, SAFETY.MAX_AGENT_TIMEOUT_SECONDS),
+    "codex_config": list, "claude_max_turns": (V.integer(1), type(None)), "helper_enforcement": dict,
 }
+REQUIRED_REQUEST_KEYS = set(REQUEST_FIELDS)
 REQUEST_KEYS = REQUIRED_REQUEST_KEYS
 RUN_ID_SAFE_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
 MIN_AGENT_TIMEOUT_SECONDS = 60
@@ -547,54 +510,14 @@ def default_repo_root() -> Path:
         return Path.cwd().resolve()
 
 
-def validate_request(
-    request: dict[str, Any],
-    *,
-    require_fresh_attestation: bool = False,
-) -> None:
-    unknown = set(request) - REQUEST_KEYS
-    if unknown:
-        raise RequestValidationError(f"request has unknown keys: {sorted(unknown)}")
-    missing = REQUIRED_REQUEST_KEYS - request.keys()
-    if missing:
-        raise RequestValidationError(f"request missing required keys: {sorted(missing)}")
-    if request["schema_version"] != "2.0":
-        raise RequestValidationError("schema_version must be 2.0; legacy run requests are not supported")
-    if request["origin"] not in ORIGINS:
-        raise RequestValidationError("origin must be claude or codex")
-    if request["host"] not in ORIGINS:
-        raise RequestValidationError("host must be claude or codex")
-    if request["peer"] not in ORIGINS:
-        raise RequestValidationError("peer must be claude or codex")
+def validate_request(request: dict[str, Any], *, require_fresh_attestation: bool = False) -> None:
+    V.record(request, REQUEST_FIELDS, "request", error=RequestValidationError)
     if request["origin"] != request["host"]:
         raise RequestValidationError("origin must match host")
     if request["host"] == request["peer"]:
         raise RequestValidationError("host and peer must be different products")
-    if request["mode"] not in MODES:
-        raise RequestValidationError(f"mode must be one of {sorted(MODES)}")
-    if not isinstance(request["edit_allowed"], bool):
-        raise RequestValidationError("edit_allowed must be a boolean")
-    if type(request["adjudicator_enabled"]) is not bool:
-        raise RequestValidationError("adjudicator_enabled must be a boolean")
-    if not isinstance(request["local_subagents_allowed"], bool):
-        raise RequestValidationError("local_subagents_allowed must be a boolean")
-    if (
-        type(request["max_local_subagents"]) is not int
-        or not 0 <= request["max_local_subagents"] <= SAFETY.MAX_LOCAL_SUBAGENTS
-    ):
-        raise RequestValidationError(
-            f"max_local_subagents must be an integer from 0 through {SAFETY.MAX_LOCAL_SUBAGENTS}"
-        )
-    for key in ("online_research", "safe_mode"):
-        if not isinstance(request[key], bool):
-            raise RequestValidationError(f"{key} must be a boolean")
-    if type(request["workspace_mode"]) is not str or request["workspace_mode"] not in {"isolated", "direct"}:
-        raise RequestValidationError("workspace_mode must be isolated or direct")
     if request["workspace_mode"] == "isolated" and (request["safe_mode"] or request["edit_allowed"]):
         raise RequestValidationError("isolated workspace requires full mode and edit_allowed=false")
-    for key in ("peer_model", "peer_effort", "claude_tools"):
-        if not isinstance(request[key], str) or not request[key].strip():
-            raise RequestValidationError(f"{key} must be a non-empty string")
     claude_tool_tokens = [
         item.strip()
         for item in request["claude_tools"].replace(",", " ").split()
@@ -631,25 +554,11 @@ def validate_request(
                 f"(age {age_seconds:.0f} s; limit {MAX_AVAILABILITY_ATTESTATION_AGE_SECONDS} s); "
                 "start a new run"
             )
-    timeout = request["peer_timeout_seconds"]
-    if (
-        not isinstance(timeout, (int, float))
-        or isinstance(timeout, bool)
-        or not MIN_AGENT_TIMEOUT_SECONDS <= float(timeout) <= SAFETY.MAX_AGENT_TIMEOUT_SECONDS
-    ):
-        raise RequestValidationError(
-            f"peer_timeout_seconds must be finite and between {MIN_AGENT_TIMEOUT_SECONDS} "
-            f"and {SAFETY.MAX_AGENT_TIMEOUT_SECONDS}"
-        )
     try:
         SAFETY.validate_codex_config_overrides(request["codex_config"])
     except ValueError as exc:
         raise RequestValidationError(str(exc)) from exc
     claude_max_turns = request["claude_max_turns"]
-    if claude_max_turns is not None and (
-        type(claude_max_turns) is not int or claude_max_turns < 1
-    ):
-        raise RequestValidationError("claude_max_turns must be a positive integer or null")
     if request["peer"] != "claude" and claude_max_turns is not None:
         raise RequestValidationError("claude_max_turns may be set only for a Claude peer")
     expected_helper_enforcement = SAFETY.helper_enforcement(
@@ -666,11 +575,6 @@ def validate_request(
         raise RequestValidationError(
             "helper_enforcement does not match the resolved peer helper controls"
         )
-    for key in ("target", "brief", "run_id"):
-        if not isinstance(request[key], str) or not request[key].strip():
-            raise RequestValidationError(f"{key} must be a non-empty string")
-    if request["run_id"] in {".", ".."} or any(char not in RUN_ID_SAFE_CHARS for char in request["run_id"]):
-        raise RequestValidationError("run_id must be a basename using only letters, numbers, '.', '_', or '-'")
 
 
 def load_request(path: Path) -> dict[str, Any]:
@@ -947,18 +851,23 @@ def failure(
     request: dict[str, Any] | None = None,
     details: Any | None = None,
 ) -> dict[str, Any]:
-    request = request or {}
+    request = request if isinstance(request, dict) else {}
+    def choice(key: str, choices: set[str], default: str) -> str:
+        value = request.get(key)
+        return value if type(value) is str and value in choices else default
+    host = choice("host", ORIGINS, "codex")
+    peer = "claude" if host == "codex" else "codex"
     if details is None or isinstance(details, str):
         serialized_details = details
     else:
         serialized_details = STRICT_JSON.dumps(details, indent=None)
     return {
         "schema_version": "2.0",
-        "run_id": str(request.get("run_id", "agent-collab-unknown")),
-        "origin": request.get("origin", "codex") if request.get("origin") in ORIGINS else "codex",
-        "host": request.get("host", "codex") if request.get("host") in ORIGINS else "codex",
-        "peer": request.get("peer", "claude") if request.get("peer") in ORIGINS else "claude",
-        "mode": request.get("mode", "review") if request.get("mode") in MODES else "review",
+        "run_id": request["run_id"] if V.RUN_ID.accepts(request.get("run_id")) else "agent-collab-unknown",
+        "origin": host,
+        "host": host,
+        "peer": peer,
+        "mode": choice("mode", MODES, "review"),
         "target": str(request.get("target", "")),
         "status": "peer_failed",
         "verdict": "blocked",
@@ -1364,92 +1273,13 @@ def normalize_json_payload(text: str, expected_source: str) -> NormalizedPeerOut
 
 
 def validate_peer_report(report: dict[str, Any]) -> None:
-    if not isinstance(report, dict):
-        raise PeerReportValidationError("peer report must be an object")
-    unknown = set(report) - TOP_LEVEL_KEYS
-    if unknown:
-        raise PeerReportValidationError(f"unknown top-level keys: {sorted(unknown)}")
-    missing = REQUIRED_REPORT_KEYS - report.keys()
-    if missing:
-        raise PeerReportValidationError(f"missing required keys: {sorted(missing)}")
-    if report["schema_version"] != "2.0":
-        raise PeerReportValidationError("schema_version must be 2.0; legacy peer reports are not supported")
-    if any(not isinstance(report[key], str) or report[key] not in ORIGINS for key in ("origin", "host", "peer")):
-        raise PeerReportValidationError("origin, host, and peer must be claude or codex")
+    V.record(report, REPORT_FIELDS, "peer report", error=PeerReportValidationError)
     if report["origin"] != report["host"] or report["host"] == report["peer"]:
         raise PeerReportValidationError("origin must equal host and host must differ from peer")
-    if not isinstance(report["mode"], str) or report["mode"] not in MODES:
-        raise PeerReportValidationError("invalid mode")
-    if not isinstance(report["status"], str) or report["status"] not in {"ok", "peer_failed"}:
-        raise PeerReportValidationError("invalid status")
-    if not isinstance(report["verdict"], str) or report["verdict"] not in VERDICTS:
-        raise PeerReportValidationError("invalid verdict")
-    for key in ("run_id", "target", "summary"):
-        if not isinstance(report[key], str):
-            raise PeerReportValidationError(f"{key} must be a string")
-    if (
-        not report["run_id"]
-        or report["run_id"] in {".", ".."}
-        or any(char not in RUN_ID_SAFE_CHARS for char in report["run_id"])
-    ):
-        raise PeerReportValidationError("run_id must be a safe non-empty basename")
-    for key in ("findings", "claims", "limitations", "next_actions"):
-        if not isinstance(report[key], list):
-            raise PeerReportValidationError(f"{key} must be an array")
-    for finding in report["findings"]:
-        if not isinstance(finding, dict):
-            raise PeerReportValidationError("finding must be an object")
-        unknown = set(finding) - {"severity", "title", "details", "files", "recommendation", "confidence"}
-        if unknown:
-            raise PeerReportValidationError(f"finding has unknown keys: {sorted(unknown)}")
-        for key in ("severity", "title", "details", "files", "recommendation", "confidence"):
-            if key not in finding:
-                raise PeerReportValidationError(f"finding missing {key}")
-        if not isinstance(finding["severity"], str) or finding["severity"] not in {"critical", "high", "medium", "low", "info"}:
-            raise PeerReportValidationError("invalid finding severity")
-        if not isinstance(finding["confidence"], str) or finding["confidence"] not in {"high", "medium", "low"}:
-            raise PeerReportValidationError("invalid finding confidence")
-        for key in ("title", "details"):
-            if not isinstance(finding[key], str):
-                raise PeerReportValidationError(f"finding {key} must be a string")
-        if not isinstance(finding["recommendation"], str):
-            raise PeerReportValidationError("finding recommendation must be a string")
-        if not isinstance(finding["files"], list) or not all(isinstance(item, str) for item in finding["files"]):
-            raise PeerReportValidationError("finding files must be an array of strings")
-    for claim in report["claims"]:
-        if not isinstance(claim, dict):
-            raise PeerReportValidationError("claim must be an object")
-        unknown = set(claim) - {"claim", "status", "evidence"}
-        if unknown:
-            raise PeerReportValidationError(f"claim has unknown keys: {sorted(unknown)}")
-        for key in ("claim", "status", "evidence"):
-            if key not in claim:
-                raise PeerReportValidationError(f"claim missing {key}")
-        if not isinstance(claim["claim"], str):
-            raise PeerReportValidationError("claim claim must be a string")
-        if not isinstance(claim.get("status"), str) or claim["status"] not in CLAIM_STATUSES:
-            raise PeerReportValidationError("invalid claim status")
-        if not isinstance(claim["evidence"], str):
-            raise PeerReportValidationError("claim evidence must be a string")
-    for key in ("limitations", "next_actions"):
-        if not all(isinstance(item, str) for item in report[key]):
-            raise PeerReportValidationError(f"{key} must contain strings")
-    error = report["error"]
-    if report["status"] == "peer_failed" and not isinstance(error, dict):
+    if report["status"] == "peer_failed" and report["error"] is None:
         raise PeerReportValidationError("peer_failed reports must include an error object")
-    if report["status"] == "ok" and error is not None:
+    if report["status"] == "ok" and report["error"] is not None:
         raise PeerReportValidationError("ok reports must set error to null")
-    if isinstance(error, dict):
-        unknown = set(error) - {"kind", "message", "details"}
-        if unknown:
-            raise PeerReportValidationError(f"error has unknown keys: {sorted(unknown)}")
-        if set(error) != {"kind", "message", "details"}:
-            raise PeerReportValidationError("error must contain exactly kind, message, and details")
-        for key in ("kind", "message"):
-            if not isinstance(error.get(key), str):
-                raise PeerReportValidationError(f"error {key} must be a string")
-        if error["details"] is not None and not isinstance(error["details"], str):
-            raise PeerReportValidationError("error details must be a string or null")
 
 
 # Shared with host.py so both validators bind the same report fields.

@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any
 
 sys.dont_write_bytecode = True
+if __name__ == "__main__":
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
 import strict_json as STRICT_JSON
 
 MAX_CAPTURE_BYTES = 1_000_000

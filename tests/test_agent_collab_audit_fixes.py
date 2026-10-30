@@ -34,7 +34,7 @@ class AuditRegressionTests(TestCase):
                 payload = case.host.ARTIFACTS.load_json(draft)
                 payload['verdict'] = value
                 case.host.write_json(draft, payload)
-                with self.assertRaisesRegex(ValueError, 'verdict is invalid'):
+                with self.assertRaisesRegex(ValueError, 'verdict must be one of'):
                     case.invoke('complete', '--synthesis', draft)
                 self.assertTrue(case.guard.exists())
                 self.assertFalse((case.run / 'host-synthesis.json').exists())

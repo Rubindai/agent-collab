@@ -1846,10 +1846,10 @@ class HostV2Tests(TestCase):
     def test_persisted_settings_reject_legacy_type_coercion(self):
         host = load_host()
         cases = (
-            ("safe_mode", "false", "JSON boolean"),
-            ("max_local_subagents", "8", "JSON integer"),
-            ("codex_config", "foo=true", "JSON array"),
-            ("agent_timeout_seconds", "2700", "JSON number"),
+            ("safe_mode", "false", "safe_mode must be a boolean"),
+            ("max_local_subagents", "8", "max_local_subagents must be an integer"),
+            ("codex_config", "foo=true", "codex_config must be an array"),
+            ("agent_timeout_seconds", "2700", "agent_timeout_seconds must be a finite number"),
         )
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "settings.json"
@@ -3219,7 +3219,7 @@ class HostV2Tests(TestCase):
             report = json.loads(output.getvalue())
         self.assertFalse(report["ok"])
         self.assertFalse(report["checks"]["state_file"]["ok"])
-        self.assertIn("missing=['adjudicator_enabled']", report["checks"]["state_file"]["error"])
+        self.assertIn("missing required keys: ['adjudicator_enabled']", report["checks"]["state_file"]["error"])
         self.assertIn("Archive", report["checks"]["state_file"]["recovery"])
         self.assertTrue(report["checks"]["schemas"]["ok"])
 
