@@ -1,7 +1,13 @@
 # Changelog
 
-## Unreleased
+## 7.0.0 (2026-10-31)
 
+- **Breaking:** new run artifacts, state, snapshots, and guard entries use schema 3.0 under the default `runs/v3` history. Saved settings stay on schema 2.0 at their existing paths. Explicit run roots are honored exactly; incompatible histories are rejected without migration. Close all active old runs with their original runtime before upgrading because the guard registry filename and lock remain shared.
+- **Breaking:** explicit cancellation is immediate, including after a peer report exists. Remove `--force-before-min-wait` and the obsolete cancellation timing fields; optional `--reason` defaults to `user_cancelled`. Preserve reports and require process quiescence before releasing ownership. Completed runs remain immutable, including interrupted completion recovery. Committed cancellation blocks every completion path; cancellation retries reuse the cleanup proof without probing a possibly reused wrapper process group.
+- Remove PATH-based host-CLI wrappers; retain environment depth refusal and helper instructions without claiming a hard recursion boundary.
+- Separate host administration, run loading, process ownership, and lifecycle operations. Reuse validated operation inputs, preserve post-wait revalidation and lifecycle write ordering, and share launch-gate ownership, stdin writing, and bounded process reaping. Probe timeouts must be finite and positive.
+- Share Claude probe/peer settings, remove duplicate settings and an unreachable effort-family check, and mark the package as requiring local execution in Codex. Model, effort, permissions, and user override choices remain unchanged.
+- Standardize malformed lifecycle request diagnostics with exit code 2. Group tests by responsibility and remove exact-prose/source-text assertions while retaining behavioral, artifact, and platform boundaries.
 - Classify Codex model and effort failures from provider error events rather than quoted tool or assistant output.
 - Add six native Claude behavioral evaluations for explicit and implicit activation, nonactivation, and synthetic finding verification, with deterministic graders and a no-plugin comparison.
 - Use portable root `plugin.json` with OpenAI presentation metadata and retain the native Claude manifest in the shared package.

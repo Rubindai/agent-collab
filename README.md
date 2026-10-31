@@ -4,7 +4,7 @@ Agent Collab is a peer-first, challenge-first collaboration plugin for Codex and
 
 The upcoming 7.0.0 release simplifies lifecycle operations and uses schema 3.0 for new run history. Saved schema 2.0 settings remain compatible. Close old active runs with their original runtime before upgrading; existing history is not migrated. See [CHANGELOG.md](CHANGELOG.md) for release history.
 
-**Latest provider-documentation and workflow evaluation: 2026-10-25.** A comprehensive audit checked the provider contracts used by this project against current OpenAI and Anthropic documentation, Codex 0.164.0 source, and independent Agent Collab Claude reviews. See the [source and coverage record](tools/agent-collab/references/provider-audit.md) and [evaluation evidence](#evaluation-evidence) for scope and limitations. Version 3.0.0 appeared on GitHub `main` without a release tag; formal tags begin with `v4.0.0`.
+**Latest provider-documentation audit: 2026-10-31.** The focused refactor audit checked the provider contracts used by this project against current OpenAI and Anthropic documentation, Codex 0.166.0 source, and independent Agent Collab Claude reviews. Local package checks use Codex 0.166.0 and Claude Code 2.1.316. See the [source and coverage record](tools/agent-collab/references/provider-audit.md) and [evaluation evidence](#evaluation-evidence) for scope and limitations. Version 3.0.0 appeared on GitHub `main` without a release tag; formal tags begin with `v4.0.0`.
 
 ## Defaults
 
@@ -231,7 +231,7 @@ Peer depth markers and helper instructions deter recursion but are not a hard cr
 
 ## Settings audit
 
-The original settings audit was completed on 2026-07-26; all settings and launch-control claims were reassessed on 2026-10-21 with Codex CLI `0.163.0` (including its source) and Claude Code `2.1.305`. A focused 2026-10-25 refresh checked helper, prompt, and skill contracts against official documentation retrieved that day, Codex 0.164.0 source, and Claude Code 2.1.310 validation, correcting V1/V2 depth, spawn-field exposure, and `availableModels` wording. Provider documentation defines what each control does; defaults remain Agent Collab product decisions. The helper count, deadline, and high-effort defaults have not been established as cost or latency optima.
+The original settings audit was completed on 2026-07-26; all settings and launch-control claims were reassessed on 2026-10-21 with Codex CLI `0.163.0` (including its source) and Claude Code `2.1.305`. A focused 2026-10-25 refresh checked helper, prompt, and skill contracts against official documentation retrieved that day, Codex 0.164.0 source, and Claude Code 2.1.310 validation, correcting V1/V2 depth, spawn-field exposure, and `availableModels` wording. The 2026-10-31 refresh covers shared Claude probe/peer settings, effort validation, local execution metadata, and background-wait semantics; see the provider audit for sources and limits. Provider documentation defines what each control does; defaults remain Agent Collab product decisions. The helper count, deadline, and high-effort defaults have not been established as cost or latency optima.
 
 ### Persisted Agent Collab settings
 
@@ -440,15 +440,30 @@ Use the same version and commit for the tag, manifests, changelog entry, and Git
 
 ### Simplification measurements
 
-Against `fa10efd`, the unreleased refactor reduces `host.py` from 4,590 to 2,716 lines, `start` from 360 to 24 lines, and `invoke_peer` from 443 to 63 lines. Synthesis authoring drops from nine fields to four judgment fields; the runtime fills the other five. The canonical and provider peer schemas retain distinct purposes, but the provider file is now generated and its parsed content is unchanged.
+Against the pre-refactor checkpoint `ba5fbe8`, the schema-3 refactor has the following measured size changes. Counts include canonical runtime Python files only; generated package copies are excluded.
 
-On this Linux host with Python 3.13.5, 20 alternating fresh-process `host.py --help` samples per revision measured medians of 72.06 ms before and 73.16 ms after (ranges 63.79–96.91 and 65.50–99.17 ms). These provider-free samples show no meaningful startup speed gain. No provider token, cost, latency, or review-quality improvement is claimed. Native macOS and Windows execution remains to be verified for this change.
+| Measure | Before | After |
+| --- | ---: | ---: |
+| Total runtime lines | 10,676 | 10,495 |
+| `host.py` lines | 2,702 | 710 |
+| Largest function, `run_peer_command` | 289 lines | 257 lines |
+| Canonical `SKILL.md` size | 7,631 bytes | 7,631 bytes |
 
-The final local suite passes all 249 tests without skips on Python 3.11.18, 3.13.5, and 3.15.2, using Codex CLI 0.165.0 and Claude Code 2.1.312. Package synchronization and all 17 schema meta-validations pass. Registry concurrency is exercised with independent OS processes and lifecycle fixtures; this change did not run two live provider sessions. The native Windows suite was invoked on Linux and skipped all 18 checks, so neither it nor native macOS execution is counted as verified.
+The net reduction is 181 runtime lines (1.7%). Most of the structural benefit comes from separating administration, run loading, process ownership and lifecycle operations. Shared gates, stdin writing and reaping replace duplication; probe and peer capture remain separate. The old 3,668-line runtime test module is split by responsibility, with shared fixtures outside TestCase classes. Exact-prose assertions are removed while behavioral and artifact boundaries remain covered.
+
+The baseline's 304 tests passed in 29.238 seconds on Python 3.13.5. The current suite has 308 tests; it passes without skips in 30.796 seconds on Python 3.11.18, 31.782 seconds on Python 3.13.5 and 31.782 seconds on Python 3.15.2. These single local test runs are verification timing, not a performance benchmark. No provider token, cost, latency or review-quality improvement is claimed. Native macOS and Windows execution remains unverified for this refactor; the Windows suite invoked on Linux skipped all 18 checks.
+
+The earlier simplification against `fa10efd` reduced `start` from 360 to 24 lines and `invoke_peer` from 443 to 63 lines, and reduced synthesis authoring from nine fields to four judgment fields. Its alternating fresh-process CLI samples showed no meaningful startup improvement. Those historical measurements are separate from the schema-3 refactor above.
 
 ### Evaluation evidence
 
+Release-mode validation passed with Codex CLI 0.166.0, Claude Code 2.1.316, jsonschema 4.26.0 and PyYAML 6.0.3. This includes package synchronization, compilation, strict JSON/schema checks, version consistency, both official validators and both isolated marketplace installations. The 7.0.0 metadata is prepared locally; this work does not publish or refresh user installations.
+
+A real schema-3 Claude peer ran through `start`, independent first-pass admission, advisory adjudication and revision-bound synthesis to `next_action: null`. API usage named only `claude-opus-5-5`, the actual-run Stop receipt reported `xhigh`, the provider tracker became quiescent and the disposable workspace was cleaned. The review exposed two recovery defects: completion after interrupted cancellation, and cancellation retry against a reused historical process-group ID. Both were reproduced with fault injection and fixed; an independent advisory checked the corrections. This live run exercised launch and closure, not live provider cancellation or actual OS ID reuse.
+
 Repeatable behavioral cases and bounded, local-report commands are in [the evaluation guide](tools/agent-collab/evals/README.md). They cover skill selection and a synthetic verification task with a no-plugin arm; they do not establish real peer usefulness, end-to-end closure, or Codex behavioral coverage. Unit tests check the fixtures and graders separately from live model behavior.
+
+The 2026-10-31 schema-3 candidate passed all six native Claude behavioral cases once in the plugin arm, using Claude Code 2.1.316 and `claude-opus-5-5`. The run took 91 seconds and reported $0.51. Archived traces exposed only `Glob`, `Grep`, `Read`, and `Skill`, spawned no helpers, and named only the requested model in API usage. Effort was requested as `xhigh`; native evals provide no Stop effort receipt, so effective effort remains unverified. This is a smoke check, with no new no-plugin comparison or quality claim.
 
 The 2026-10-30 installed-plugin follow-up added regressions for exact run selection, zombie reports, normalization provenance, Linux PID namespaces, private storage parents, explicit host admission, request binding, filtered Git files, nested submodules, and review-schema conformance. All 272 tests pass without skips on Python 3.11.18, 3.13.5, and 3.15.2; package synchronization passes. The real Bubblewrap namespace test passes on the development Linux host; CI and native macOS/Windows execution remain separate validation requirements. Git subdirectories passed as `--repo-root` are normalized to the worktree root, including peer cwd, storage, and snapshot scope. `doctor` reports resolution failures as failed checks; commands that manage a run still require a valid canonical workspace identity.
 

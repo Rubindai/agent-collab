@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "agent-collab",
-  "version": "6.0.1",
+  "version": "7.0.0",
   "description": "Repo-grounded Claude and Codex collaboration workflow with independent peer verification, helper agents, and synthesis support.",
   "author": {
     "name": "Agent Collab"
