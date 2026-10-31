@@ -1,6 +1,6 @@
 # Provider documentation audit — 2026-10-31
 
-Scope: the Codex and Claude Code interfaces this plugin uses for launch, model selection, helpers, permissions, output, discovery, packaging, and validation. Research checked Codex 0.166.0 and Claude Code 2.1.314; the latest Claude release is 2.1.316. Actual verification versions and limits are recorded in the README. This is not a claim about every provider feature.
+Scope: the Codex and Claude Code interfaces this plugin uses for launch, model selection, helpers, permissions, output, discovery, packaging, and validation. The final recheck covered Codex 0.166.0 and Claude Code 2.1.316, the latest stable releases on this date. Actual verification versions and limits are recorded in the README. This is not a claim about every provider feature.
 
 ## Adopted changes
 
@@ -9,6 +9,14 @@ Scope: the Codex and Claude Code interfaces this plugin uses for launch, model s
 - Remove the redundant Claude model-family effort table: every row allowed the same global choices, so its family-specific rejection could not run. Global input validation and the live exact-pair probe remain.
 - Mark the portable manifest `extensions.com.openai.requires_local_executor: true`: local provider CLIs, process groups, locks, and workspace isolation require local execution. Keep the single dual-host package and isolated marketplace verification. [Local executor requirements](https://developers.openai.com/plugins/deploy/desktop-only), [plugin format](https://developers.openai.com/plugins/build/plugins)
 - Correct background-wait documentation. Claude's idle ceiling restarts after a result-handling turn; running main-conversation commands and scheduled wakeups can outlive it. Agent Collab's absolute process deadline remains independent. [Headless background work](https://code.claude.com/docs/en/headless#background-tasks-at-exit)
+
+## Final recheck
+
+The additional independent Claude review found no incompatible provider flag or documented setting. Its Codex research was incomplete; the host checked the current official configuration reference and the exact 0.166.0 source schema separately. The review led to these corrections:
+
+- Qualify Agent-call enforcement and Stop evidence: peer-writable counters, receipts, and scripts cannot establish tamper resistance. Host reports and other run history remain readable, and outbound messaging stays available despite inbound refusal. The peer brief now explicitly forbids reading host reports and sending cross-session messages. No permission, model, or effort defaults changed.
+- Explain the provider-dependent unversioned Fable alias; error hints name both exact Fable IDs. Correct the V2/V3 code comment and add the marketplace install line requested by the strict Claude validator.
+- Record the pre-2.1.314 settings-exclusion leak window and the distinction between accepted empty CLI setting sources and documented SDK `settingSources: []`. Preserve exact-pair verification. Helper effective effort is configured but not independently observed; optional SubagentStop capture, outbound restrictions, and additional filesystem masking remain product choices.
 
 ## Controls retained
 
@@ -28,4 +36,4 @@ The Astra/xhigh and Opus 5.5/xhigh defaults remain explicit project choices. The
 
 Anthropic plans to make bare mode the print-mode default. Before adopting that release, recheck subscription authentication, discovery, hooks, and background work; current peers deliberately preserve their configured surface. Claude 2.1.316 also introduces a helper-effort default; the stronger effective-effort pin remains in place. [Headless mode](https://code.claude.com/docs/en/headless), [2.1.316 release](https://github.com/anthropics/claude-code/releases/tag/v2.1.316)
 
-The research combined two opposite-product Agent Collab reviews and host adjudication. Adopted findings were checked independently; a proposed blanket Codex `ultra` rejection and a claim that strict configuration ignores `-c` overrides were rejected. Linux checks do not establish native Windows/macOS behavior. See [provider launch controls](provider-launch.md) for the complete runtime mapping and [behavioral evaluations](../evals/README.md) for evaluation limits.
+The research combined opposite-product Agent Collab reviews and host adjudication. Adopted findings were checked independently; a proposed blanket Codex `ultra` rejection and a claim that strict configuration ignores `-c` overrides were rejected. Linux checks do not establish native Windows/macOS behavior. See [provider launch controls](provider-launch.md) for the complete runtime mapping and [behavioral evaluations](../evals/README.md) for evaluation limits.

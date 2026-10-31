@@ -143,7 +143,7 @@ def build_start_request(args: argparse.Namespace, settings: dict[str, Any]) -> d
     if peer == "claude" and CONFIG.is_fable_model(peer_model) and args.peer_model is None:
         raise SystemExit(
             "Fable is explicit-only; request it for this run with "
-            "--peer-model claude-fable-5"
+            "--peer-model claude-fable-5 or --peer-model claude-fable-5-1"
         )
     safe_mode = bool(settings["safe_mode"]) if args.safe_mode is None else bool(args.safe_mode)
     workspace_mode = args.workspace_mode or ("direct" if safe_mode else settings["workspace_mode"])

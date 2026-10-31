@@ -6,6 +6,12 @@ Agent Collab brings an independent Claude Code or Codex peer into code review, p
 
 Install this dual-host package through the repository's Codex or Claude Code marketplace. Follow the [setup and installation guide](https://github.com/Rubindai/agent-collab#install), then ask your host to "use agent collab to review this diff" or "use agent collab to critique this plan". Both provider CLIs and Python 3.11 or newer must be available. Linux full-capability runs also require working Bubblewrap and FUSE OverlayFS.
 
+In Claude Code, install from the GitHub marketplace with:
+
+```text
+/plugin install agent-collab --marketplace Rubindai/agent-collab
+```
+
 The default peer is Claude Opus 5.5 at xhigh from a Codex host, or GPT-6 Astra at xhigh from a Claude host. Every launch checks the requested model and effort; an unavailable pair stops the run without a fallback. Model access and provider usage charges depend on your accounts.
 
 ## Permissions and data

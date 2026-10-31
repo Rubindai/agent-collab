@@ -769,7 +769,7 @@ def codex_fanout_overrides(
         raise ValueError("Codex helper model and effort must be non-empty strings")
     enabled = local_subagents_allowed and max_local_subagents > 0
     if not enabled:
-        # An enabled multi_agent_v3 feature outranks agents.enabled=false.
+        # An enabled multi_agent_v2 feature outranks agents.enabled=false.
         return ["agents.enabled=false", "features.multi_agent_v2=false"]
     return [
         "agents.enabled=true",

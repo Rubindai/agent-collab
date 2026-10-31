@@ -449,8 +449,8 @@ def normalize_settings(raw_settings: dict[str, Any], source: str) -> dict[str, A
                 raise ValueError(f"{source} {key} must not be empty")
             if key == "claude_model" and is_fable_model(text):
                 raise ValueError(
-                    f"{source} claude_model cannot persist Fable; request Fable 5 explicitly "
-                    "with the per-run --peer-model claude-fable-5 override"
+                    f"{source} claude_model cannot persist Fable; select the exact version per run "
+                    "with --peer-model claude-fable-5 or --peer-model claude-fable-5-1"
                 )
             normalized[key] = text
     return normalized

@@ -2,7 +2,7 @@
 
 Agent Collab is a peer-first, challenge-first collaboration plugin for Codex and Claude Code. It launches the opposite product with a neutral brief, keeps the host analysis independent, then validates and combines the evidence.
 
-The upcoming 7.0.0 release simplifies lifecycle operations and uses schema 3.0 for new run history. Saved schema 2.0 settings remain compatible. Close old active runs with their original runtime before upgrading; existing history is not migrated. See [CHANGELOG.md](CHANGELOG.md) for release history.
+Version 7.0.0 simplifies lifecycle operations and uses schema 3.0 for new run history. Saved schema 2.0 settings remain compatible. Close old active runs with their original runtime before upgrading; existing history is not migrated. See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 **Latest provider-documentation audit: 2026-10-31.** The focused refactor audit checked the provider contracts used by this project against current OpenAI and Anthropic documentation, Codex 0.166.0 source, and independent Agent Collab Claude reviews. Local package checks use Codex 0.166.0 and Claude Code 2.1.316. See the [source and coverage record](tools/agent-collab/references/provider-audit.md) and [evaluation evidence](#evaluation-evidence) for scope and limitations. Version 3.0.0 appeared on GitHub `main` without a release tag; formal tags begin with `v4.0.0`.
 
@@ -76,7 +76,7 @@ codex plugin marketplace add Rubindai/agent-collab --ref main
 codex plugin add agent-collab@agent-collab
 ```
 
-To pin an exact release instead of tracking `main`, replace `--ref main` with `--ref v4.0.0` (or another published version tag). A pinned marketplace stays on that tag until you select a newer one.
+To pin an exact release instead of tracking `main`, replace `--ref main` with `--ref v7.0.0` (or another published version tag). A pinned marketplace stays on that tag until you select a newer one.
 
 The ChatGPT desktop app also discovers a repo marketplace when the repository is open. Restart the app after changing the marketplace or plugin.
 
@@ -95,7 +95,7 @@ From GitHub, replace the marketplace-add line with:
 claude plugin marketplace add Rubindai/agent-collab --scope user
 ```
 
-To pin an exact release, add the marketplace as `Rubindai/agent-collab#v4.0.0` (or another published version tag) with `--scope user`. A pinned marketplace stays on that tag until you select a newer one.
+To pin an exact release, add the marketplace as `Rubindai/agent-collab#v7.0.0` (or another published version tag) with `--scope user`. A pinned marketplace stays on that tag until you select a newer one.
 
 No direct skill installer is provided. Marketplace installation is the supported path for both hosts.
 
@@ -451,13 +451,15 @@ Against the pre-refactor checkpoint `ba5fbe8`, the schema-3 refactor has the fol
 
 The net reduction is 181 runtime lines (1.7%). Most of the structural benefit comes from separating administration, run loading, process ownership and lifecycle operations. Shared gates, stdin writing and reaping replace duplication; probe and peer capture remain separate. The old 3,668-line runtime test module is split by responsibility, with shared fixtures outside TestCase classes. Exact-prose assertions are removed while behavioral and artifact boundaries remain covered.
 
-The baseline's 304 tests passed in 29.238 seconds on Python 3.13.5. The current suite has 308 tests; it passes without skips in 30.796 seconds on Python 3.11.18, 31.782 seconds on Python 3.13.5 and 31.782 seconds on Python 3.15.2. These single local test runs are verification timing, not a performance benchmark. No provider token, cost, latency or review-quality improvement is claimed. Native macOS and Windows execution remains unverified for this refactor; the Windows suite invoked on Linux skipped all 18 checks.
+The baseline's 304 tests passed in 29.238 seconds on Python 3.13.5. The current suite has 308 tests; it passes without skips in 30.796 seconds on Python 3.11.18, 31.782 seconds on Python 3.13.5 and 31.782 seconds on Python 3.15.2. These single local test runs are verification timing, not a performance benchmark. No provider token, cost, latency or review-quality improvement is claimed. The corrected release candidate also passes all six GitHub CI jobs: Linux and macOS discovery/release checks and 18 dedicated Windows checks, each on Python 3.11 and 3.15. Platform-dependent skips remain explicit: macOS omits Linux-only checks, hosted Linux lacks some isolation capabilities, and the Windows runner forbids the detached-root breakaway exercised by one check. These results do not establish a live Windows peer run. CI exposed and verified corrections to the Windows virtual-environment import harness, canonical temporary-path expectations, and fixture request-digest timing. See [release CI](https://github.com/Rubindai/agent-collab/actions/workflows/ci.yml).
 
 The earlier simplification against `fa10efd` reduced `start` from 360 to 24 lines and `invoke_peer` from 443 to 63 lines, and reduced synthesis authoring from nine fields to four judgment fields. Its alternating fresh-process CLI samples showed no meaningful startup improvement. Those historical measurements are separate from the schema-3 refactor above.
 
 ### Evaluation evidence
 
-Release-mode validation passed with Codex CLI 0.166.0, Claude Code 2.1.316, jsonschema 4.26.0 and PyYAML 6.0.3. This includes package synchronization, compilation, strict JSON/schema checks, version consistency, both official validators and both isolated marketplace installations. The 7.0.0 metadata is prepared locally; this work does not publish or refresh user installations.
+Release-mode validation passed with Codex CLI 0.166.0, Claude Code 2.1.316, jsonschema 4.26.0 and PyYAML 6.0.3. This includes package synchronization, compilation, strict JSON/schema checks, version consistency, both official validators and both isolated marketplace installations. The version and both manifests identify 7.0.0. The [GitHub release](https://github.com/Rubindai/agent-collab/releases/tag/v7.0.0) uses the matching root changelog entry and an annotated tag on the verified main commit. Follow the [update instructions](#update), then reload existing hosts; local Claude marketplaces can read directly from the checkout while Codex loads the installed package copy.
+
+The final documentation recheck confirmed the current provider controls and corrected their trust-boundary claims. A scratch test showed that resetting the writable Agent counter permits another call; a separate isolated-workspace test read a synthetic host report written after the overlay mounted. The references now state these limits and the older Claude settings-exclusion caveat explicitly. Peer briefs forbid reading host reports and sending cross-session messages. Model, effort, permission defaults and explicit user overrides are unchanged.
 
 A real schema-3 Claude peer ran through `start`, independent first-pass admission, advisory adjudication and revision-bound synthesis to `next_action: null`. API usage named only `claude-opus-5-5`, the actual-run Stop receipt reported `xhigh`, the provider tracker became quiescent and the disposable workspace was cleaned. The review exposed two recovery defects: completion after interrupted cancellation, and cancellation retry against a reused historical process-group ID. Both were reproduced with fault injection and fixed; an independent advisory checked the corrections. This live run exercised launch and closure, not live provider cancellation or actual OS ID reuse.
 
