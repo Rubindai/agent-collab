@@ -148,10 +148,9 @@ class JobSupervisionChecks(unittest.TestCase):
             subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(Path(tmp) / "venv")], check=True)
             venv_python = Path(tmp) / "venv" / "Scripts" / "python.exe"
             script = f"""
-                import importlib.util, json, subprocess, sys
-                spec = importlib.util.spec_from_file_location("safety", {str(SCRIPTS / "safety.py")!r})
-                safety = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(safety)
+                import json, subprocess, sys
+                sys.path.insert(0, {str(SCRIPTS)!r})
+                import safety
                 root = safety.popen_group([sys.executable, "-c", (
                     "import subprocess, sys, time;"
                     "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'],"
