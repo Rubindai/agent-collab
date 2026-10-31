@@ -11,6 +11,7 @@ import signal
 import subprocess
 import sys
 import time
+import threading
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -440,6 +441,64 @@ def popen_group(args: list[str], *, detached: bool = False, **kwargs: Any) -> su
         process.wait()
         raise
     return process
+
+
+class StartupGate:
+    """Own a launch pipe until process evidence is committed or startup aborts."""
+
+    def __init__(self) -> None:
+        self.read_fd: int | None = None
+        self.write_fd: int | None = None
+
+    def open(self) -> int:
+        self.read_fd, self.write_fd = os.pipe()
+        return self.read_fd
+
+    def release(self) -> None:
+        try:
+            os.write(self.write_fd, b"1")
+        finally:
+            self.close()
+
+    def close(self) -> None:
+        descriptors = self.write_fd, self.read_fd
+        self.write_fd = self.read_fd = None
+        for descriptor in descriptors:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+
+
+def start_input_writer(stream: Any, text: str | None) -> threading.Thread:
+    """Feed input without blocking supervision; the caller joins after cleanup."""
+    def write_input() -> None:
+        if stream is None:
+            return
+        try:
+            if text is not None:
+                stream.write(text)
+                stream.flush()
+        except (BrokenPipeError, OSError, ValueError):
+            pass
+        finally:
+            try:
+                stream.close()
+            except (OSError, ValueError):
+                pass
+
+    writer = threading.Thread(target=write_input, daemon=True)
+    writer.start()
+    return writer
+
+
+def reap_process(process: Any) -> bool:
+    try:
+        process.wait(timeout=1)
+        return True
+    except subprocess.TimeoutExpired:
+        return False
 
 
 def pass_gate(read_fd: int, popen_kwargs: dict[str, Any]) -> int:

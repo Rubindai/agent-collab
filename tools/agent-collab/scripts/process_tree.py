@@ -107,9 +107,7 @@ def cleanup_failed_start(process: Any, peer_identity: dict[str, Any] | None) -> 
                     "quiescent": not group_alive,
                     "pgid": int(process.pid),
                 }
-            try:
-                process.wait(timeout=1)
-            except subprocess.TimeoutExpired:
+            if not CONFIG.SAFETY.reap_process(process):
                 cleanup = {**cleanup, "outcome": "leader_not_reaped", "quiescent": False}
         except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as cleanup_error:
             cleanup = {

@@ -333,8 +333,7 @@ def launch_start(repo_root: Path, run_root: Path, resolved: dict[str, Any], requ
     process = None
     peer_identity = None
     state_job_created = False
-    startup_gate_read = None
-    startup_gate_write = None
+    gate = CONFIG.SAFETY.StartupGate()
     try:
         CONFIG.STRICT_JSON.ensure_private_directory(run_dir.parent)
         run_dir.mkdir(exist_ok=False, mode=0o700)
@@ -347,7 +346,7 @@ def launch_start(repo_root: Path, run_root: Path, resolved: dict[str, Any], requ
         peer_stdout = CONFIG.STRICT_JSON.open_private_text(run_dir / "peer-report.json")
         peer_stderr = CONFIG.STRICT_JSON.open_private_text(run_dir / "peer.stderr.log")
         started_at_epoch = time.time()
-        startup_gate_read, startup_gate_write = os.pipe()
+        startup_gate_read = gate.open()
         process = spawn_peer_wrapper(request_path, repo_root, run_dir, peer_stdout, peer_stderr, startup_gate_read)
         try:
             peer_identity = CONFIG.SAFETY.process_identity(process.pid)
@@ -388,23 +387,9 @@ def launch_start(repo_root: Path, run_root: Path, resolved: dict[str, Any], requ
             },
         )
         state_job_created = True
-        os.write(startup_gate_write, b"1")
-        os.close(startup_gate_write)
-        startup_gate_write = None
-        os.close(startup_gate_read)
-        startup_gate_read = None
+        gate.release()
     except BaseException as startup_error:
-        for descriptor_name in ("startup_gate_write", "startup_gate_read"):
-            descriptor = locals().get(descriptor_name)
-            if descriptor is not None:
-                try:
-                    os.close(descriptor)
-                except OSError:
-                    pass
-                if descriptor_name == "startup_gate_write":
-                    startup_gate_write = None
-                else:
-                    startup_gate_read = None
+        gate.close()
         if peer_stdout is not None:
             peer_stdout.close()
         if peer_stderr is not None:
@@ -441,12 +426,7 @@ def launch_start(repo_root: Path, run_root: Path, resolved: dict[str, Any], requ
             shutil.rmtree(run_dir)
         raise
     finally:
-        for descriptor in (startup_gate_write, startup_gate_read):
-            if descriptor is not None:
-                try:
-                    os.close(descriptor)
-                except OSError:
-                    pass
+        gate.close()
         if peer_stdout is not None and not peer_stdout.closed:
             peer_stdout.close()
         if peer_stderr is not None and not peer_stderr.closed:

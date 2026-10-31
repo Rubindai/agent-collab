@@ -70,6 +70,8 @@ def run_bounded_command(args: list[str], **kwargs: Any) -> subprocess.CompletedP
     """Run one short text probe with bounded output and owned-group cleanup."""
 
     timeout = kwargs.pop("timeout", None)
+    if not V.NUMBER.accepts(timeout) or timeout <= 0:
+        raise ValueError("bounded probes require a positive finite timeout")
     check = bool(kwargs.pop("check", False))
     input_text = kwargs.pop("input", None)
     stdout_target = kwargs.pop("stdout", None)
@@ -91,8 +93,7 @@ def run_bounded_command(args: list[str], **kwargs: Any) -> subprocess.CompletedP
     process: subprocess.Popen[str] | None = None
     identity: dict[str, Any] | None = None
     writer: threading.Thread | None = None
-    gate_read: int | None = None
-    gate_write: int | None = None
+    gate = SAFETY.StartupGate()
     previous_handlers: dict[int, Any] = {}
     pending_signals: list[int] = []
 
@@ -110,21 +111,6 @@ def run_bounded_command(args: list[str], **kwargs: Any) -> subprocess.CompletedP
                 raise KeyboardInterrupt
             raise SystemExit(128 + signum)
 
-    def write_input() -> None:
-        if process is None or process.stdin is None:
-            return
-        try:
-            if input_text is not None:
-                process.stdin.write(input_text)
-                process.stdin.flush()
-        except (BrokenPipeError, OSError, ValueError):
-            pass
-        finally:
-            try:
-                process.stdin.close()
-            except (OSError, ValueError):
-                pass
-
     try:
         if os.name == "posix" and threading.current_thread() is threading.main_thread():
             for signum in (signal.SIGTERM, signal.SIGINT):
@@ -136,7 +122,7 @@ def run_bounded_command(args: list[str], **kwargs: Any) -> subprocess.CompletedP
             stop_reason: str | None = None
             try:
                 command = SAFETY.native_command(args, kwargs.get("env"))
-                gate_read, gate_write = os.pipe()
+                gate_read = gate.open()
                 popen_args = SAFETY.gated_command(command, gate_read, kwargs)
                 raise_pending_signal()
                 process = SAFETY.popen_group(
@@ -147,22 +133,16 @@ def run_bounded_command(args: list[str], **kwargs: Any) -> subprocess.CompletedP
                 )
                 identity = SAFETY.process_identity(process.pid)
                 raise_pending_signal()
-                if gate_write is not None:
-                    os.write(gate_write, b"1")
-                    os.close(gate_write)
-                    gate_write = None
-                    os.close(gate_read)
-                    gate_read = None
-                writer = threading.Thread(target=write_input, daemon=True)
-                writer.start()
-                deadline = None if timeout is None else time.monotonic() + float(timeout)
+                gate.release()
+                writer = SAFETY.start_input_writer(process.stdin, input_text)
+                deadline = time.monotonic() + timeout
                 while process.poll() is None:
                     raise_pending_signal()
                     captured_bytes = os.fstat(stdout_file.fileno()).st_size + os.fstat(stderr_file.fileno()).st_size
                     if captured_bytes > MAX_PROBE_OUTPUT_BYTES:
                         stop_reason = "output_limit"
                         break
-                    if deadline is not None and time.monotonic() >= deadline:
+                    if time.monotonic() >= deadline:
                         stop_reason = "timeout"
                         break
                     time.sleep(0.02)
@@ -170,21 +150,14 @@ def run_bounded_command(args: list[str], **kwargs: Any) -> subprocess.CompletedP
                 # This covers startup failures, interrupted supervision, and
                 # normal exits. Close an unopened gate before terminating its
                 # owned new-session child; never release it during rollback.
-                for descriptor in (gate_write, gate_read):
-                    if descriptor is not None:
-                        try:
-                            os.close(descriptor)
-                        except OSError:
-                            pass
+                gate.close()
                 if process is not None:
                     # A new group's root PID is its PGID, even if exact
                     # identity capture failed before gate release.
                     pgid = int(identity["pgid"]) if identity is not None else int(process.pid)
                     cleanup = SAFETY.terminate_process_group(pgid)
-                    try:
-                        process.wait(timeout=1)
-                    except subprocess.TimeoutExpired as exc:
-                        raise OSError("probe leader was not reaped after process-group cleanup") from exc
+                    if not SAFETY.reap_process(process):
+                        raise OSError("probe leader was not reaped after process-group cleanup")
                     if writer is not None and writer.ident is not None:
                         writer.join(timeout=1)
                     elif process.stdin is not None:

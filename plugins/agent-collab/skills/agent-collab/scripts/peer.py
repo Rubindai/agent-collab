@@ -172,9 +172,7 @@ def _cleanup_provider_process(
     run_id: str | None,
 ) -> dict[str, Any]:
     cleanup = SAFETY.terminate_process_group(int(identity["pgid"]))
-    try:
-        process.wait(timeout=1)
-    except subprocess.TimeoutExpired:
+    if not SAFETY.reap_process(process):
         cleanup = {**cleanup, "quiescent": False, "outcome": "leader_not_reaped"}
     status = "quiescent" if cleanup.get("quiescent") is True else "cleanup_failed"
     _write_provider_tracker(
@@ -220,8 +218,7 @@ def run_peer_command(args: list[str], **kwargs: Any) -> subprocess.CompletedProc
     pending_signal: list[int] = []
     cleanup_started: list[bool] = []
     deferred_signal: list[int] = []
-    provider_gate_read: int | None = None
-    provider_gate_write: int | None = None
+    gate = SAFETY.StartupGate()
 
     def forward_signal(signum: int, _frame: Any) -> None:
         if cleanup_started:
@@ -250,7 +247,7 @@ def run_peer_command(args: list[str], **kwargs: Any) -> subprocess.CompletedProc
                 previous_handlers[signum] = signal.getsignal(signum)
                 signal.signal(signum, forward_signal)
         command = SAFETY.native_command(args, kwargs.get("env"))
-        provider_gate_read, provider_gate_write = os.pipe()
+        provider_gate_read = gate.open()
         popen_args = SAFETY.gated_command(command, provider_gate_read, kwargs)
         process = SAFETY.popen_group(popen_args, **kwargs)
         active["process"] = process
@@ -265,19 +262,9 @@ def run_peer_command(args: list[str], **kwargs: Any) -> subprocess.CompletedProc
             signum = pending_signal[-1]
             _cleanup_provider_process(process, identity, tracker_path, run_id)
             raise SystemExit(128 + signum)
-        if provider_gate_write is not None:
-            os.write(provider_gate_write, b"1")
-            os.close(provider_gate_write)
-            provider_gate_write = None
-            os.close(provider_gate_read)
-            provider_gate_read = None
+        gate.release()
     except BaseException:
-        for descriptor in (provider_gate_write, provider_gate_read):
-            if descriptor is not None:
-                try:
-                    os.close(descriptor)
-                except OSError:
-                    pass
+        gate.close()
         spawned = active.get("process")
         spawned_identity = active.get("identity")
         if spawned is not None:
@@ -345,23 +332,7 @@ def run_peer_command(args: list[str], **kwargs: Any) -> subprocess.CompletedProc
             for reader in readers:
                 reader.start()
 
-            def write_input() -> None:
-                if process.stdin is None:
-                    return
-                try:
-                    if input_text is not None:
-                        process.stdin.write(input_text)
-                        process.stdin.flush()
-                except (BrokenPipeError, OSError, ValueError):
-                    pass
-                finally:
-                    try:
-                        process.stdin.close()
-                    except (OSError, ValueError):
-                        pass
-
-            writer = threading.Thread(target=write_input, daemon=True)
-            writer.start()
+            writer = SAFETY.start_input_writer(process.stdin, input_text)
             deadline = time.monotonic() + timeout
             stop_reason: str | None = None
             while process.poll() is None:
@@ -421,12 +392,7 @@ def run_peer_command(args: list[str], **kwargs: Any) -> subprocess.CompletedProc
                 cleanup,
             )
     finally:
-        for descriptor in (provider_gate_write, provider_gate_read):
-            if descriptor is not None:
-                try:
-                    os.close(descriptor)
-                except OSError:
-                    pass
+        gate.close()
         capture_thread_alive = any(reader.is_alive() for reader in readers) or bool(
             writer is not None and writer.is_alive()
         )

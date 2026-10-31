@@ -1288,26 +1288,17 @@ class PeerV2Tests(TestCase):
         self.assertEqual(completed.stdout, "peer prompt")
         self.assertEqual(cleanup.call_count, 1)
 
-    def test_peer_command_requires_positive_finite_timeout(self):
+    def test_process_commands_require_positive_finite_timeouts_before_launch(self):
         peer = load_peer()
-        for timeout in (None, 0, -1, float("inf"), float("nan")):
-            with self.subTest(timeout=timeout), self.assertRaisesRegex(
-                ValueError, "positive finite timeout"
-            ):
-                peer.run_peer_command(
-                    [sys.executable, "-c", "pass"],
-                    text=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    timeout=timeout,
-                )
-        with self.assertRaisesRegex(ValueError, "positive finite timeout"):
-            peer.run_peer_command(
-                [sys.executable, "-c", "pass"],
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
+        availability = load_availability()
+        for runner in (peer.run_peer_command, availability.run_bounded_command):
+            for options in ({}, *({'timeout': value} for value in (None, 0, -1, float('inf'), float('nan')))):
+                with (self.subTest(runner=runner.__name__, options=options),
+                      mock.patch.object(peer.SAFETY, 'popen_group') as launch,
+                      self.assertRaisesRegex(ValueError, 'positive finite timeout')):
+                    runner([sys.executable, '-c', 'pass'], text=True,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, **options)
+                launch.assert_not_called()
 
     def test_peer_timeout_terminates_provider_process_group(self):
         if os.name != "posix":
