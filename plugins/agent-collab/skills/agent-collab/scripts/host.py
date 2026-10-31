@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -10,10 +9,8 @@ import shutil
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-
 
 sys.dont_write_bytecode = True
 if __name__ == "__main__":
@@ -21,22 +18,10 @@ if __name__ == "__main__":
 import host_config as CONFIG
 import artifacts as ARTIFACTS
 import registry as REGISTRY
-
-
-FINISH_WAIT_POLL_SECONDS = 1
-
-
-RUN_ARTIFACT_NAMES = {
-    "host-request.json",
-    "peer-process.json",
-    "provider-process.json",
-    "peer-report.json",
-    "host-result.json",
-    "host-synthesis.json",
-    "workspace-mutation.json",
-    "cancel-result.json",
-    "cancel-workspace-mutation.json",
-}
+import host_admin as ADMIN
+import runs as RUNS
+import process_tree as PROCESS_TREE
+import lifecycle as LIFECYCLE
 
 
 def _contains_any(text: str, needles: tuple[str, ...]) -> bool:
@@ -46,6 +31,7 @@ def _contains_any(text: str, needles: tuple[str, ...]) -> bool:
         re.search(rf"(?<![\w]){re.escape(needle.strip())}(?![\w])", text) is not None
         for needle in needles
     )
+
 
 
 MODE_KEYWORDS = {
@@ -73,6 +59,7 @@ MODE_KEYWORDS = {
 }
 
 
+
 def classify_mode(target: str, brief: str) -> str:
     text = f"{target}\n{brief}".casefold()
     contexts = {mode: _contains_any(text, words) for mode, words in MODE_KEYWORDS.items()}
@@ -82,544 +69,6 @@ def classify_mode(target: str, brief: str) -> str:
             return mode
     return "research" if contexts["research"] and not contexts["review"] else "review"
 
-
-def write_json(path: Path, data: dict[str, Any]) -> None:
-    CONFIG.STRICT_JSON.write(path, data)
-
-
-def emit_result(result: tuple[int, dict[str, Any]]) -> int:
-    code, output = result
-    if "next_action" in output:
-        output = {"next_action": output["next_action"], **output}
-    print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys="next_action" not in output))
-    return code
-
-
-def next_action(run_dir: Path, repo_root: Path, stage: str, synthesis_input: str | None = None) -> dict[str, Any]:
-    """Return executable argv and only the instructions needed at this stage."""
-    command = [sys.executable, str(Path(__file__).resolve()), "advance", str(run_dir), "--repo-root", str(repo_root)]
-    actions = {
-        "first_pass": ("--first-pass", str(run_dir / "first-pass.input.json"),
-            "Complete independent host analysis without reading peer output or polling status. Save summary and claims, then submit this file.",
-            {"summary": "", "claims": []}),
-        "adjudicator": ("--adjudicator", str(run_dir / "adjudicator.input.json"),
-            "Read evidence_file, then obtain a fresh host-local advisory report using the neutral brief and that evidence; follow the skill's helper rules. If no advisory helper is available, document that limitation in synthesis and submit it with --synthesis instead.",
-            {"status": "ok", "summary": "", "false_positives": [], "claims_needing_verification": [],
-             "recommended_verdict": "", "claims": []}),
-        "synthesis": ("--synthesis", synthesis_input,
-            "Read evidence_file completely and verify material claims. Edit the generated synthesis input, then submit it immediately before answering. Changed evidence requires a newly reviewed revision.", None),
-        "waiting": (None, None, "Peer remains within its finite deadline. Resume advance; do not replace or cancel it unless the user stops the run.", None),
-    }
-    flag, path, instruction, template = actions[stage]
-    if flag:
-        command.extend([flag, path])
-    result = {"stage": stage, "command": command, "instruction": instruction}
-    if path:
-        result["input_path"] = path
-    if template is not None:
-        result["input_template"] = template
-    return result
-
-
-def host_policy(request: dict[str, Any]) -> dict[str, Any]:
-    return {key: request[key] for key in ("adjudicator_enabled", "local_subagents_allowed",
-        "max_local_subagents", "online_research", "edit_allowed", "workspace_mode", "peer_timeout_seconds")}
-
-
-def write_json_once(path: Path, data: dict[str, Any]) -> bool:
-    """Atomically publish an immutable JSON artifact without replacing evidence."""
-
-    CONFIG.STRICT_JSON.ensure_private_directory(path.parent)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.{os.urandom(6).hex()}.tmp")
-    payload = (CONFIG.STRICT_JSON.dumps(data) + "\n").encode("utf-8")
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | CONFIG.STRICT_JSON.BINARY_FLAG, 0o600)
-    try:
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        try:
-            os.link(temporary, path)
-        except FileExistsError:
-            return False
-        if os.name == "posix":
-            os.chmod(path, 0o600)
-        CONFIG.STRICT_JSON.fsync_directory(path.parent)
-        return True
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def run_snapshot(
-    repo_root: Path,
-    output_path: Path,
-    ignored_paths: list[Path] | None = None,
-    *,
-    workspace_mode: str = "direct",
-) -> dict[str, Any]:
-    snapshot = CONFIG.SNAPSHOT
-    deadline = time.monotonic() + snapshot.DEFAULT_SNAPSHOT_TIMEOUT_SECONDS
-    data = (
-        {"mode": "isolated", "digest": hashlib.sha256(str(repo_root).encode()).hexdigest()}
-        if workspace_mode == "isolated"
-        else snapshot.mutation_snapshot(repo_root, ignored_paths=ignored_paths, deadline=deadline)
-    )
-    write_json(ARTIFACTS.snapshot_json_path(output_path), data)
-    if output_path.name == "before.snapshot":
-        # Every terminal path must be able to read this baseline. Reject an
-        # oversized snapshot while start can still roll back without a peer.
-        ARTIFACTS.load_json(ARTIFACTS.snapshot_json_path(output_path))
-    snapshot.write_workspace_snapshot(
-        repo_root,
-        output_path,
-        ignored_paths=ignored_paths,
-        deadline=deadline,
-        snapshot_data=data,
-    )
-    return data
-
-
-def record_workspace_mutation(
-    repo_root: Path,
-    run_dir: Path,
-    request: dict[str, Any],
-    *,
-    after_snapshot_name: str,
-    mutation_name: str,
-    source: str,
-) -> dict[str, Any] | None:
-    before_path = ARTIFACTS.snapshot_json_path(run_dir / "before.snapshot")
-    if not before_path.exists() or before_path.stat().st_size == 0:
-        raise ARTIFACTS.ArtifactValidationError("canonical before.snapshot.json is missing or empty")
-    before = ARTIFACTS.load_json(before_path)
-    mutation_path = run_dir / mutation_name
-    if source == "cancel_snapshot" and mutation_path.exists():
-        existing = ARTIFACTS.load_json(mutation_path)
-        ARTIFACTS.validate_cancel_mutation_evidence(existing, request, run_dir)
-        return existing
-    after = run_snapshot(repo_root, run_dir / after_snapshot_name, ignored_paths=[run_dir], workspace_mode=request["workspace_mode"])
-    snapshot = CONFIG.SNAPSHOT
-    diff = snapshot.diff_snapshots(before, after)
-    if diff["changed"]:
-        diagnostic = {
-            **diff,
-            "schema_version": CONFIG.ARTIFACT_SCHEMA_VERSION,
-            "source": source,
-            "edit_allowed": bool(request["edit_allowed"]),
-            "message": (
-                "Workspace changed during the Agent Collab run; attribution is unknown."
-            ),
-            "coverage_limitations": ARTIFACTS.COVERAGE_LIMITATIONS,
-        }
-        if source == "cancel_snapshot":
-            diagnostic["before_snapshot_sha256"] = ARTIFACTS.file_sha256_or_none(before_path)
-            diagnostic["after_snapshot_sha256"] = ARTIFACTS.file_sha256_or_none(
-                ARTIFACTS.snapshot_json_path(run_dir / after_snapshot_name)
-            )
-            ARTIFACTS.validate_cancel_mutation_evidence(diagnostic, request, run_dir)
-            if not write_json_once(mutation_path, diagnostic):
-                existing = ARTIFACTS.load_json(mutation_path)
-                if existing != diagnostic:
-                    raise ARTIFACTS.ArtifactValidationError(
-                        "immutable cancellation mutation evidence already exists with different content"
-                    )
-                return existing
-        else:
-            write_json(mutation_path, diagnostic)
-        return diagnostic
-    return ARTIFACTS.read_json_if_exists(mutation_path)
-
-
-def record_host_workspace_mutation(
-    repo_root: Path,
-    run_dir: Path,
-    request: dict[str, Any],
-) -> dict[str, Any] | None:
-    return record_workspace_mutation(
-        repo_root,
-        run_dir,
-        request,
-        after_snapshot_name="after.snapshot",
-        mutation_name="workspace-mutation.json",
-        source="host_snapshot",
-    )
-
-
-def record_cancel_workspace_mutation(
-    repo_root: Path,
-    run_dir: Path,
-    request: dict[str, Any],
-) -> dict[str, Any] | None:
-    return record_workspace_mutation(
-        repo_root,
-        run_dir,
-        request,
-        after_snapshot_name="cancel-after.snapshot",
-        mutation_name="cancel-workspace-mutation.json",
-        source="cancel_snapshot",
-    )
-
-
-def process_alive(pid: int) -> bool:
-    return CONFIG.SAFETY.pid_alive(pid)
-
-
-def peer_started_at_epoch(process_info: dict[str, Any], run_dir: Path) -> float | None:
-    raw_epoch = process_info.get("started_at_epoch")
-    if raw_epoch is not None:
-        try:
-            return float(raw_epoch)
-        except (TypeError, ValueError):
-            pass
-
-    parsed = ARTIFACTS.parse_utc_timestamp(process_info.get("started_at"))
-    if parsed is not None:
-        return parsed
-
-    process_path = run_dir / "peer-process.json"
-    try:
-        return process_path.stat().st_mtime
-    except FileNotFoundError:
-        return None
-
-
-def peer_elapsed_seconds(process_info: dict[str, Any], run_dir: Path, now: float | None = None) -> float | None:
-    started_at = peer_started_at_epoch(process_info, run_dir)
-    if started_at is None:
-        return None
-    if now is None:
-        now = time.time()
-    return max(0.0, now - started_at)
-
-
-def path_is_creatable(path: Path) -> bool:
-    current = path
-    while not current.exists():
-        parent = current.parent
-        if parent == current:
-            return False
-        current = parent
-    return os.access(current, os.W_OK)
-
-
-def file_info(path: Path) -> dict[str, Any]:
-    return {
-        "path": str(path),
-        "exists": path.exists(),
-        "bytes": path.stat().st_size if path.exists() else 0,
-    }
-
-
-def require_process_tree_quiescent(
-    process_info: dict[str, Any],
-    run_dir: Path,
-    request: dict[str, Any],
-    *,
-    wrapper_quiescence_proven: bool = False,
-) -> dict[str, Any]:
-    provider = ARTIFACTS.load_provider_process(run_dir, request)
-    isolation_path = run_dir / "isolation-state.json"
-    if not wrapper_quiescence_proven:
-        wrapper_state = CONFIG.SAFETY.process_identity_state(process_info.get("process_identity"))
-        if wrapper_state == "unknown":
-            # An empty-group answer cannot prove quiescence for a root whose
-            # identity is unreadable.
-            raise ARTIFACTS.ArtifactValidationError("peer wrapper liveness cannot be verified")
-        if wrapper_state == "matching" and process_alive(int(process_info["pid"])):
-            raise ARTIFACTS.ArtifactValidationError("peer wrapper is still running")
-        if request["workspace_mode"] == "isolated" and provider["status"] in {"pending", "quiescent"}:
-            if provider["status"] != "pending" and not isolation_path.exists():
-                raise ARTIFACTS.ArtifactValidationError("isolated provider is missing its cleanup state")
-            try:
-                CONFIG.ISOLATION.cleanup_state(isolation_path)
-            except (OSError, ValueError, RuntimeError) as exc:
-                raise ARTIFACTS.ArtifactValidationError(f"isolated workspace cleanup failed: {exc}") from exc
-        if CONFIG.SAFETY.process_group_alive(int(process_info["pgid"])):
-            raise ARTIFACTS.ArtifactValidationError("peer wrapper group still has live members")
-    if request["workspace_mode"] == "isolated":
-        if provider["status"] != "pending" and not isolation_path.exists():
-            raise ARTIFACTS.ArtifactValidationError("isolated provider is missing its cleanup state")
-        try:
-            CONFIG.ISOLATION.cleanup_state(isolation_path)
-        except (OSError, ValueError, RuntimeError) as exc:
-            raise ARTIFACTS.ArtifactValidationError(f"isolated workspace cleanup failed: {exc}") from exc
-    if provider["status"] == "pending":
-        return provider
-    if provider["status"] != "quiescent":
-        raise ARTIFACTS.ArtifactValidationError(
-            f"provider process group is not terminal and quiescent: {provider['status']}"
-        )
-    return provider
-
-
-def require_run_request(run_dir: Path) -> dict[str, Any]:
-    request = ARTIFACTS.load_json(run_dir / "host-request.json")
-    ARTIFACTS.require_artifact_version(request, "host-request")
-    try:
-        CONFIG.PEER.validate_request(request)
-    except Exception as exc:
-        raise SystemExit(f"invalid v2 host request in {run_dir}: {exc}") from exc
-    return request
-
-
-def stderr_tail(path: Path, limit: int = 4000) -> str:
-    if not path.exists():
-        return ""
-    with path.open("rb") as handle:
-        handle.seek(0, os.SEEK_END)
-        size = handle.tell()
-        handle.seek(max(0, size - max(limit * 4, limit)))
-        payload = handle.read(max(limit * 4, limit))
-    return payload.decode("utf-8", errors="replace")[-limit:]
-
-
-def ensure_run_dir(path: Path, run_root: Path, *, allow_external: bool = False) -> Path:
-    resolved = path.resolve()
-    root = resolved.parent if allow_external else run_root
-    if is_direct_run_dir(root, resolved):
-        return resolved
-    scope = "a valid Agent Collab run directory" if allow_external else f"a direct child of {run_root}"
-    raise SystemExit(f"invalid Agent Collab run directory: {resolved} must be {scope}")
-
-
-def guarded_run_dir(repo_root: Path, run_id: str) -> Path | None:
-    """Find the active run by ID through the worktree guard, even when another host owns its run root."""
-
-    if not CONFIG.is_safe_run_id(run_id):
-        return None
-    try:
-        _, active = REGISTRY.read_workspace_guard(repo_root, run_id)
-    except (OSError, ValueError, RuntimeError, SystemExit):
-        return None
-    if active is None or active.get("run_id") != run_id:
-        return None
-    candidate = Path(str(active["run_dir"])).expanduser()
-    if not candidate.is_dir():
-        return None
-    return ensure_run_dir(candidate, candidate.parent, allow_external=True)
-
-
-def resolve_run_context(args: argparse.Namespace) -> tuple[Path, Path, Path]:
-    """Resolve repo root, owning run root, and run directory once for a run command."""
-
-    repo_root = CONFIG.canonical_repo_root(args.repo_root or CONFIG.default_repo_root())
-    default_root = (args.run_root or CONFIG.default_run_root(repo_root)).resolve()
-    run_dir = resolve_run_reference(repo_root, args.run, default_root)
-    # Runs are direct children of the run root whose state index tracks them.
-    return repo_root, run_dir.parent, run_dir
-
-
-def resolve_run_reference(repo_root: Path, reference: str | None, run_root: Path | None = None) -> Path:
-    root = (run_root or CONFIG.default_run_root(repo_root)).resolve()
-    if reference:
-        candidate = Path(reference).expanduser()
-        if (candidate.is_absolute() or len(candidate.parts) > 1) and candidate.exists():
-            return ensure_run_dir(candidate, root, allow_external=True)
-        # The registry's exact active owner wins even over historical entries
-        # with the same ID in this root. Prefix lookup is strictly last.
-        guarded = guarded_run_dir(repo_root, reference)
-        if guarded is not None:
-            return guarded
-        candidate = root / reference
-        if candidate.exists():
-            return ensure_run_dir(candidate, root)
-        state = CONFIG.STATE
-        if CONFIG.is_safe_run_id(reference):
-            job = state.find_job(root, reference)
-            if job and job.get("run_dir"):
-                return ensure_run_dir(Path(str(job["run_dir"])).expanduser(), root)
-        raise SystemExit(f"unknown Agent Collab run: {reference}")
-
-    state = CONFIG.STATE
-    job = state.find_job(root, None)
-    if job and job.get("run_dir"):
-        return ensure_run_dir(Path(str(job["run_dir"])).expanduser(), root)
-    raise SystemExit(f"no Agent Collab runs found under {root}")
-
-
-def job_patch_from_run(run_dir: Path, status: str, phase: str, **extra: Any) -> dict[str, Any]:
-    request = ARTIFACTS.read_json_if_exists(run_dir / "host-request.json") or {}
-    process_info = ARTIFACTS.read_json_if_exists(run_dir / "peer-process.json") or {}
-    return {
-        "id": str(request.get("run_id") or process_info.get("run_id") or run_dir.name),
-        "run_dir": str(run_dir),
-        "repo_root": str(process_info.get("repo_root") or ""),
-        "host": request.get("host") or process_info.get("host"),
-        "peer": request.get("peer") or process_info.get("peer"),
-        "mode": request.get("mode"),
-        "target": request.get("target"),
-        "adjudicator_enabled": request.get("adjudicator_enabled"),
-        "status": status,
-        "phase": phase,
-        **extra,
-    }
-
-
-def summarize_run(run_dir: Path) -> dict[str, Any]:
-    request = require_run_request(run_dir)
-    process_info = ARTIFACTS.load_json(run_dir / "peer-process.json")
-    try:
-        ARTIFACTS.validate_peer_process(process_info, request, run_dir)
-    except ARTIFACTS.ArtifactValidationError as exc:
-        raise SystemExit(f"invalid peer-process artifact in {run_dir}: {exc}") from exc
-    pid = process_info.get("pid")
-    host_result = ARTIFACTS.read_json_if_exists(run_dir / "host-result.json") or {}
-    phase = host_result.get("phase")
-    wrapper_alive = (
-        process_identity_matches(process_info) and process_alive(int(pid))
-        if isinstance(pid, int)
-        else False
-    )
-    wrapper_group_active = False
-    if phase not in {"ready_for_synthesis", "done"} and isinstance(process_info.get("pgid"), int):
-        wrapper_group_active = CONFIG.SAFETY.process_group_alive(int(process_info["pgid"]))
-    try:
-        provider = ARTIFACTS.load_provider_process(run_dir, request)
-        provider_status = provider["status"]
-    except (OSError, ValueError, ARTIFACTS.ArtifactValidationError):
-        provider = None
-        provider_status = "invalid"
-    provider_active = provider_status in {"running", "cleanup_failed", "invalid"}
-    process_tree_quiescent = not wrapper_alive and not wrapper_group_active and provider_status in {
-        "pending",
-        "quiescent",
-    }
-    peer_alive = not process_tree_quiescent
-    peer_report_incomplete = False
-    try:
-        peer_report = ARTIFACTS.read_json_if_exists(run_dir / "peer-report.json")
-    except (OSError, ValueError) as exc:
-        if process_tree_quiescent:
-            raise SystemExit(f"terminal peer-report.json is invalid: {exc}") from exc
-        peer_report = None
-        peer_report_incomplete = True
-    normalization = ARTIFACTS.read_json_if_exists(run_dir / "peer-normalization.json")
-    workspace_mutation = ARTIFACTS.read_json_if_exists(run_dir / "workspace-mutation.json")
-    cancel_result = ARTIFACTS.read_json_if_exists(run_dir / "cancel-result.json")
-    cancel_workspace_mutation = ARTIFACTS.read_json_if_exists(run_dir / "cancel-workspace-mutation.json")
-    elapsed_seconds = peer_elapsed_seconds(process_info, run_dir)
-    early_cancel_blocked = (
-        peer_alive
-        and elapsed_seconds is not None
-        and elapsed_seconds < CONFIG.MIN_PEER_WAIT_SECONDS
-    )
-    return {
-        "run_id": process_info.get("run_id", run_dir.name),
-        "run_dir": str(run_dir),
-        "peer_pid": pid,
-        "peer_alive": peer_alive,
-        "wrapper_alive": wrapper_alive,
-        "wrapper_group_active": wrapper_group_active,
-        "provider_status": provider_status,
-        "provider_active": provider_active,
-        "process_tree_quiescent": process_tree_quiescent,
-        "elapsed_seconds": ARTIFACTS.json_number(elapsed_seconds),
-        "minimum_wait_seconds": CONFIG.MIN_PEER_WAIT_SECONDS,
-        "minimum_wait_remaining_seconds": (
-            ARTIFACTS.json_number(max(0.0, CONFIG.MIN_PEER_WAIT_SECONDS - elapsed_seconds))
-            if elapsed_seconds is not None
-            else None
-        ),
-        "early_cancel_blocked": early_cancel_blocked,
-        "empty_output_guidance": "Empty peer-report.json or stderr does not imply a stalled peer while the peer process is alive.",
-        "phase": phase,
-        "peer_status": peer_report.get("status") if peer_report else None,
-        "peer_verdict": peer_report.get("verdict") if peer_report else None,
-        "peer_report_incomplete": peer_report_incomplete,
-        # A failed wrapper may never write normalization; "none" is the state
-        # index's value for that case, while None would be rejected.
-        "normalization_source": (normalization.get("source") if normalization else None) or "none",
-        "validation_status": normalization.get("validation_status") if normalization else None,
-        "workspace_mutation": workspace_mutation,
-        "cancel_result": cancel_result,
-        "cancel_workspace_mutation": cancel_workspace_mutation,
-        "artifacts": {
-            "host_request": file_info(run_dir / "host-request.json"),
-            "before_snapshot": file_info(run_dir / "before.snapshot"),
-            "peer_process": file_info(run_dir / "peer-process.json"),
-            "host_first_pass": file_info(run_dir / "host-first-pass.json"),
-            "peer_raw": file_info(run_dir / "peer.raw.json"),
-            "peer_normalization": file_info(run_dir / "peer-normalization.json"),
-            "peer_report": file_info(run_dir / "peer-report.json"),
-            "claim_matrix": file_info(run_dir / "claim-matrix.json"),
-            "adjudicator_report": file_info(run_dir / "adjudicator-report.json"),
-            "after_snapshot": file_info(run_dir / "after.snapshot"),
-            "workspace_mutation": file_info(run_dir / "workspace-mutation.json"),
-            "cancel_result": file_info(run_dir / "cancel-result.json"),
-            "cancel_workspace_mutation": file_info(run_dir / "cancel-workspace-mutation.json"),
-            "peer_stderr": file_info(run_dir / "peer.stderr.log"),
-        },
-    }
-
-
-def resolve_finish_wait_timeout(
-    explicit_timeout_seconds: float | None,
-    process_info: dict[str, Any],
-    *, guided: bool = False,
-) -> tuple[float, str]:
-    if explicit_timeout_seconds is not None:
-        if not CONFIG.MIN_PEER_WAIT_SECONDS <= explicit_timeout_seconds <= CONFIG.SAFETY.MAX_AGENT_TIMEOUT_SECONDS + CONFIG.FINISH_TIMEOUT_GRACE_SECONDS:
-            raise ValueError(
-                f"finish timeout must be between {CONFIG.MIN_PEER_WAIT_SECONDS} and "
-                f"{CONFIG.SAFETY.MAX_AGENT_TIMEOUT_SECONDS + CONFIG.FINISH_TIMEOUT_GRACE_SECONDS} seconds"
-            )
-        return explicit_timeout_seconds, "explicit"
-
-    if "peer_timeout_seconds" in process_info:
-        peer_timeout = process_info["peer_timeout_seconds"]
-        try:
-            derived = float(peer_timeout) + CONFIG.FINISH_TIMEOUT_GRACE_SECONDS
-            if not CONFIG.MIN_PEER_WAIT_SECONDS <= float(peer_timeout) <= CONFIG.SAFETY.MAX_AGENT_TIMEOUT_SECONDS:
-                raise ValueError("peer timeout is outside the finite supported range")
-            return (float(CONFIG.MIN_PEER_WAIT_SECONDS), "guided_default") if guided else (derived, "peer_timeout_plus_grace")
-        except (TypeError, ValueError) as exc:
-            raise ValueError("peer-process peer_timeout_seconds must be finite and bounded") from exc
-
-    raise ValueError("peer-process is missing required peer_timeout_seconds")
-
-
-def remaining_finish_wait_seconds(
-    process_info: dict[str, Any],
-    configured_wait_seconds: float,
-    *,
-    now: float | None = None,
-) -> tuple[float, float]:
-    current_time = time.time() if now is None else now
-    hard_deadline = (
-        float(process_info["started_at_epoch"])
-        + float(process_info["peer_timeout_seconds"])
-        + CONFIG.FINISH_TIMEOUT_GRACE_SECONDS
-    )
-    return min(configured_wait_seconds, max(0.0, hard_deadline - current_time)), hard_deadline
-
-
-def wait_for_peer_report(
-    peer_report_path: Path,
-    process_info: dict[str, Any],
-    timeout_seconds: float,
-) -> str:
-    pid = int(process_info["pid"])
-    start = time.time()
-    deadline = start + timeout_seconds
-    while True:
-        if peer_report_path.exists() and peer_report_path.stat().st_size > 0:
-            alive = process_identity_matches(process_info) and process_alive(pid)
-            if not alive:
-                return "report_ready"
-            now = time.time()
-            if now >= deadline:
-                return "timeout"
-            # Report bytes are not terminal while the wrapper is alive. The
-            # wrapper owns provider-group cleanup and may still replace them;
-            # process exit is the readiness boundary.
-        else:
-            alive = process_identity_matches(process_info) and process_alive(pid)
-            now = time.time()
-            if now >= deadline:
-                return "timeout"
-        if not alive:
-            return "peer_exited"
-        time.sleep(FINISH_WAIT_POLL_SECONDS)
 
 
 def check_availability(args: argparse.Namespace) -> int:
@@ -666,7 +115,8 @@ def check_availability(args: argparse.Namespace) -> int:
                     args.timeout_seconds,
                 )
     availability.validate_result(output)
-    return emit_result((availability.EXIT_CODES[output["status"]], output))
+    return RUNS.emit_result((availability.EXIT_CODES[output["status"]], output))
+
 
 
 def build_start_request(args: argparse.Namespace, settings: dict[str, Any]) -> dict[str, Any]:
@@ -752,6 +202,7 @@ def build_start_request(args: argparse.Namespace, settings: dict[str, Any]) -> d
     return request
 
 
+
 def preflight_start(request: dict[str, Any], repo_root: Path) -> str:
     peer = request["peer"]
     peer_model, peer_effort = request["peer_model"], request["peer_effort"]
@@ -807,43 +258,6 @@ def preflight_start(request: dict[str, Any], repo_root: Path) -> str:
     return peer_cli_version
 
 
-def cleanup_failed_start(process: Any, peer_identity: dict[str, Any] | None) -> dict[str, Any]:
-    cleanup: dict[str, Any] = {"outcome": "not_started", "quiescent": True}
-    if process is not None:
-        try:
-            if peer_identity is not None:
-                if CONFIG.SAFETY.process_identity_matches(peer_identity):
-                    cleanup = CONFIG.SAFETY.terminate_process_group(int(peer_identity["pgid"]))
-                else:
-                    group_alive = CONFIG.SAFETY.process_group_alive(int(peer_identity["pgid"]))
-                    cleanup = {
-                        "outcome": "identity_mismatch_group_live" if group_alive else "identity_mismatch_group_empty",
-                        "quiescent": not group_alive,
-                        "pgid": int(peer_identity["pgid"]),
-                    }
-            elif process.poll() is None:
-                # The live Popen handle and a new session prove ownership
-                # even if /proc identity capture failed.
-                cleanup = CONFIG.SAFETY.terminate_process_group(int(process.pid))
-            else:
-                group_alive = CONFIG.SAFETY.process_group_alive(int(process.pid))
-                cleanup = {
-                    "outcome": "unidentified_group_live" if group_alive else "unidentified_group_empty",
-                    "quiescent": not group_alive,
-                    "pgid": int(process.pid),
-                }
-            try:
-                process.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                cleanup = {**cleanup, "outcome": "leader_not_reaped", "quiescent": False}
-        except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as cleanup_error:
-            cleanup = {
-                "outcome": "cleanup_exception",
-                "quiescent": False,
-                "details": str(cleanup_error),
-            }
-    return cleanup
-
 
 def peer_process_artifact(request: dict[str, Any], resolved: dict[str, Any], repo_root: Path,
                           run_dir: Path, guard_path: Path, owner: dict[str, Any],
@@ -878,6 +292,7 @@ def peer_process_artifact(request: dict[str, Any], resolved: dict[str, Any], rep
     }
 
 
+
 def spawn_peer_wrapper(request_path: Path, repo_root: Path, run_dir: Path,
                        peer_stdout: Any, peer_stderr: Any, startup_gate_read: int) -> Any:
     env = dict(os.environ)
@@ -910,6 +325,7 @@ def spawn_peer_wrapper(request_path: Path, repo_root: Path, run_dir: Path,
     )
 
 
+
 def launch_start(repo_root: Path, run_root: Path, resolved: dict[str, Any], request: dict[str, Any], peer_cli_version: str) -> int:
     run_id, host, peer = request["run_id"], request["host"], request["peer"]
     workspace_mode = request["workspace_mode"]
@@ -934,8 +350,8 @@ def launch_start(repo_root: Path, run_root: Path, resolved: dict[str, Any], requ
         run_dir_created = True
 
         request_path = run_dir / "host-request.json"
-        write_json(request_path, request)
-        run_snapshot(repo_root, run_dir / "before.snapshot", ignored_paths=[run_dir], workspace_mode=workspace_mode)
+        CONFIG.STRICT_JSON.write(request_path, request)
+        LIFECYCLE.run_snapshot(repo_root, run_dir / "before.snapshot", ignored_paths=[run_dir], workspace_mode=workspace_mode)
         peer_stdout = CONFIG.STRICT_JSON.open_private_text(run_dir / "peer-report.json")
         peer_stderr = CONFIG.STRICT_JSON.open_private_text(run_dir / "peer.stderr.log")
         started_at_epoch = time.time()
@@ -949,7 +365,7 @@ def launch_start(repo_root: Path, run_root: Path, resolved: dict[str, Any], requ
             ) from exc
         process_info = peer_process_artifact(request, resolved, repo_root, run_dir, guard_path, owner,
                                              peer_identity, started_at_epoch, peer_cli_version)
-        write_json(run_dir / "peer-process.json", process_info)
+        CONFIG.STRICT_JSON.write(run_dir / "peer-process.json", process_info)
         REGISTRY.update_workspace_guard(
             repo_root,
             run_id,
@@ -1001,11 +417,11 @@ def launch_start(repo_root: Path, run_root: Path, resolved: dict[str, Any], requ
             peer_stdout.close()
         if peer_stderr is not None:
             peer_stderr.close()
-        cleanup = cleanup_failed_start(process, peer_identity)
+        cleanup = PROCESS_TREE.cleanup_failed_start(process, peer_identity)
         if cleanup.get("quiescent") is not True:
             if run_dir_created:
                 try:
-                    write_json(
+                    CONFIG.STRICT_JSON.write(
                         run_dir / "startup-cleanup-failure.json",
                         {
                             "schema_version": CONFIG.ARTIFACT_SCHEMA_VERSION,
@@ -1043,8 +459,10 @@ def launch_start(repo_root: Path, run_root: Path, resolved: dict[str, Any], requ
             peer_stdout.close()
         if peer_stderr is not None and not peer_stderr.closed:
             peer_stderr.close()
-    return emit_result((0, {**process_info, "host_policy": host_policy(request),
-                           "next_action": next_action(run_dir, repo_root, "first_pass")}))
+    return RUNS.emit_result((0, {**process_info, "host_policy": LIFECYCLE.host_policy(request),
+                           "next_action": LIFECYCLE.next_action(run_dir, repo_root, "first_pass")}))
+
+
 
 def start(args: argparse.Namespace) -> int:
     CONFIG.require_supported_platform()
@@ -1072,520 +490,13 @@ def start(args: argparse.Namespace) -> int:
     return launch_start(repo_root, run_root, resolved, request, peer_cli_version)
 
 
-def review_documents(run_dir: Path) -> dict[str, Any]:
-    return {name: ARTIFACTS.read_json_if_exists(run_dir / name) for name in CONFIG.REVIEW.EVIDENCE_FILES}
-
-
-def ingest_finish_inputs(args: argparse.Namespace, run_dir: Path, request: dict[str, Any], process_info: dict[str, Any]) -> None:
-    inputs = [("first_pass", "host-first-pass.json", {"summary", "claims"}, ARTIFACTS.validate_host_first_pass),
-              ("helpers", "helper-reports.json", {"reports"}, ARTIFACTS.validate_helper_evidence),
-              ("adjudicator", "adjudicator-report.json", {"status", "summary", "false_positives",
-                  "claims_needing_verification", "recommended_verdict", "claims"}, ARTIFACTS.validate_adjudicator_report)]
-    supplied = [item for item in inputs if getattr(args, item[0], None) is not None]
-    if not supplied:
-        return
-    with REGISTRY.run_operation_lock(run_dir):
-        REGISTRY.require_workspace_guard_owner(Path(process_info["repo_root"]), request["run_id"], owner=process_info)
-        current = ARTIFACTS.read_json_if_exists(run_dir / "host-result.json")
-        if (run_dir / "cancel-result.json").exists() or (current and current.get("phase") == "done"):
-            raise ARTIFACTS.ArtifactValidationError("cannot replace evidence of a terminal run")
-        pending = []
-        review = CONFIG.REVIEW
-        admission = review.verify_admissions(run_dir, process_info, replacing={item[1] for item in supplied})
-        for option, filename, allowed, validate in supplied:
-            if option == "first_pass" and admission["reports"][filename] is None and (
-                    (run_dir / filename).exists() or (run_dir / "reviews").exists()):
-                raise ARTIFACTS.ArtifactValidationError("cannot re-admit an existing first pass without its original receipt")
-            value = ARTIFACTS.load_json(getattr(args, option))
-            required = allowed - ({"claims"} if option == "adjudicator" else set())
-            if not required <= set(value) <= allowed:
-                raise ARTIFACTS.ArtifactValidationError(f"{option} input keys must be {sorted(allowed)}; only adjudicator claims are optional")
-            if option == "adjudicator" and (not request["adjudicator_enabled"] or value.get("status") == "advisory_pending"):
-                raise ARTIFACTS.ArtifactValidationError("adjudicator input requires enabled adjudication and an actual report, not advisory_pending")
-            artifact = {"schema_version": CONFIG.ARTIFACT_SCHEMA_VERSION, "run_id": request["run_id"], **value}
-            validate(artifact, request)
-            pending.append((run_dir / filename, artifact))
-        merged = {path.name: artifact for path, artifact in pending}
-        for name in ("helper-reports.json", "adjudicator-report.json"):
-            if name not in merged:
-                merged[name] = ARTIFACTS.read_json_if_exists(run_dir / name)
-        ARTIFACTS.validate_host_helper_budget(merged["helper-reports.json"], merged["adjudicator-report.json"], request)
-        for path, artifact in pending:
-            digest = review.digest(artifact)
-            if path.name == "host-first-pass.json" and admission["reports"][path.name] not in {None, digest}:
-                raise ARTIFACTS.ArtifactValidationError("the admitted independent first pass is immutable; put later judgments in synthesis")
-            admission["reports"][path.name] = digest
-        for path, artifact in pending:
-            write_json(path, artifact)
-        write_json(run_dir / "host-inputs.json", admission)
-
-
-def finish(args: argparse.Namespace) -> int:
-    return emit_result(finish_run(args))
-
-
-def finish_run(args: argparse.Namespace, *, guided: bool = False) -> tuple[int, dict[str, Any]]:
-    _, run_root, run_dir = resolve_run_context(args)
-    state = CONFIG.STATE
-    request = require_run_request(run_dir)
-    process_info = ARTIFACTS.load_json(run_dir / "peer-process.json")
-    ARTIFACTS.validate_peer_process(process_info, request, run_dir)
-    ingest_finish_inputs(args, run_dir, request, process_info)
-    CONFIG.REVIEW.verify_admissions(run_dir, process_info)
-    host_first_pass = run_dir / "host-first-pass.json"
-    if not host_first_pass.exists():
-        raise SystemExit(f"missing required independent host analysis: {host_first_pass}")
-    host_report = ARTIFACTS.load_json(host_first_pass)
-    try:
-        ARTIFACTS.validate_host_first_pass(host_report, request)
-    except ARTIFACTS.ArtifactValidationError as exc:
-        raise SystemExit(f"invalid independent host analysis {host_first_pass}: {exc}") from exc
-    repo_root = Path(process_info["repo_root"]).resolve()
-    _, active_guard = REGISTRY.require_workspace_guard_owner(repo_root, request["run_id"], owner=process_info)
-    wrapper_quiescence_proven = bool(
-        active_guard is not None
-        and active_guard["phase"] == "ready_for_synthesis"
-        and active_guard["peer_identity"] == process_info["process_identity"]
-    )
-    if active_guard is not None and active_guard["phase"] == "ready_for_synthesis" and not wrapper_quiescence_proven:
-        raise SystemExit("ready-for-synthesis workspace guard contains an invalid wrapper-quiescence proof")
-    pid = int(process_info["pid"])
-    peer_report_path = run_dir / "peer-report.json"
-    configured_wait_seconds, finish_timeout_source = resolve_finish_wait_timeout(args.timeout_seconds, process_info, guided=guided)
-    actual_wait_seconds, hard_deadline = remaining_finish_wait_seconds(
-        process_info, configured_wait_seconds
-    )
-    finish_wait_seconds = configured_wait_seconds
-    wait_status = wait_for_peer_report(peer_report_path, process_info, actual_wait_seconds)
-    with REGISTRY.run_operation_lock(run_dir):
-        return _finish_after_wait_locked(
-            state=state,
-            run_root=run_root,
-            run_dir=run_dir,
-            request=request,
-            host_report=host_report,
-            process_info=process_info,
-            repo_root=repo_root,
-            peer_report_path=peer_report_path,
-            finish_wait_seconds=finish_wait_seconds,
-            finish_timeout_source=finish_timeout_source,
-            hard_deadline=hard_deadline,
-            wait_status=wait_status,
-            guided=guided,
-        )
-
-
-def _finish_after_wait_locked(
-    *,
-    state: Any,
-    run_root: Path,
-    run_dir: Path,
-    request: dict[str, Any],
-    host_report: dict[str, Any],
-    process_info: dict[str, Any],
-    repo_root: Path,
-    peer_report_path: Path,
-    finish_wait_seconds: float,
-    finish_timeout_source: str,
-    hard_deadline: float,
-    wait_status: str,
-    guided: bool = False,
-) -> tuple[int, dict[str, Any]]:
-    current_request = require_run_request(run_dir)
-    if current_request != request:
-        raise SystemExit("host-request changed while finish was waiting; refusing finalization")
-    current_process = ARTIFACTS.load_json(run_dir / "peer-process.json")
-    if current_process != process_info:
-        raise SystemExit("peer-process changed while finish was waiting; refusing finalization")
-    CONFIG.REVIEW.verify_admissions(run_dir, process_info)
-    current_host_report = ARTIFACTS.load_json(run_dir / "host-first-pass.json")
-    if current_host_report != host_report:
-        raise SystemExit("host-first-pass changed while waiting; resume advance")
-    if (run_dir / "cancel-result.json").exists():
-        raise SystemExit("run was cancelled while finish was waiting; terminal evidence was preserved")
-    current_job = state.find_job(run_root, request["run_id"])
-    if current_job is not None and current_job.get("status") in {"completed", "failed", "cancelled"}:
-        raise SystemExit(
-            f"run is already terminal with status {current_job['status']}; finish will not reactivate it"
-        )
-    existing_host_result = ARTIFACTS.read_json_if_exists(run_dir / "host-result.json")
-    if existing_host_result is not None and existing_host_result.get("phase") == "done":
-        raise SystemExit("run is already complete; finish will not rewrite terminal evidence")
-
-    _, active_guard = REGISTRY.require_workspace_guard_owner(repo_root, request["run_id"], owner=process_info)
-    wrapper_quiescence_proven = bool(
-        active_guard is not None
-        and active_guard["phase"] == "ready_for_synthesis"
-        and active_guard["peer_identity"] == process_info["process_identity"]
-    )
-    if (
-        active_guard is not None
-        and active_guard["phase"] == "ready_for_synthesis"
-        and not wrapper_quiescence_proven
-    ):
-        raise SystemExit("ready-for-synthesis workspace guard contains an invalid wrapper-quiescence proof")
-    pid = int(process_info["pid"])
-
-    if wait_status == "timeout" and time.time() < hard_deadline:
-        output = {
-            "schema_version": CONFIG.ARTIFACT_SCHEMA_VERSION,
-            "run_id": request["run_id"],
-            "run_dir": str(run_dir),
-            "status": "peer_running",
-            "phase": "waiting_for_peer",
-            "peer_pid": pid,
-            "finish_wait_seconds": ARTIFACTS.json_number(finish_wait_seconds),
-            "finish_timeout_source": finish_timeout_source,
-            "peer_report": str(peer_report_path),
-            "message": "Peer is still running and produced no stable complete report before finish timeout.",
-        }
-        try:
-            ARTIFACTS.validate_host_result(output, request, run_dir)
-        except ARTIFACTS.ArtifactValidationError as exc:
-            raise SystemExit(f"refusing to persist an invalid waiting host result: {exc}") from exc
-        state.upsert_job(
-            run_root,
-            {
-                **job_patch_from_run(run_dir, "running", "waiting_for_peer"),
-                "pid": pid,
-                "finish_wait_seconds": ARTIFACTS.json_number(finish_wait_seconds),
-                "finish_timeout_source": finish_timeout_source,
-            },
-        )
-        write_json(run_dir / "host-result.json", output)
-        if guided:
-            output["next_action"] = next_action(run_dir, repo_root, "waiting")
-        return (0 if guided else 1), output
-
-    process_tree_proven = False
-    if time.time() >= hard_deadline:
-        try:
-            require_process_tree_quiescent(
-                process_info,
-                run_dir,
-                request,
-                wrapper_quiescence_proven=wrapper_quiescence_proven,
-            )
-        except ARTIFACTS.ArtifactValidationError:
-            cleanup = terminate_tracked_process_tree(process_info, run_dir, request)
-            if cleanup["quiescent"] is not True:
-                raise SystemExit(
-                    "hard peer deadline elapsed but the tracked process tree could not be proven quiescent; "
-                    "the workspace guard remains active:\n"
-                    + json.dumps(cleanup, ensure_ascii=False, indent=2, sort_keys=True)
-                )
-            peer_runtime = CONFIG.PEER
-            write_json(
-                peer_report_path,
-                peer_runtime.failure(
-                    "timeout",
-                    "Peer run exceeded its hard finite deadline.",
-                    request,
-                    cleanup,
-                ),
-            )
-        process_tree_proven = True
-        wait_status = "peer_exited"
-
-    if not process_tree_proven:
-        try:
-            require_process_tree_quiescent(
-                process_info,
-                run_dir,
-                request,
-                wrapper_quiescence_proven=wrapper_quiescence_proven,
-            )
-        except ARTIFACTS.ArtifactValidationError as exc:
-            raise SystemExit(
-                f"peer report is not terminal because the tracked process tree is not quiescent: {exc}"
-            ) from exc
-
-    if not peer_report_path.exists() or peer_report_path.stat().st_size == 0:
-        failure = CONFIG.PEER.failure("peer_no_output", "Peer report missing or empty.", request)
-        failure["summary"] = "Peer process produced no report before finish timeout."
-        write_json(peer_report_path, failure)
-
-    peer_runtime = CONFIG.PEER
-    peer_report, validation_status = ARTIFACTS.normalize_peer_report_from_artifacts(peer_runtime, run_dir, request)
-
-    adjudicator_path = run_dir / "adjudicator-report.json"
-    adjudicator: dict[str, Any] | None = None
-    if request["adjudicator_enabled"]:
-        if adjudicator_path.exists():
-            adjudicator = ARTIFACTS.load_json(adjudicator_path)
-        else:
-            adjudicator = ARTIFACTS.default_adjudicator_report(request, peer_report)
-            write_json(adjudicator_path, adjudicator)
-        try:
-            ARTIFACTS.validate_adjudicator_report(adjudicator, request)
-        except ARTIFACTS.ArtifactValidationError as exc:
-            raise SystemExit(f"invalid adjudicator report {adjudicator_path}: {exc}") from exc
-    elif adjudicator_path.exists():
-        raise SystemExit(
-            "adjudicator-report.json is forbidden because adjudication is disabled in the immutable host request"
-        )
-
-    try:
-        helper_claims, helper_digest = ARTIFACTS.load_helper_evidence(run_dir, request)
-        ARTIFACTS.validate_host_helper_budget(ARTIFACTS.read_json_if_exists(run_dir / "helper-reports.json"), adjudicator, request)
-        claim_matrix = ARTIFACTS.build_claim_matrix(
-            request, host_report, peer_report, helper_claims, adjudicator, helper_digest
-        )
-    except ARTIFACTS.ArtifactValidationError as exc:
-        raise SystemExit(f"invalid helper or claim-matrix artifact in {run_dir}: {exc}") from exc
-    write_json(run_dir / "claim-matrix.json", claim_matrix)
-
-    try:
-        workspace_mutation = record_host_workspace_mutation(repo_root, run_dir, request)
-    except (OSError, ValueError, ARTIFACTS.ArtifactValidationError) as exc:
-        raise SystemExit(f"host workspace mutation verification failed: {exc}") from exc
-    result = {
-        "schema_version": CONFIG.ARTIFACT_SCHEMA_VERSION,
-        "run_id": request["run_id"],
-        "run_dir": str(run_dir),
-        "peer_status": peer_report.get("status"),
-        "validation_status": validation_status,
-        "finish_wait_seconds": ARTIFACTS.json_number(finish_wait_seconds),
-        "finish_timeout_source": finish_timeout_source,
-        "normalization": str(run_dir / "peer-normalization.json"),
-        "claim_matrix": str(run_dir / "claim-matrix.json"),
-        "claim_matrix_sha256": ARTIFACTS.claim_matrix_sha256(claim_matrix),
-        "adjudicator_report": str(adjudicator_path) if adjudicator is not None else None,
-        "workspace_mutation": workspace_mutation,
-        "workspace_mutation_sha256": ARTIFACTS.workspace_mutation_sha256(workspace_mutation),
-    }
-    ready_result = {**result, "phase": "ready_for_synthesis"}
-    try:
-        ARTIFACTS.validate_host_result(ready_result, request, run_dir)
-    except ARTIFACTS.ArtifactValidationError as exc:
-        raise SystemExit(f"refusing to persist an invalid ready host result: {exc}") from exc
-    state.upsert_job(
-        run_root,
-        {
-            **job_patch_from_run(run_dir, "synthesizing", "ready_for_synthesis"),
-            "peer_status": peer_report.get("status"),
-            "peer_verdict": peer_report.get("verdict"),
-            "validation_status": validation_status,
-            "normalization_source": (
-                (ARTIFACTS.read_json_if_exists(run_dir / "peer-normalization.json") or {}).get("source") or "none"
-            ),
-            "workspace_mutation": bool(workspace_mutation),
-            "summary": peer_report.get("summary"),
-        },
-    )
-    REGISTRY.update_workspace_guard(
-        repo_root,
-        request["run_id"],
-        owner=process_info,
-        phase="ready_for_synthesis",
-        peer_identity=process_info["process_identity"],
-    )
-    write_json(run_dir / "host-result.json", ready_result)
-    review = CONFIG.REVIEW
-    documents = review_documents(run_dir)
-    review_paths = review.prepare(run_dir, process_info, documents)
-    if guided:
-        helper_count = len((documents["helper-reports.json"] or {}).get("reports", []))
-        advisory_available = request["local_subagents_allowed"] and helper_count < request["max_local_subagents"]
-        stage = "adjudicator" if adjudicator and adjudicator["status"] == "advisory_pending" and advisory_available else "synthesis"
-        return 0, {"run_dir": str(run_dir), "peer_status": peer_report["status"],
-                   "validation_status": validation_status, "host_policy": host_policy(request), **review_paths,
-                   "next_action": next_action(run_dir, repo_root, stage, review_paths["synthesis_input"])}
-    return 0, {**ready_result, **review_paths}
-
-
-def complete(args: argparse.Namespace) -> int:
-    context = resolve_run_context(args)
-    with REGISTRY.run_operation_lock(context[2]):
-        return emit_result(_complete_locked(args, context))
-
-
-def _complete_locked(args: argparse.Namespace, context: tuple[Path, Path, Path]) -> tuple[int, dict[str, Any]]:
-    _, run_root, run_dir = context
-    request = require_run_request(run_dir)
-    process_info = ARTIFACTS.load_json(run_dir / "peer-process.json")
-    try:
-        ARTIFACTS.validate_peer_process(process_info, request, run_dir)
-    except ARTIFACTS.ArtifactValidationError as exc:
-        raise SystemExit(f"invalid peer-process artifact in {run_dir}: {exc}") from exc
-    repo_root = Path(process_info["repo_root"]).resolve()
-
-    host_result_path = run_dir / "host-result.json"
-    host_result = ARTIFACTS.load_json(host_result_path)
-    try:
-        ARTIFACTS.validate_host_result(host_result, request, run_dir)
-    except ARTIFACTS.ArtifactValidationError as exc:
-        raise SystemExit(f"invalid host-result artifact in {run_dir}: {exc}") from exc
-    phase = host_result["phase"]
-    if phase not in {"ready_for_synthesis", "done"}:
-        raise SystemExit("run is not ready to complete; resume advance and synthesize the evidence first")
-    CONFIG.REVIEW.verify_admissions(run_dir, process_info)
-    if phase != "done" and getattr(args, "synthesis", None) is None:
-        raise SystemExit("completion requires --synthesis with the revision-bound input returned by advance")
-    if phase == "ready_for_synthesis":
-        _, active_guard = REGISTRY.require_workspace_guard_owner(repo_root, request["run_id"], owner=process_info)
-        if (
-            active_guard is None
-            or active_guard["phase"] != "ready_for_synthesis"
-            or active_guard["peer_identity"] != process_info["process_identity"]
-        ):
-            raise SystemExit(
-                "ready-for-synthesis workspace guard does not contain the persisted wrapper-quiescence proof"
-            )
-        try:
-            # finish already proved the wrapper group empty before atomically
-            # advancing this owned guard. Never re-query its historical numeric
-            # PGID here: it may have been reused during a long synthesis phase.
-            require_process_tree_quiescent(
-                process_info,
-                run_dir,
-                request,
-                wrapper_quiescence_proven=True,
-            )
-        except ARTIFACTS.ArtifactValidationError as exc:
-            raise SystemExit(
-                f"cannot complete while the tracked peer process tree is active: {exc}"
-            ) from exc
-        try:
-            workspace_mutation = record_host_workspace_mutation(repo_root, run_dir, request)
-        except (OSError, ValueError, ARTIFACTS.ArtifactValidationError) as exc:
-            raise SystemExit(f"final host workspace mutation verification failed: {exc}") from exc
-        if host_result["workspace_mutation"] != workspace_mutation:
-            host_result = {
-                **host_result,
-                "workspace_mutation": workspace_mutation,
-                "workspace_mutation_sha256": ARTIFACTS.workspace_mutation_sha256(workspace_mutation),
-            }
-            try:
-                ARTIFACTS.validate_host_result(host_result, request, run_dir)
-            except ARTIFACTS.ArtifactValidationError as exc:
-                raise SystemExit(f"refusing to persist an invalid refreshed host result: {exc}") from exc
-            write_json(host_result_path, host_result)
-            raise SystemExit(
-                "workspace mutation evidence changed after finish; host-result.json was refreshed. "
-                "Resume advance without --synthesis, inspect the new review revision, and resynthesize before completing."
-            )
-    elif phase == "done":
-        _, active_guard = REGISTRY.read_workspace_guard(repo_root, request["run_id"])
-        if active_guard is not None:
-            REGISTRY.validate_guard_owner(active_guard, process_info)
-            if (
-                active_guard["phase"] != "ready_for_synthesis"
-                or active_guard["peer_identity"] != process_info["process_identity"]
-            ):
-                raise SystemExit(
-                    "completed run still has a guard without the persisted wrapper-quiescence proof"
-                )
-            try:
-                require_process_tree_quiescent(
-                    process_info,
-                    run_dir,
-                    request,
-                    wrapper_quiescence_proven=True,
-                )
-            except ARTIFACTS.ArtifactValidationError as exc:
-                raise SystemExit(
-                    f"completed run guard cannot be released while provider state is unproven: {exc}"
-                ) from exc
-
-    if getattr(args, "synthesis", None) is not None:
-        judgments = CONFIG.REVIEW.judgments(run_dir, args.synthesis, process_info, review_documents(run_dir))
-        synthesis = {"schema_version": CONFIG.ARTIFACT_SCHEMA_VERSION, "run_id": request["run_id"],
-                     **judgments, "claim_matrix_sha256": host_result["claim_matrix_sha256"],
-                     "workspace_mutation_sha256": host_result["workspace_mutation_sha256"], "final_answer_ready": True}
-        ARTIFACTS.validate_host_synthesis(synthesis, request)
-        if phase == "done":
-            if ARTIFACTS.load_json(run_dir / "host-synthesis.json") != synthesis:
-                raise ARTIFACTS.ArtifactValidationError("cannot rewrite a completed synthesis")
-        else:
-            write_json(run_dir / "host-synthesis.json", synthesis)
-
-    peer_runtime = CONFIG.PEER
-    try:
-        peer_report = ARTIFACTS.validate_completion_artifacts(run_dir, request, host_result, peer_runtime)
-    except (OSError, ValueError, getattr(peer_runtime, "PeerReportValidationError")) as exc:
-        raise SystemExit(f"cannot complete run with invalid v2 synthesis artifacts: {exc}") from exc
-
-    state_status = "completed" if peer_report["status"] == "ok" else "failed"
-    completed_at = (
-        host_result["completed_at"]
-        if phase == "done"
-        else datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    )
-    state = CONFIG.STATE
-    state.upsert_job(
-        run_root,
-        {
-            **job_patch_from_run(run_dir, state_status, "done"),
-            "peer_status": peer_report["status"],
-            "peer_verdict": peer_report["verdict"],
-            "completed_at": completed_at,
-            "summary": peer_report["summary"],
-        },
-    )
-
-    if phase == "done":
-        guard_path, active = REGISTRY.read_workspace_guard(repo_root, request["run_id"])
-        release_guard = active is not None
-        guard_key = "workspace_guard_released" if release_guard else "workspace_guard"
-    else:
-        done_result = {**host_result, "phase": "done", "completed_at": completed_at}
-        ARTIFACTS.validate_host_result(done_result, request, run_dir)
-        write_json(host_result_path, done_result)
-        release_guard, guard_key = True, "workspace_guard_released"
-    if release_guard:
-        guard_path = REGISTRY.release_workspace_guard(repo_root, request["run_id"], owner=process_info)
-    return 0, {
-        "schema_version": CONFIG.ARTIFACT_SCHEMA_VERSION,
-        "run_id": request["run_id"],
-        "run_dir": str(run_dir),
-        "status": "already_complete" if phase == "done" else state_status,
-        guard_key: str(guard_path),
-    }
-
-
-def advance(args: argparse.Namespace) -> int:
-    """Resume from validated artifacts, using the same finalization and closure paths."""
-    evidence_inputs = any(getattr(args, key) is not None for key in ("first_pass", "helpers", "adjudicator"))
-    if args.synthesis is not None and evidence_inputs:
-        raise ValueError("submit evidence and synthesis separately so the new evidence is reviewed first")
-    context = resolve_run_context(args)
-    _, _, run_dir = context
-    with REGISTRY.run_operation_lock(run_dir):
-        request = require_run_request(run_dir)
-        process = ARTIFACTS.load_json(run_dir / "peer-process.json")
-        ARTIFACTS.validate_peer_process(process, request, run_dir)
-        if (run_dir / "cancel-result.json").exists():
-            raise ValueError("run has cancellation evidence; use cancel RUN to validate or resume cancellation")
-        current = ARTIFACTS.read_json_if_exists(run_dir / "host-result.json")
-        if current is not None:
-            ARTIFACTS.validate_host_result(current, request, run_dir)
-        if args.synthesis is not None and (not current or current["phase"] not in {"ready_for_synthesis", "done"}):
-            raise ValueError("synthesis requires returned review evidence; resume advance without --synthesis first")
-        if args.synthesis is not None or (current and current["phase"] == "done"):
-            if evidence_inputs:
-                raise ValueError("cannot replace evidence of a terminal run")
-            code, output = _complete_locked(args, context)
-            return emit_result((code, {**output, "next_action": None}))
-        REGISTRY.require_workspace_guard_owner(Path(process["repo_root"]), request["run_id"], owner=process)
-        admission = CONFIG.REVIEW.verify_admissions(run_dir, process)
-        if args.adjudicator is not None and (not current or current["phase"] != "ready_for_synthesis"):
-            raise ValueError("advisory input requires reviewed independent reports; submit the first pass with advance first")
-        if admission["reports"]["host-first-pass.json"] is None and args.first_pass is None:
-            if evidence_inputs:
-                raise ValueError("submit the independent first pass before other host reports")
-            return emit_result((0, {"run_dir": str(run_dir), "host_policy": host_policy(request),
-                                   "next_action": next_action(run_dir, Path(process["repo_root"]), "first_pass")}))
-    # No run-operation lock is held while waiting for the provider. Finalization
-    # rechecks ownership and evidence under the lock before publishing a revision.
-    return emit_result(finish_run(args, guided=True))
-
 
 def recover(args: argparse.Namespace) -> int:
     repo_root = CONFIG.canonical_repo_root(args.repo_root or CONFIG.default_repo_root())
     path = REGISTRY.recover_workspace_guard(repo_root, args.run)
     print(CONFIG.STRICT_JSON.dumps({"status": "recovered", "run_id": args.run, "registry": str(path)}))
     return 0
+
 
 
 def status(args: argparse.Namespace) -> int:
@@ -1601,19 +512,19 @@ def status(args: argparse.Namespace) -> int:
         return 0
 
     if args.run:
-        run_dir = resolve_run_reference(repo_root, args.run, run_root)
+        run_dir = RUNS.resolve_run_reference(repo_root, args.run, run_root)
         if args.wait:
             deadline = time.time() + args.timeout_seconds
             while time.time() < deadline:
-                summary = summarize_run(run_dir)
+                summary = RUNS.summarize_run(run_dir)
                 if not summary["peer_alive"]:
                     break
                 time.sleep(args.poll_interval_seconds)
-        result = summarize_run(run_dir)
+        result = RUNS.summarize_run(run_dir)
         job = state.find_job(run_root, result["run_id"])
         if job:
             result["job"] = job
-        return emit_result((0, result))
+        return RUNS.emit_result((0, result))
 
     jobs = state.list_jobs(run_root)
     if not args.all:
@@ -1622,20 +533,21 @@ def status(args: argparse.Namespace) -> int:
         "run_root": str(run_root),
         "jobs": jobs,
     }
-    return emit_result((0, result))
+    return RUNS.emit_result((0, result))
+
 
 
 def result(args: argparse.Namespace) -> int:
     repo_root = CONFIG.canonical_repo_root(args.repo_root or CONFIG.default_repo_root())
     run_root = (args.run_root or CONFIG.default_run_root(repo_root)).resolve()
-    run_dir = resolve_run_reference(repo_root, args.run, run_root)
+    run_dir = RUNS.resolve_run_reference(repo_root, args.run, run_root)
     if getattr(args, "format", "json") == "markdown":
         if args.review is None:
             raise SystemExit("result --format markdown requires --review DIR from finish")
         with REGISTRY.run_operation_lock(run_dir):
             process_info = ARTIFACTS.load_json(run_dir / "peer-process.json")
-            ARTIFACTS.validate_peer_process(process_info, require_run_request(run_dir), run_dir)
-            documents = review_documents(run_dir)
+            ARTIFACTS.validate_peer_process(process_info, RUNS.require_run_request(run_dir), run_dir)
+            documents = LIFECYCLE.review_documents(run_dir)
             review = CONFIG.REVIEW
             review.verify(run_dir, args.review, process_info, documents)
             print(review.markdown(documents))
@@ -1644,7 +556,7 @@ def result(args: argparse.Namespace) -> int:
         raise SystemExit("--review requires --format markdown")
     process_info = ARTIFACTS.read_json_if_exists(run_dir / "peer-process.json")
     output = {
-        "run": summarize_run(run_dir),
+        "run": RUNS.summarize_run(run_dir),
         "process": process_info,
         "request": ARTIFACTS.read_json_if_exists(run_dir / "host-request.json"),
         "host_first_pass": ARTIFACTS.read_json_if_exists(run_dir / "host-first-pass.json"),
@@ -1657,874 +569,10 @@ def result(args: argparse.Namespace) -> int:
         "workspace_mutation": ARTIFACTS.read_json_if_exists(run_dir / "workspace-mutation.json"),
         "cancel_result": ARTIFACTS.read_json_if_exists(run_dir / "cancel-result.json"),
         "cancel_workspace_mutation": ARTIFACTS.read_json_if_exists(run_dir / "cancel-workspace-mutation.json"),
-        "peer_stderr_tail": stderr_tail(run_dir / "peer.stderr.log"),
+        "peer_stderr_tail": RUNS.stderr_tail(run_dir / "peer.stderr.log"),
     }
-    return emit_result((0, output))
+    return RUNS.emit_result((0, output))
 
-
-def is_direct_run_dir(run_root: Path, run_dir: Path) -> bool:
-    try:
-        resolved_root = run_root.resolve()
-        resolved_run = run_dir.resolve()
-    except FileNotFoundError:
-        return False
-    return resolved_run.parent == resolved_root and any((resolved_run / name).exists() for name in RUN_ARTIFACT_NAMES)
-
-
-def run_dir_timestamp(run_dir: Path) -> str:
-    try:
-        timestamp = run_dir.stat().st_mtime
-    except FileNotFoundError:
-        timestamp = 0
-    return datetime.fromtimestamp(timestamp, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-ORPHAN_STARTUP_GRACE_SECONDS = 24 * 60 * 60
-
-
-def history_candidates(run_root: Path, state_runtime: Any) -> list[dict[str, Any]]:
-    loaded_state = state_runtime.load_state(run_root)
-    jobs = [job for job in loaded_state.get("jobs", []) if isinstance(job, dict)]
-    jobs_by_id = {str(job.get("id")): job for job in jobs if job.get("id")}
-    candidates: dict[str, dict[str, Any]] = {}
-
-    if run_root.exists():
-        for run_dir in run_root.iterdir():
-            if not run_dir.is_dir() or not is_direct_run_dir(run_root, run_dir):
-                continue
-            run_id = run_dir.name
-            job = jobs_by_id.get(run_id, {})
-            updated_at = str(job.get("updated_at") or job.get("created_at") or run_dir_timestamp(run_dir))
-            candidates[run_id] = {
-                "run_id": run_id,
-                "run_dir": str(run_dir),
-                "status": str(job.get("status") or "orphan"),
-                "updated_at": updated_at,
-                "sort_key": updated_at,
-            }
-
-    for job in jobs:
-        run_id = str(job.get("id") or "")
-        run_dir_text = str(job.get("run_dir") or "")
-        if not run_id or not run_dir_text:
-            continue
-        run_dir = Path(run_dir_text)
-        if not run_dir.exists() or run_id in candidates or not is_direct_run_dir(run_root, run_dir):
-            continue
-        updated_at = str(job.get("updated_at") or job.get("created_at") or run_dir_timestamp(run_dir))
-        candidates[run_id] = {
-            "run_id": run_id,
-            "run_dir": str(run_dir),
-            "status": str(job.get("status") or "unknown"),
-            "updated_at": updated_at,
-            "sort_key": updated_at,
-        }
-
-    return sorted(candidates.values(), key=lambda item: (str(item["sort_key"]), str(item["run_id"])), reverse=True)
-
-
-def delete_history_candidates(run_root: Path, state_runtime: Any, candidates: list[dict[str, Any]], dry_run: bool) -> list[dict[str, Any]]:
-    deleted: list[dict[str, Any]] = []
-    for candidate in candidates:
-        run_dir = Path(candidate["run_dir"])
-        if not is_direct_run_dir(run_root, run_dir):
-            continue
-        deleted.append({key: candidate[key] for key in ("run_id", "run_dir", "status", "updated_at")})
-        if not dry_run:
-            shutil.rmtree(run_dir)
-
-    if deleted and not dry_run:
-        deleted_ids = {item["run_id"] for item in deleted}
-        deleted_dirs = {item["run_dir"] for item in deleted}
-        with state_runtime.state_lock(run_root):
-            loaded_state = state_runtime.load_state(run_root)
-            loaded_state["jobs"] = [
-                job
-                for job in loaded_state.get("jobs", [])
-                if isinstance(job, dict)
-                and str(job.get("id")) not in deleted_ids
-                and str(job.get("run_dir")) not in deleted_dirs
-            ]
-            state_runtime.save_state(run_root, loaded_state)
-    return deleted
-
-
-def resolve_history_retain(args: argparse.Namespace, default_retained: int = CONFIG.DEFAULT_HISTORY_RETAINED_RUNS) -> int:
-    if getattr(args, "all", False):
-        return 0
-    if getattr(args, "retain", None) is not None:
-        return max(int(args.retain), 0)
-    return max(int(default_retained), 0)
-
-
-def build_clear_history_output(args: argparse.Namespace, default_retained: int = CONFIG.DEFAULT_HISTORY_RETAINED_RUNS) -> tuple[int, dict[str, Any] | None]:
-    repo_root = CONFIG.canonical_repo_root(args.repo_root or CONFIG.default_repo_root())
-    run_root = (args.run_root or CONFIG.default_run_root(repo_root)).resolve()
-    state_runtime = CONFIG.STATE
-    active_statuses = state_runtime.ACTIVE_STATUSES
-    candidates = history_candidates(run_root, state_runtime)
-    _, active_guards = REGISTRY.read_workspace_guards(repo_root)
-    guarded_run_ids = set(active_guards)
-    guarded_run_dirs = {str(Path(str(guard["run_dir"])).resolve()) for guard in active_guards.values()}
-
-    owner_guards: dict[str, Any] = {}
-
-    def owner_guard_holds(candidate: dict[str, Any]) -> bool:
-        """Preserve runs another worktree's guard owns, or whose owner is unknown."""
-
-        run_dir = Path(candidate["run_dir"])
-        try:
-            process_info = ARTIFACTS.read_json_if_exists(run_dir / "peer-process.json")
-        except (OSError, ValueError, SystemExit):
-            return True
-        owner = process_info.get("repo_root") if isinstance(process_info, dict) else None
-        if not isinstance(owner, str) or not owner:
-            # A startup records ownership only after creating the run directory;
-            # keep young orphans until a start could no longer be in progress.
-            if candidate["status"] != "orphan":
-                return False
-            try:
-                age = time.time() - run_dir.stat().st_mtime
-            except OSError:
-                return True
-            return age < ORPHAN_STARTUP_GRACE_SECONDS
-        if owner not in owner_guards:
-            try:
-                owner_guards[owner] = REGISTRY.read_workspace_guards(Path(owner))[1]
-            except (OSError, ValueError, RuntimeError, SystemExit):
-                owner_guards[owner] = "indeterminate"
-        guard = owner_guards[owner]
-        if guard == "indeterminate":
-            return True
-        return candidate["run_id"] in guard
-
-    def is_guarded(candidate: dict[str, Any]) -> bool:
-        if (candidate["run_id"] in guarded_run_ids
-                or str(Path(candidate["run_dir"]).resolve()) in guarded_run_dirs):
-            return True
-        return owner_guard_holds(candidate)
-
-    if getattr(args, "run", None):
-        try:
-            target_dir = resolve_run_reference(repo_root, args.run, run_root)
-            target_id = target_dir.name
-        except SystemExit:
-            target_id = str(args.run)
-        selected = [candidate for candidate in candidates if candidate["run_id"] == target_id]
-        retained = [candidate for candidate in candidates if candidate["run_id"] != target_id]
-    else:
-        terminal = [candidate for candidate in candidates if candidate["status"] not in active_statuses]
-        active = [candidate for candidate in candidates if candidate["status"] in active_statuses]
-        retain = resolve_history_retain(args, default_retained)
-        retained_terminal = terminal[:retain]
-        selected = terminal[retain:]
-        retained = active + retained_terminal
-
-    guarded_preserved = [candidate for candidate in selected if is_guarded(candidate)]
-    if guarded_preserved:
-        retained.extend(candidate for candidate in guarded_preserved if candidate not in retained)
-    active_preserved = [
-        candidate
-        for candidate in selected
-        if candidate["status"] in active_statuses or is_guarded(candidate)
-    ]
-    all_active_preserved = [candidate for candidate in candidates if candidate["status"] in active_statuses]
-    for candidate in guarded_preserved:
-        if candidate not in all_active_preserved:
-            all_active_preserved.append(candidate)
-    deletable = [
-        candidate
-        for candidate in selected
-        if candidate["status"] not in active_statuses and not is_guarded(candidate)
-    ]
-    if deletable and not args.dry_run and not args.yes:
-        print("clear-history requires --yes for deletion; rerun with --dry-run to preview", file=sys.stderr)
-        return 2, None
-
-    deleted = delete_history_candidates(run_root, state_runtime, deletable, args.dry_run)
-    output = {
-        "action": "clear-history",
-        "dry_run": bool(args.dry_run),
-        "run_root": str(run_root),
-        "deleted": deleted,
-        "retained": [{key: candidate[key] for key in ("run_id", "run_dir", "status", "updated_at")} for candidate in retained],
-        "active_preserved": [
-            {key: candidate[key] for key in ("run_id", "run_dir", "status", "updated_at")}
-            for candidate in (active_preserved or all_active_preserved)
-        ],
-        "missing": [],
-        "skipped": [],
-    }
-    return 0, output
-
-
-def clear_history(args: argparse.Namespace) -> int:
-    repo_root = CONFIG.canonical_repo_root(args.repo_root or CONFIG.default_repo_root())
-    resolved = CONFIG.resolve_settings(repo_root)
-    CONFIG.require_valid_settings(resolved)
-    settings = resolved["settings"]
-    status, output = build_clear_history_output(args, int(settings.get("history_retained_runs", CONFIG.DEFAULT_HISTORY_RETAINED_RUNS)))
-    if output is not None:
-        print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
-    return status
-
-
-def terminate_tracked_process_tree(
-    process_info: dict[str, Any],
-    run_dir: Path,
-    request: dict[str, Any],
-) -> dict[str, Any]:
-    try:
-        provider = ARTIFACTS.load_provider_process(run_dir, request)
-    except (OSError, ValueError, ARTIFACTS.ArtifactValidationError) as exc:
-        return {
-            "quiescent": False,
-            "provider": {"outcome": "invalid_tracker", "details": str(exc)},
-            "wrapper": {"outcome": "not_attempted"},
-        }
-
-    if provider["status"] == "pending":
-        provider_cleanup = {"outcome": "not_started", "quiescent": True}
-    elif provider["status"] == "quiescent":
-        provider_cleanup = {
-            "outcome": "already_quiescent",
-            "quiescent": True,
-        }
-    elif (
-        provider["status"] == "cleanup_failed"
-        and provider["cleanup_outcome"] == "capture_channel_not_quiescent"
-    ):
-        # A descendant escaped the provider's process group while retaining a
-        # capture channel. The original PGID can never prove it exited.
-        provider_cleanup = {
-            "outcome": "capture_channel_not_quiescent",
-            "quiescent": False,
-        }
-    elif (
-        provider["process_identity"] is not None
-        and CONFIG.SAFETY.process_identity_state(provider["process_identity"]) == "unknown"
-    ):
-        # An empty-group answer cannot prove quiescence for a root whose
-        # identity is unreadable.
-        provider_cleanup = {"outcome": "identity_unknown", "quiescent": False}
-    elif (
-        provider["process_identity"] is not None
-        and CONFIG.SAFETY.process_identity_matches(provider["process_identity"])
-    ):
-        provider_pgid = int(provider["pgid"])
-        provider_cleanup = CONFIG.SAFETY.terminate_process_group(provider_pgid)
-        if provider_cleanup["quiescent"] and provider["process_identity"] is not None:
-            provider = {
-                **provider,
-                "status": "quiescent",
-                "cleanup_outcome": str(provider_cleanup["outcome"]),
-                "completed_at": ARTIFACTS.utc_timestamp(),
-            }
-            write_json(run_dir / "provider-process.json", provider)
-    else:
-        provider_group_alive = CONFIG.SAFETY.process_group_alive(int(provider["pgid"]))
-        if provider_group_alive:
-            # The recorded identity is gone or different, so the numeric PGID
-            # may belong to an unrelated process. Fail closed without signaling.
-            provider_cleanup = {
-                "outcome": "identity_mismatch_group_live",
-                "quiescent": False,
-            }
-        else:
-            # An empty recorded group is sufficient terminal proof. Persist it
-            # once so later transitions never re-query a reusable numeric PGID.
-            provider_cleanup = {
-                "outcome": "identity_mismatch_group_empty",
-                "quiescent": True,
-            }
-            provider = {
-                **provider,
-                "status": "quiescent",
-                "cleanup_outcome": provider_cleanup["outcome"],
-                "completed_at": ARTIFACTS.utc_timestamp(),
-            }
-            write_json(run_dir / "provider-process.json", provider)
-
-    if (
-        request["workspace_mode"] == "isolated"
-        and provider_cleanup.get("quiescent")
-        and not process_identity_matches(process_info)
-    ):
-        try:
-            CONFIG.ISOLATION.cleanup_state(run_dir / "isolation-state.json")
-        except (OSError, ValueError, RuntimeError) as exc:
-            provider_cleanup = {
-                "outcome": f"isolated_workspace_cleanup_failed: {exc}",
-                "quiescent": False,
-            }
-    wrapper_pgid = int(process_info["pgid"])
-    wrapper_state = CONFIG.SAFETY.process_identity_state(process_info.get("process_identity"))
-    if wrapper_state == "matching":
-        wrapper_cleanup = CONFIG.SAFETY.terminate_process_group(wrapper_pgid)
-    elif wrapper_state == "unknown":
-        wrapper_cleanup = {"outcome": "identity_unknown", "quiescent": False}
-    else:
-        wrapper_cleanup = {
-            "outcome": "identity_mismatch",
-            "quiescent": not CONFIG.SAFETY.process_group_alive(wrapper_pgid),
-        }
-    if wrapper_cleanup.get("quiescent"):
-        try:
-            refreshed_provider = ARTIFACTS.load_provider_process(run_dir, request)
-        except (OSError, ValueError, ARTIFACTS.ArtifactValidationError):
-            refreshed_provider = provider
-        if refreshed_provider["status"] in {"pending", "quiescent"}:
-            provider = refreshed_provider
-            provider_cleanup = {
-                "outcome": "wrapper_forwarded_cleanup",
-                "quiescent": True,
-            }
-        elif refreshed_provider["status"] in {"running", "cleanup_failed"}:
-            provider = refreshed_provider
-            if provider_cleanup.get("quiescent") is not False:
-                provider_cleanup = {
-                    "outcome": "provider_not_quiescent_after_wrapper_cleanup",
-                    "quiescent": False,
-                }
-    if (
-        request["workspace_mode"] == "isolated"
-        and wrapper_cleanup.get("quiescent")
-        and provider_cleanup.get("quiescent")
-    ):
-        # A killed wrapper may not have finished its own unmount; the idempotent
-        # receipt cleanup must succeed before the guard can be released.
-        try:
-            CONFIG.ISOLATION.cleanup_state(run_dir / "isolation-state.json")
-        except (OSError, ValueError, RuntimeError) as exc:
-            provider_cleanup = {
-                "outcome": f"isolated_workspace_cleanup_failed: {exc}",
-                "quiescent": False,
-            }
-    quiescent = bool(
-        provider_cleanup.get("quiescent")
-        and wrapper_cleanup.get("quiescent")
-        and (
-            provider["status"] == "pending"
-            or provider["status"] == "quiescent"
-        )
-    )
-    return {
-        "quiescent": quiescent,
-        "provider": provider_cleanup,
-        "wrapper": wrapper_cleanup,
-    }
-
-
-def process_identity_matches(process_info: dict[str, Any]) -> bool:
-    return CONFIG.SAFETY.process_identity_matches(process_info.get("process_identity"))
-
-
-def cancel(args: argparse.Namespace) -> int:
-    context = resolve_run_context(args)
-    with REGISTRY.run_operation_lock(context[2]):
-        return _cancel_locked(args, context)
-
-
-def cancellation_job_patch(run_dir: Path, result: dict[str, Any]) -> dict[str, Any]:
-    """Project persisted cancellation evidence without moving lifecycle operations."""
-    return {
-        **job_patch_from_run(run_dir, "cancelled", "cancelled"),
-        "pid": None,
-        "completed_at": result["completed_at"],
-        "cancel": {key: result[key] for key in (
-            "forced", "reason", "elapsed_seconds", "minimum_wait_seconds", "before_minimum_wait",
-        )},
-        "cancel_result": str(run_dir / "cancel-result.json"),
-    }
-
-
-def _cancel_locked(args: argparse.Namespace, context: tuple[Path, Path, Path]) -> int:
-    repo_root, run_root, run_dir = context
-    process_info = ARTIFACTS.load_json(run_dir / "peer-process.json")
-    request = require_run_request(run_dir)
-    try:
-        ARTIFACTS.validate_peer_process(process_info, request, run_dir)
-    except ARTIFACTS.ArtifactValidationError as exc:
-        raise SystemExit(f"invalid peer-process artifact in {run_dir}: {exc}") from exc
-    peer_repo_root = Path(process_info["repo_root"]).resolve()
-    cancel_result_path = run_dir / "cancel-result.json"
-    state = CONFIG.STATE
-
-    if cancel_result_path.exists():
-        existing = ARTIFACTS.load_json(cancel_result_path)
-        try:
-            ARTIFACTS.validate_cancel_result(existing, request, run_dir)
-        except ARTIFACTS.ArtifactValidationError as exc:
-            raise SystemExit(f"invalid immutable cancel result {cancel_result_path}: {exc}") from exc
-        if ARTIFACTS.preserved_artifact_hashes(run_dir) != existing["preserved_artifacts"]:
-            raise SystemExit(
-                "preserved run evidence changed after cancellation; refusing an idempotent guard transition"
-            )
-        guard_path, active_guard = REGISTRY.read_workspace_guard(peer_repo_root, request["run_id"])
-        released: str | None = None
-        if active_guard is not None:
-            REGISTRY.validate_guard_owner(active_guard, process_info)
-            wrapper_quiescence_proven = bool(
-                active_guard["phase"] == "ready_for_synthesis"
-                and active_guard["peer_identity"] == process_info["process_identity"]
-            )
-            try:
-                require_process_tree_quiescent(
-                    process_info,
-                    run_dir,
-                    request,
-                    wrapper_quiescence_proven=wrapper_quiescence_proven,
-                )
-            except ARTIFACTS.ArtifactValidationError as exc:
-                raise SystemExit(
-                    f"immutable cancellation exists but process-tree quiescence is unproven: {exc}"
-                ) from exc
-            released = str(REGISTRY.release_workspace_guard(peer_repo_root, request["run_id"], owner=process_info))
-        state.upsert_job(run_root, cancellation_job_patch(run_dir, existing))
-        output = {
-            "schema_version": CONFIG.ARTIFACT_SCHEMA_VERSION,
-            "run_id": request["run_id"],
-            "run_dir": str(run_dir),
-            "outcome": "already_cancelled",
-            "cancel_result": str(cancel_result_path),
-            "workspace_guard": str(guard_path),
-            "workspace_guard_released": released,
-        }
-        return emit_result((0, output))
-
-    _, active_guard = REGISTRY.require_workspace_guard_owner(peer_repo_root, request["run_id"], owner=process_info)
-    if active_guard is None or active_guard["run_id"] != request["run_id"]:
-        raise SystemExit("active Agent Collab workspace guard disappeared during cancellation")
-    wrapper_quiescence_proven = bool(
-        active_guard["phase"] == "ready_for_synthesis"
-        and active_guard["peer_identity"] == process_info["process_identity"]
-    )
-    pid = int(process_info["pid"])
-    force_before_min_wait = bool(getattr(args, "force_before_min_wait", False))
-    reason = str(getattr(args, "reason", "") or "").strip()
-    if force_before_min_wait and not reason:
-        raise SystemExit("--reason is required with --force-before-min-wait")
-
-    identity_matches = process_identity_matches(process_info)
-    peer_alive = process_alive(pid) if identity_matches else False
-    elapsed_seconds = peer_elapsed_seconds(process_info, run_dir)
-    before_minimum_wait = (
-        peer_alive
-        and elapsed_seconds is not None
-        and elapsed_seconds < CONFIG.MIN_PEER_WAIT_SECONDS
-    )
-
-    try:
-        require_process_tree_quiescent(
-            process_info,
-            run_dir,
-            request,
-            wrapper_quiescence_proven=wrapper_quiescence_proven,
-        )
-    except ARTIFACTS.ArtifactValidationError:
-        pass
-    else:
-        peer_runtime = CONFIG.PEER
-        if ARTIFACTS.valid_terminal_peer_report(peer_runtime, run_dir, request):
-            output = {
-                "schema_version": CONFIG.ARTIFACT_SCHEMA_VERSION,
-                "run_id": request["run_id"],
-                "run_dir": str(run_dir),
-                "pid": pid,
-                "outcome": "already_terminal",
-                "message": (
-                    "A valid terminal peer report already exists. The workspace guard was retained; "
-                    "resume advance and synthesize so the evidence is not converted into a cancellation."
-                ),
-            }
-            return emit_result((1, output))
-
-    if before_minimum_wait and not force_before_min_wait:
-        output = {
-            "run_id": request["run_id"],
-            "run_dir": str(run_dir),
-            "pid": pid,
-            "outcome": "refused",
-            "reason": "minimum_wait_not_elapsed",
-            "elapsed_seconds": ARTIFACTS.json_number(elapsed_seconds),
-            "minimum_wait_seconds": CONFIG.MIN_PEER_WAIT_SECONDS,
-            "minimum_wait_remaining_seconds": ARTIFACTS.json_number(CONFIG.MIN_PEER_WAIT_SECONDS - elapsed_seconds),
-            "message": "Peer is still inside the minimum wait window; use finish/status and keep waiting. Empty peer-report.json or stderr is normal while the peer is alive.",
-        }
-        return emit_result((1, output))
-
-    cleanup = terminate_tracked_process_tree(process_info, run_dir, request)
-    if cleanup["quiescent"] is not True:
-        raise SystemExit(
-            "refusing to release the workspace guard because the tracked process tree is not quiescent:\n"
-            + json.dumps(cleanup, ensure_ascii=False, indent=2, sort_keys=True)
-        )
-    cancel_reason = reason or ("minimum_wait_elapsed" if peer_alive else "peer_not_running")
-    cancel_details = {
-        "forced": force_before_min_wait,
-        "reason": cancel_reason,
-        "elapsed_seconds": ARTIFACTS.json_number(elapsed_seconds),
-        "minimum_wait_seconds": CONFIG.MIN_PEER_WAIT_SECONDS,
-        "before_minimum_wait": before_minimum_wait,
-    }
-    preserved = ARTIFACTS.preserved_artifact_hashes(run_dir)
-    try:
-        workspace_mutation = record_cancel_workspace_mutation(peer_repo_root, run_dir, request)
-    except (OSError, ValueError, ARTIFACTS.ArtifactValidationError) as exc:
-        raise SystemExit(
-            f"refusing to release the workspace guard because mutation verification failed: {exc}"
-        ) from exc
-    completed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    cancel_result = {
-        "schema_version": CONFIG.ARTIFACT_SCHEMA_VERSION,
-        "run_id": request["run_id"],
-        "status": "cancelled",
-        "outcome": "cancelled_quiescent",
-        **cancel_details,
-        "peer_was_alive": peer_alive,
-        "process_cleanup": cleanup,
-        "preserved_artifacts": preserved,
-        "workspace_mutation": (
-            str(run_dir / "cancel-workspace-mutation.json")
-            if workspace_mutation is not None
-            else None
-        ),
-        "workspace_mutation_sha256": ARTIFACTS.workspace_mutation_sha256(workspace_mutation),
-        "completed_at": completed_at,
-    }
-    try:
-        ARTIFACTS.validate_cancel_result(cancel_result, request, run_dir)
-    except ARTIFACTS.ArtifactValidationError as exc:
-        raise SystemExit(f"refusing to persist an invalid cancel result: {exc}") from exc
-    if not write_json_once(cancel_result_path, cancel_result):
-        existing = ARTIFACTS.load_json(cancel_result_path)
-        try:
-            ARTIFACTS.validate_cancel_result(existing, request, run_dir)
-        except ARTIFACTS.ArtifactValidationError as exc:
-            raise SystemExit(f"concurrent cancellation wrote an invalid result: {exc}") from exc
-        if existing != cancel_result:
-            raise SystemExit(
-                "a concurrent cancellation committed different immutable evidence; manual inspection is required"
-            )
-    state.upsert_job(run_root, cancellation_job_patch(run_dir, cancel_result))
-    guard_path = REGISTRY.release_workspace_guard(peer_repo_root, request["run_id"], owner=process_info)
-    output = {
-        "schema_version": CONFIG.ARTIFACT_SCHEMA_VERSION,
-        "run_id": request["run_id"],
-        "run_dir": str(run_dir),
-        "pid": pid,
-        "outcome": "cancelled_quiescent",
-        "forced": force_before_min_wait,
-        "reason": cancel_reason,
-        "elapsed_seconds": ARTIFACTS.json_number(elapsed_seconds),
-        "minimum_wait_seconds": CONFIG.MIN_PEER_WAIT_SECONDS,
-        "cancel_result": str(cancel_result_path),
-        "workspace_mutation": cancel_result["workspace_mutation"],
-        "workspace_guard_released": str(guard_path),
-    }
-    return emit_result((0, output))
-
-
-def reset_settings(args: argparse.Namespace, repo_root: Path) -> int:
-    scopes = ["local", "global"] if args.reset == "all" else [args.reset]
-    removed: list[str] = []
-    missing: list[str] = []
-    for scope in scopes:
-        path = CONFIG.settings_path(scope, repo_root)
-        if path.exists():
-            removed.append(str(path))
-            if not args.dry_run:
-                path.unlink()
-        else:
-            missing.append(str(path))
-    output = {
-        "action": "reset",
-        "dry_run": bool(args.dry_run),
-        "reset": args.reset,
-        "removed": removed,
-        "missing": missing,
-    }
-    return emit_result((0, output))
-
-
-def setup(args: argparse.Namespace) -> int:
-    repo_root = CONFIG.canonical_repo_root(args.repo_root or CONFIG.default_repo_root())
-    if args.reset:
-        return reset_settings(args, repo_root)
-
-    resolved = CONFIG.resolve_settings(repo_root, env={})
-    CONFIG.require_valid_settings(resolved)
-    settings = dict(resolved["settings"])
-    updates = CONFIG.settings_from_args(args)
-    settings.update(updates)
-    should_clear_history = bool(getattr(args, "clear_history", False))
-    if not args.no_input:
-        try:
-            settings = CONFIG.interactive_setup(settings)
-            should_clear_history = should_clear_history or CONFIG.choose_bool("Clear old run history now", False)
-        except EOFError:
-            print("setup requires interactive stdin; rerun with --no-input for non-interactive use", file=sys.stderr)
-            return 2
-    if should_clear_history and args.no_input and not args.dry_run and not getattr(args, "yes", False):
-        print("setup --clear-history requires --yes for deletion; rerun with --dry-run to preview", file=sys.stderr)
-        return 2
-    settings = CONFIG.normalize_settings(settings, "setup")
-    path = CONFIG.settings_path(args.scope, repo_root)
-    if not args.dry_run:
-        CONFIG.write_settings_file(path, settings)
-    history_cleanup = None
-    if should_clear_history:
-        cleanup_args = argparse.Namespace(
-            repo_root=repo_root,
-            run_root=CONFIG.default_run_root(repo_root),
-            run=None,
-            retain=settings["history_retained_runs"],
-            all=False,
-            dry_run=args.dry_run,
-            yes=getattr(args, "yes", False),
-        )
-        cleanup_status, history_cleanup = build_clear_history_output(cleanup_args, int(settings["history_retained_runs"]))
-        if cleanup_status != 0:
-            return cleanup_status
-    output = {
-        "action": "setup",
-        "dry_run": bool(args.dry_run),
-        "scope": args.scope,
-        "settings_path": str(path),
-        "settings": settings,
-        "precedence": "environment > local > global > built-in",
-    }
-    if history_cleanup is not None:
-        output["history_cleanup"] = history_cleanup
-    if args.print_env:
-        output["env"] = CONFIG.settings_to_env(settings)
-    return emit_result((0, output))
-
-
-def run_command_capture(command: list[str], timeout: float = 20) -> dict[str, Any]:
-    try:
-        completed = subprocess.run(
-            CONFIG.SAFETY.native_command(command),
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout,
-            check=False,
-        )
-        return {
-            "available": True,
-            "returncode": completed.returncode,
-            "stdout": completed.stdout,
-            "stderr": completed.stderr,
-        }
-    except FileNotFoundError as exc:
-        return {"available": False, "returncode": None, "stdout": "", "stderr": str(exc)}
-    except subprocess.TimeoutExpired as exc:
-        return {
-            "available": True,
-            "returncode": None,
-            "stdout": exc.stdout or "",
-            "stderr": str(exc),
-            "timeout": True,
-        }
-
-
-def parse_json_command(command: list[str], timeout: float = 20) -> dict[str, Any]:
-    result = run_command_capture(command, timeout)
-    data: Any = None
-    error: str | None = None
-    if result["stdout"]:
-        try:
-            data = CONFIG.STRICT_JSON.loads(result["stdout"], max_bytes=16 * 1024 * 1024)
-        except ValueError as exc:
-            error = str(exc)
-    return {**result, "json": data, "json_error": error}
-
-
-def summarize_claude_auth(report: dict[str, Any] | None) -> dict[str, Any]:
-    if not isinstance(report, dict):
-        return {}
-    return {
-        "logged_in": report.get("loggedIn"),
-        "auth_method": report.get("authMethod"),
-        "api_provider": report.get("apiProvider"),
-        "subscription_type": report.get("subscriptionType"),
-    }
-
-
-def doctor(args: argparse.Namespace) -> int:
-    requested_root = (args.repo_root or Path.cwd()).resolve()
-    root_error = None
-    try:
-        repo_root = CONFIG.canonical_repo_root(requested_root)
-    except SystemExit as exc:
-        repo_root, root_error = requested_root, str(exc)
-    run_root = (args.run_root or CONFIG.default_run_root(repo_root)).resolve()
-    peer_runtime = CONFIG.PEER
-    resolved = CONFIG.resolve_settings(repo_root)
-    settings = resolved["settings"]
-    cli_paths: dict[str, str | None] = {}
-    cli_errors: dict[str, str] = {}
-    for name in ("codex", "claude"):
-        try:
-            cli_paths[name] = CONFIG.SAFETY.resolve_cli(name)
-        except FileNotFoundError as exc:
-            cli_paths[name] = None
-            cli_errors[name] = str(exc)
-    codex_path = cli_paths["codex"]
-    claude_path = cli_paths["claude"]
-    codex_auth = run_command_capture(["codex", "login", "status"], timeout=10) if codex_path else {}
-    claude_auth = parse_json_command(["claude", "auth", "status", "--json"], timeout=10) if claude_path else {}
-    claude_report = claude_auth.get("json") if isinstance(claude_auth, dict) else None
-    settings_errors = CONFIG.settings_error_messages(resolved)
-    state_runtime = CONFIG.STATE
-    try:
-        state_data = state_runtime.load_state(run_root)
-    except (OSError, ValueError) as exc:
-        state_check = {
-            "ok": False,
-            "value": str(run_root / "state.json"),
-            "error": str(exc),
-            "recovery": (
-                "Archive this file for evidence and remove or rename it, or choose a fresh "
-                "--run-root; legacy state is not migrated or coerced."
-            ),
-        }
-    else:
-        state_check = {
-            "ok": True,
-            "value": str(run_root / "state.json"),
-            "jobs": len(state_data["jobs"]),
-        }
-
-    schema_errors: list[str] = []
-    schema_paths = sorted((CONFIG.resource_root() / "schemas").glob("*.json"))
-    try:
-        import jsonschema
-    except ImportError:
-        jsonschema = None
-    for schema_path in schema_paths:
-        try:
-            schema_data = CONFIG.STRICT_JSON.load(schema_path, max_bytes=4 * 1024 * 1024)
-            if not isinstance(schema_data, dict):
-                raise ValueError("schema root must be an object")
-            if jsonschema is not None:
-                jsonschema.Draft202012Validator.check_schema(schema_data)
-        except Exception as exc:
-            schema_errors.append(f"{schema_path.name}: {exc}")
-
-    def cli_version_check(name: str, path: str | None) -> dict[str, Any]:
-        minimum = CONFIG.MIN_CLI_VERSIONS[name]
-        result = run_command_capture([name, "--version"], timeout=10) if path else {}
-        raw = f"{result.get('stdout', '')}\n{result.get('stderr', '')}".strip()
-        parsed = CONFIG.parse_cli_version(raw)
-        check = {
-            "ok": path is not None and parsed is not None and parsed >= minimum,
-            "value": {
-                "path": path,
-                "version": ".".join(str(part) for part in parsed) if parsed else None,
-                "minimum": ".".join(str(part) for part in minimum),
-            },
-        }
-        if name in cli_errors:
-            check["error"] = cli_errors[name]
-        return check
-
-    doctor_workspace_mode = "direct" if settings["safe_mode"] else settings["workspace_mode"]
-    isolation_check = (
-        CONFIG.ISOLATION.preflight(repo_root)
-        if doctor_workspace_mode == "isolated" else
-        {"status": "not_required", "backend": None, "details": "direct workspace mode"}
-    )
-    namespace_check = {"ok": True, "value": "not_required"}
-    if sys.platform.startswith("linux"):
-        try:
-            namespace_check["value"] = CONFIG.SAFETY.pid_namespace()
-        except OSError as exc:
-            namespace_check = {"ok": False, "value": "/proc/self/ns/pid", "error": str(exc)}
-
-    checks = {
-        "repo_root": {"ok": root_error is None, "value": str(repo_root), "error": root_error},
-        "run_root": {"ok": run_root.exists() or path_is_creatable(run_root), "value": str(run_root)},
-        "python": {"ok": sys.version_info >= (3, 11), "value": sys.version.split()[0]},
-        "pid_namespace": namespace_check,
-        "platform": {
-            "ok": CONFIG.is_supported_platform(),
-            "value": {"os_name": os.name, "platform": sys.platform, "supported": ["Linux", "macOS", "Windows"]},
-        },
-        # Git is needed only inside a Git repository.
-        "git": {
-            "ok": shutil.which("git") is not None or not CONFIG.SNAPSHOT.has_git_metadata(repo_root),
-            "value": shutil.which("git"),
-        },
-        "workspace_isolation": {
-            "ok": isolation_check["status"] in {"available", "not_required"},
-            "value": {"mode": doctor_workspace_mode, **isolation_check},
-        },
-        "claude_cli": cli_version_check("claude", claude_path),
-        "codex_cli": cli_version_check("codex", codex_path),
-        "settings": {
-            "ok": not settings_errors,
-            "value": {"local": resolved["layers"]["local"]["path"], "global": resolved["layers"]["global"]["path"]},
-            "errors": settings_errors,
-        },
-        "schemas": {
-            "ok": bool(schema_paths) and not schema_errors,
-            "value": [str(path) for path in schema_paths],
-            "errors": schema_errors,
-            "meta_validator": "Draft202012Validator" if jsonschema is not None else "strict JSON only",
-        },
-        "timeout_floor_seconds": {"ok": peer_runtime.MIN_AGENT_TIMEOUT_SECONDS == 60, "value": peer_runtime.MIN_AGENT_TIMEOUT_SECONDS},
-        "state_file": state_check,
-        "effective_configuration": {
-            "ok": not settings_errors,
-            "value": {
-                "codex": {"model": settings["codex_model"], "effort": settings["codex_effort"]},
-                "claude": {"model": settings["claude_model"], "effort": settings["claude_effort"]},
-                "online_research": settings["online_research"],
-                "workspace_mode": doctor_workspace_mode,
-                "uses_built_in_model_effort_defaults": (
-                    all(settings[key] == CONFIG.SETTING_DEFAULTS[key] for key in (
-                        "codex_model", "codex_effort", "claude_model", "claude_effort"
-                    ))
-                ),
-            },
-        },
-        "codex_auth": {
-            "ok": bool(codex_path) and codex_auth.get("returncode") == 0,
-            "value": str(codex_auth.get("stdout") or codex_auth.get("stderr") or "").strip(),
-            "returncode": codex_auth.get("returncode") if isinstance(codex_auth, dict) else None,
-        },
-        "claude_auth": {
-            "ok": bool(claude_path) and isinstance(claude_report, dict) and claude_report.get("loggedIn") is True,
-            "value": summarize_claude_auth(claude_report),
-            "returncode": claude_auth.get("returncode") if isinstance(claude_auth, dict) else None,
-        },
-        "current_contract": {
-            "ok": True,
-            "value": {
-                "codex": ["exec --strict-config", '-c approval_policy="never"', "--output-schema", "--output-last-message"],
-                "claude": [
-                    "--permission-mode",
-                    "--tools",
-                    "--disallowedTools",
-                    "--json-schema",
-                    "--output-format json",
-                    "optional per-run --max-turns",
-                ],
-            },
-        },
-    }
-    output = {
-        "ok": all(item["ok"] for item in checks.values()),
-        "checks": checks,
-        "settings": settings,
-        "setting_sources": resolved["sources"],
-        "precedence": "environment > local > global > built-in",
-    }
-    return emit_result((0 if output["ok"] else 1, output))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2615,12 +663,12 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument("--claude-effort")
     setup_parser.add_argument("--claude-tools")
     setup_parser.add_argument("--repo-root", type=Path)
-    setup_parser.set_defaults(func=setup)
+    setup_parser.set_defaults(func=ADMIN.setup)
 
     for name, handler, help_text in (
-        ("advance", advance, "Resume a run; return the next input and its captured review evidence."),
-        ("finish", finish, "Validate peer output and write synthesis support artifacts."),
-        ("complete", complete, "Close a synthesized run and release the run guard."),
+        ("advance", LIFECYCLE.advance, "Resume a run; return the next input and its captured review evidence."),
+        ("finish", LIFECYCLE.finish, "Validate peer output and write synthesis support artifacts."),
+        ("complete", LIFECYCLE.complete, "Close a synthesized run and release the run guard."),
     ):
         command = sub.add_parser(name, help=help_text)
         command.add_argument("run", help="Run ID, unique prefix, or run directory.")
@@ -2662,7 +710,7 @@ def build_parser() -> argparse.ArgumentParser:
     clear_history_parser.add_argument("--yes", action="store_true", help="Confirm deletion without prompting.")
     clear_history_parser.add_argument("--run-root", type=Path)
     clear_history_parser.add_argument("--repo-root", type=Path)
-    clear_history_parser.set_defaults(func=clear_history)
+    clear_history_parser.set_defaults(func=ADMIN.clear_history)
 
     cancel_parser = sub.add_parser("cancel", help="Cancel an active peer run.")
     cancel_parser.add_argument("run", help="Run ID, unique prefix, or run directory.")
@@ -2674,7 +722,7 @@ def build_parser() -> argparse.ArgumentParser:
     cancel_parser.add_argument("--reason", help="Required with --force-before-min-wait; use USER_REQUESTED_STOP for user stop requests.")
     cancel_parser.add_argument("--run-root", type=Path)
     cancel_parser.add_argument("--repo-root", type=Path)
-    cancel_parser.set_defaults(func=cancel)
+    cancel_parser.set_defaults(func=LIFECYCLE.cancel)
 
     recover_parser = sub.add_parser("recover", help="Recover one abandoned starting registry entry without deleting its artifacts.")
     recover_parser.add_argument("run", help="Exact active run ID.")
@@ -2684,8 +732,9 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser = sub.add_parser("doctor", help="Check Agent Collab local runtime prerequisites.")
     doctor_parser.add_argument("--run-root", type=Path)
     doctor_parser.add_argument("--repo-root", type=Path)
-    doctor_parser.set_defaults(func=doctor)
+    doctor_parser.set_defaults(func=ADMIN.doctor)
     return parser
+
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2696,6 +745,7 @@ def main(argv: list[str] | None = None) -> int:
         return args.func(args)
     except (OSError, ValueError, RuntimeError) as exc:
         parser.exit(2, f"Agent Collab: {exc}\n")
+
 
 
 if __name__ == "__main__":

@@ -224,7 +224,7 @@ class CrossPlatformIdentityTests(TestCase):
             run_dir = Path(tmp) / "run"
             run_dir.mkdir()
             request = fixtures.request()
-            host.write_json(run_dir / "host-request.json", request)
+            host.CONFIG.STRICT_JSON.write(run_dir / "host-request.json", request)
             data = fixtures.valid_peer_process(run_dir, Path(tmp), Path(tmp) / "guard.json")
             host.ARTIFACTS.validate_peer_process(data, request, run_dir)
             kind = next(iter(host.CONFIG.SAFETY.PROCESS_IDENTITY_KINDS - {host.CONFIG.SAFETY.local_identity_kind()}))
@@ -251,9 +251,9 @@ class CrossPlatformIdentityTests(TestCase):
                 mock.patch.object(host.CONFIG.SAFETY, "process_group_alive", return_value=False),
                 mock.patch.object(host.CONFIG.SAFETY, "terminate_process_group") as terminate,
             ):
-                cleanup = host.terminate_tracked_process_tree(process_info, run_dir, request)
+                cleanup = host.PROCESS_TREE.terminate_tracked_process_tree(process_info, run_dir, request)
                 with self.assertRaisesRegex(host.ARTIFACTS.ArtifactValidationError, "cannot be verified"):
-                    host.require_process_tree_quiescent(process_info, run_dir, request)
+                    host.PROCESS_TREE.require_process_tree_quiescent(process_info, run_dir, request)
             terminate.assert_not_called()
             self.assertFalse(cleanup["quiescent"])
 

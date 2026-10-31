@@ -33,7 +33,7 @@ class AuditRegressionTests(TestCase):
                 draft = case.author(ready)
                 payload = case.host.ARTIFACTS.load_json(draft)
                 payload['verdict'] = value
-                case.host.write_json(draft, payload)
+                case.host.CONFIG.STRICT_JSON.write(draft, payload)
                 with self.assertRaisesRegex(ValueError, 'verdict must be one of'):
                     case.invoke('complete', '--synthesis', draft)
                 self.assertTrue(case.guard.exists())
@@ -41,10 +41,10 @@ class AuditRegressionTests(TestCase):
 
     def test_request_edits_cannot_change_the_admitted_helper_policy(self):
         case = self.workflow()
-        request = case.host.require_run_request(case.run)
+        request = case.host.RUNS.require_run_request(case.run)
         request['max_local_subagents'] = 9
         request['helper_enforcement']['limit'] = 9
-        case.host.write_json(case.run / 'host-request.json', request)
+        case.host.CONFIG.STRICT_JSON.write(case.run / 'host-request.json', request)
         with self.assertRaisesRegex(ValueError, 'launch-time request digest'):
             case.finish()
         self.assertTrue(case.guard.exists())
@@ -59,7 +59,7 @@ class AuditRegressionTests(TestCase):
             fixtures.admit_host_input(case.host, case.run, 'host-first-pass.json', fixtures.valid_host_first_pass())
         (case.run / 'host-inputs.json').write_bytes(receipt)
         case.finish()
-        case.host.write_json(case.run / 'host-synthesis.json', fixtures.valid_host_synthesis(run_dir=case.run))
+        case.host.CONFIG.STRICT_JSON.write(case.run / 'host-synthesis.json', fixtures.valid_host_synthesis(run_dir=case.run))
         with self.assertRaisesRegex(SystemExit, 'requires --synthesis'):
             case.invoke('complete')
         self.assertTrue(case.guard.exists())
@@ -73,7 +73,7 @@ class AuditRegressionTests(TestCase):
         with self.assertRaisesRegex(ValueError, 'first pass is immutable'):
             fixtures.admit_host_input(case.host, case.run, 'host-first-pass.json', changed)
         self.assertEqual((case.run / 'host-first-pass.json').read_bytes(), before)
-        case.host.write_json(case.run / 'host-first-pass.json', changed)
+        case.host.CONFIG.STRICT_JSON.write(case.run / 'host-first-pass.json', changed)
         with self.assertRaisesRegex(ValueError, 'explicit CLI admission'):
             case.finish()
         with self.assertRaisesRegex(ValueError, 'explicit CLI admission'):
@@ -126,7 +126,7 @@ class AuditRegressionTests(TestCase):
             args = host.build_parser().parse_args(['doctor', '--repo-root', tmp, '--run-root', str(root/'runs')])
             output = io.StringIO()
             with mock.patch.object(host.shutil, 'which', return_value=None), redirect_stdout(output):
-                self.assertEqual(host.doctor(args), 1)
+                self.assertEqual(host.ADMIN.doctor(args), 1)
             report = json.loads(output.getvalue())
             self.assertFalse(report['checks']['repo_root']['ok'])
             self.assertIn('cannot resolve Git', report['checks']['repo_root']['error'])
@@ -194,7 +194,7 @@ class AuditRegressionTests(TestCase):
             for name in ('review', 'review-next'):
                 run = local / name
                 run.mkdir(parents=True)
-                host.write_json(run / 'host-request.json', fixtures.request(run_id=name))
+                host.CONFIG.STRICT_JSON.write(run / 'host-request.json', fixtures.request(run_id=name))
                 host.CONFIG.STATE.upsert_job(local, {
                     key: value for key, value in fixtures.valid_state_job(
                         name, run_dir=str(run), repo_root=str(root)).items()
@@ -202,14 +202,14 @@ class AuditRegressionTests(TestCase):
                 })
             exact = other / 'review'
             exact.mkdir(parents=True)
-            host.write_json(exact / 'host-request.json', fixtures.request(run_id='review'))
+            host.CONFIG.STRICT_JSON.write(exact / 'host-request.json', fixtures.request(run_id='review'))
             with mock.patch.object(host.REGISTRY, 'workspace_guard_path', return_value=root / 'guard.json'):
                 host.REGISTRY.acquire_workspace_guard(root, 'review', 'codex', exact)
-                self.assertEqual(host.resolve_run_reference(root, 'review', local), exact)
+                self.assertEqual(host.RUNS.resolve_run_reference(root, 'review', local), exact)
                 (local / 'review' / 'host-request.json').unlink()
                 (local / 'review').rmdir()
                 host.CONFIG.STATE.remove_job(local, 'review')
-                self.assertEqual(host.resolve_run_reference(root, 'review', local), exact)
+                self.assertEqual(host.RUNS.resolve_run_reference(root, 'review', local), exact)
 
     def test_snapshot_filters_are_disabled_in_nested_submodules(self):
         snapshot = fixtures.load_snapshot()
@@ -320,7 +320,7 @@ class AuditRegressionTests(TestCase):
 
     def test_failed_normalization_keeps_revision_and_authored_draft(self):
         case = self.workflow()
-        case.host.write_json(case.run / 'peer-report.json', {'invalid': 'report'})
+        case.host.CONFIG.STRICT_JSON.write(case.run / 'peer-report.json', {'invalid': 'report'})
         first = case.finish()
         draft = case.author(first)
         before = (case.run / 'peer-normalization.json').read_bytes()
@@ -336,10 +336,10 @@ class AuditRegressionTests(TestCase):
         peer = fixtures.load_peer()
         for kind in ('invalid_json', 'noncanonical_output', 'schema_validation_failed', 'peer_report_mismatch'):
             with self.subTest(kind=kind):
-                case.host.write_json(case.run / 'peer-report.json', peer.failure(kind, 'provider failure', fixtures.request()))
+                case.host.CONFIG.STRICT_JSON.write(case.run / 'peer-report.json', peer.failure(kind, 'provider failure', fixtures.request()))
                 metadata = {'schema_version': '2.0', 'source': 'none', 'artifact_source': 'peer_raw',
                             'input_bytes': 42, 'warnings': [], 'validation_status': kind, 'error': 'provider failure'}
-                case.host.write_json(case.run / 'peer-normalization.json', metadata)
+                case.host.CONFIG.STRICT_JSON.write(case.run / 'peer-normalization.json', metadata)
                 self.assertEqual(case.finish()['validation_status'], kind)
                 self.assertEqual(case.host.ARTIFACTS.load_json(case.run / 'peer-normalization.json'), metadata)
 
@@ -357,12 +357,12 @@ class AuditRegressionTests(TestCase):
             self.assertEqual(case.host.CONFIG.SAFETY.process_identity_state(identity), 'dead_or_replaced')
             info = case.host.ARTIFACTS.load_json(case.run / 'peer-process.json')
             info.update(pid=child.pid, pgid=child.pid, process_identity=identity)
-            case.host.write_json(case.run / 'peer-process.json', info)
+            case.host.CONFIG.STRICT_JSON.write(case.run / 'peer-process.json', info)
             case.host.REGISTRY.update_workspace_guard(case.root, info['run_id'], owner=info,
                                                        phase='peer_running', peer_identity=identity)
             # Use the real wait function, not the fixture's report-ready stub.
             real_host = fixtures.load_host()
-            self.assertEqual(real_host.wait_for_peer_report(case.run / 'peer-report.json', info, 0.1), 'report_ready')
+            self.assertEqual(real_host.LIFECYCLE.wait_for_peer_report(case.run / 'peer-report.json', info, 0.1), 'report_ready')
             before = case.host.ARTIFACTS.load_json(case.run / 'peer-report.json')
             self.assertEqual(case.finish()['peer_status'], 'ok')
             self.assertEqual(case.host.ARTIFACTS.load_json(case.run / 'peer-report.json'), before)

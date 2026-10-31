@@ -83,20 +83,20 @@ class RegistryOwnershipTests(TestCase):
             run = root / 'runs' / fixtures.request()['run_id']
             guard = root / 'guard.json'
             with (mock.patch.object(host.REGISTRY, 'workspace_guard_path', return_value=guard),
-                  mock.patch.object(host, 'wait_for_peer_report', return_value='report_ready'),
-                  mock.patch.object(host, 'record_host_workspace_mutation', return_value=None),
+                  mock.patch.object(host.LIFECYCLE, 'wait_for_peer_report', return_value='report_ready'),
+                  mock.patch.object(host.LIFECYCLE, 'record_host_workspace_mutation', return_value=None),
                   mock.patch.object(host.CONFIG.SAFETY, 'process_group_alive', return_value=False),
                   redirect_stdout(io.StringIO())):
                 lifecycle.LifecycleAuditTests().prepare_run(host, root, run, guard)
                 common = [str(run), '--repo-root', str(root)]
-                host.finish(host.build_parser().parse_args(['finish', *common]))
+                host.LIFECYCLE.finish(host.build_parser().parse_args(['finish', *common]))
                 draft = fixtures.author_synthesis_input(host, run)
                 args = host.build_parser().parse_args(['complete', *common, '--synthesis', str(draft)])
-                host.complete(args)
+                host.LIFECYCLE.complete(args)
                 host.REGISTRY.acquire_workspace_guard(root, run.name, 'claude', root / 'elsewhere' / run.name)
                 before = guard.read_bytes()
                 with self.assertRaisesRegex(SystemExit, 'owner mismatch'):
-                    host.complete(args)
+                    host.LIFECYCLE.complete(args)
                 self.assertEqual(guard.read_bytes(), before)
 
     def test_old_cancellation_cannot_release_a_reused_id(self):
@@ -106,19 +106,19 @@ class RegistryOwnershipTests(TestCase):
             run = root / 'runs' / fixtures.request()['run_id']
             guard = root / 'guard.json'
             with (mock.patch.object(host.REGISTRY, 'workspace_guard_path', return_value=guard),
-                  mock.patch.object(host, 'process_alive', return_value=False),
+                  mock.patch.object(host.PROCESS_TREE, 'process_alive', return_value=False),
                   mock.patch.object(host.CONFIG.SAFETY, 'process_group_alive', return_value=False),
-                  mock.patch.object(host, 'record_cancel_workspace_mutation', return_value=None),
+                  mock.patch.object(host.LIFECYCLE, 'record_cancel_workspace_mutation', return_value=None),
                   redirect_stdout(io.StringIO())):
                 lifecycle.LifecycleAuditTests().prepare_run(host, root, run, guard)
                 (run / 'peer-report.json').write_text('')
                 args = host.build_parser().parse_args(['cancel', str(run), '--repo-root', str(root)])
-                host.cancel(args)
+                host.LIFECYCLE.cancel(args)
                 self.assertFalse(guard.exists())
                 host.REGISTRY.acquire_workspace_guard(root, run.name, 'codex', root / 'other' / run.name)
                 before = guard.read_bytes()
                 with self.assertRaisesRegex(SystemExit, 'owner mismatch'):
-                    host.cancel(args)
+                    host.LIFECYCLE.cancel(args)
                 self.assertEqual(guard.read_bytes(), before)
 
     def test_capacity_is_reserved_before_admission(self):
@@ -152,7 +152,7 @@ class RegistryOwnershipTests(TestCase):
                 for field in ('host', 'phase'):
                     value = json.loads(json.dumps(original))
                     value['runs']['named-entry'][field] = []
-                    host.write_json(path, value)
+                    host.CONFIG.STRICT_JSON.write(path, value)
                     before = path.read_bytes()
                     with self.assertRaisesRegex(SystemExit, 'named-entry'):
                         host.REGISTRY.read_workspace_guards(root)
@@ -222,13 +222,13 @@ class CompactWorkflowTests(TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.host = fixtures.load_host()
-        self.capture_mutation = self.host.record_host_workspace_mutation
+        self.capture_mutation = self.host.LIFECYCLE.record_host_workspace_mutation
         self.run = self.root / 'runs' / fixtures.request()['run_id']
         self.guard = self.root / 'guard.json'
         for patch in (
             mock.patch.object(self.host.REGISTRY, 'workspace_guard_path', return_value=self.guard),
-            mock.patch.object(self.host, 'wait_for_peer_report', return_value='report_ready'),
-            mock.patch.object(self.host, 'record_host_workspace_mutation', return_value=None),
+            mock.patch.object(self.host.LIFECYCLE, 'wait_for_peer_report', return_value='report_ready'),
+            mock.patch.object(self.host.LIFECYCLE, 'record_host_workspace_mutation', return_value=None),
             mock.patch.object(self.host.CONFIG.SAFETY, 'process_group_alive', return_value=False),
         ):
             patch.start()
@@ -239,7 +239,7 @@ class CompactWorkflowTests(TestCase):
         output = io.StringIO()
         args = self.host.build_parser().parse_args([command, str(self.run), '--repo-root', str(self.root), *map(str, options)])
         with redirect_stdout(output):
-            getattr(self.host, command)(args)
+            args.func(args)
         return output.getvalue()
 
     def finish(self, *options):
@@ -248,7 +248,7 @@ class CompactWorkflowTests(TestCase):
     def author(self, result):
         path = Path(result['synthesis_input'])
         payload = {'summary':'Reviewed the captured evidence.', 'verdict':'pass', 'claims':[], 'unresolved_risks':[]}
-        self.host.write_json(path, payload)
+        self.host.CONFIG.STRICT_JSON.write(path, payload)
         return path
 
     def test_missing_peer_report_keeps_summary_and_diagnostic_distinct(self):
@@ -287,7 +287,7 @@ class CompactWorkflowTests(TestCase):
         original = authored.read_bytes()
         report = self.host.ARTIFACTS.load_json(self.run / 'peer-report.json')
         report['summary'] = 'New evidence.'
-        self.host.write_json(self.run / 'peer-report.json', report)
+        self.host.CONFIG.STRICT_JSON.write(self.run / 'peer-report.json', report)
         for command, flags in [('result', ('--format','markdown','--review',previous['review_dir'])),
                                ('complete', ('--synthesis', authored))]:
             with self.assertRaisesRegex(ValueError, 'stale review'):
@@ -306,11 +306,11 @@ class CompactWorkflowTests(TestCase):
         authored = self.author(result)
         changed = self.root / 'workspace.txt'
         changed.write_text('before')
-        self.host.run_snapshot(self.root, self.run / 'before.snapshot', ignored_paths=[self.run])
+        self.host.LIFECYCLE.run_snapshot(self.root, self.run / 'before.snapshot', ignored_paths=[self.run])
         changed.write_text('after')
         mutation = self.capture_mutation(self.root, self.run, fixtures.request())
         self.assertIsNotNone(mutation)
-        with mock.patch.object(self.host, 'record_host_workspace_mutation', return_value=mutation):
+        with mock.patch.object(self.host.LIFECYCLE, 'record_host_workspace_mutation', return_value=mutation):
             with self.assertRaisesRegex(SystemExit, 'mutation evidence changed'):
                 self.invoke('complete', '--synthesis', authored)
             self.assertFalse((self.run / 'host-synthesis.json').exists())
@@ -327,7 +327,7 @@ class CompactWorkflowTests(TestCase):
         receipt = authored.parent / 'context.json'
         data = self.host.ARTIFACTS.load_json(receipt)
         data['owner_token'] = '0' * 32
-        self.host.write_json(receipt, data)
+        self.host.CONFIG.STRICT_JSON.write(receipt, data)
         with self.assertRaisesRegex(ValueError, 'receipt was modified'):
             self.invoke('complete', '--synthesis', authored)
         self.assertTrue(self.guard.exists())

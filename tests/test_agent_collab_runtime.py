@@ -82,7 +82,7 @@ def process_state(pid):
 
 def load_module(path, name):
     if path.name == "host.py":
-        for dependency in ("host_config", "artifacts", "registry"):
+        for dependency in ("host_config", "artifacts", "registry", "host_admin", "runs", "process_tree", "lifecycle"):
             sys.modules.pop(dependency, None)
     if str(path.parent) not in sys.path:
         sys.path.insert(0, str(path.parent))
@@ -304,7 +304,7 @@ class IsolatedWorkspaceTests(TestCase):
                 mock.patch.object(host.CONFIG, "SNAPSHOT", new=snapshot),
                 mock.patch.object(snapshot, "mutation_snapshot", side_effect=AssertionError("content scan")),
             ):
-                result = host.run_snapshot(root, root / "before.snapshot", workspace_mode="isolated")
+                result = host.LIFECYCLE.run_snapshot(root, root / "before.snapshot", workspace_mode="isolated")
             self.assertEqual(result["mode"], "isolated")
             self.assertIn("no content scan", (root / "before.snapshot").read_text())
 
@@ -418,18 +418,18 @@ def admit_host_input(host, run_dir, filename, report):
     option = {"host-first-pass.json": "first_pass", "helper-reports.json": "helpers",
               "adjudicator-report.json": "adjudicator"}[filename]
     path = run_dir / (filename + '.input')
-    host.write_json(path, {key: value for key, value in report.items() if key not in {'schema_version', 'run_id'}})
+    host.CONFIG.STRICT_JSON.write(path, {key: value for key, value in report.items() if key not in {'schema_version', 'run_id'}})
     args = argparse.Namespace(**{option: path})
-    host.ingest_finish_inputs(args, run_dir, host.require_run_request(run_dir),
+    host.LIFECYCLE.ingest_finish_inputs(args, run_dir, host.RUNS.require_run_request(run_dir),
                               host.ARTIFACTS.load_json(run_dir / 'peer-process.json'))
 
 
 def author_synthesis_input(host, run_dir, report=None):
     review = host.CONFIG.REVIEW
-    ready = review.prepare(run_dir, host.ARTIFACTS.load_json(run_dir / 'peer-process.json'), host.review_documents(run_dir))
+    ready = review.prepare(run_dir, host.ARTIFACTS.load_json(run_dir / 'peer-process.json'), host.LIFECYCLE.review_documents(run_dir))
     path = Path(ready['synthesis_input'])
     report = report or valid_host_synthesis(run_dir=run_dir)
-    host.write_json(path, {key: report[key] for key in review.JUDGMENT_FIELDS})
+    host.CONFIG.STRICT_JSON.write(path, {key: report[key] for key in review.JUDGMENT_FIELDS})
     return path
 
 
@@ -1193,7 +1193,7 @@ class PeerV2Tests(TestCase):
             metadata = json.loads(normalization.read_text(encoding="utf-8"))
             host = load_host()
             host.ARTIFACTS.validate_peer_normalization(metadata)
-            host.write_json(tmp / 'peer-report.json', result)
+            host.CONFIG.STRICT_JSON.write(tmp / 'peer-report.json', result)
             host.ARTIFACTS.normalize_peer_report_from_artifacts(peer, tmp, req)
             rebuilt = json.loads(normalization.read_text(encoding='utf-8'))
             host.ARTIFACTS.validate_peer_normalization(rebuilt)
@@ -2155,7 +2155,7 @@ class HostV2Tests(TestCase):
                 mock.patch.object(host.CONFIG, "resolve_settings", return_value=resolved),
                 mock.patch.object(host.CONFIG, "require_peer_cli_version", return_value="2.1.257"),
                 mock.patch.object(host.CONFIG, "AVAILABILITY", new=availability_runtime),
-                mock.patch.object(host, "run_snapshot"),
+                mock.patch.object(host.LIFECYCLE, "run_snapshot"),
                 mock.patch.object(host.REGISTRY, "workspace_guard_path", return_value=root / "active-v2.json"),
                 mock.patch.object(host.CONFIG.SAFETY, "sandbox_preflight") as sandbox_preflight,
                 mock.patch.object(host.CONFIG.SAFETY, "process_identity", return_value=valid_process_identity()),
@@ -2376,7 +2376,7 @@ class HostV2Tests(TestCase):
                     "clear-history", "--all", "--yes", "--run-root", str(run_root),
                     "--repo-root", str(root),
                 ])
-                status, output = host.build_clear_history_output(args)
+                status, output = host.ADMIN.build_clear_history_output(args)
             self.assertEqual(status, 0)
             self.assertEqual(output["deleted"], [])
             self.assertEqual({item["run_id"] for item in output["active_preserved"]}, {"guarded-orphan", "other-orphan"})
@@ -2410,7 +2410,7 @@ class HostV2Tests(TestCase):
                 mock.patch.object(host.CONFIG, "resolve_settings", return_value=resolved),
                 mock.patch.object(host.CONFIG, "require_peer_cli_version", return_value="2.1.257"),
                 mock.patch.object(host.CONFIG, "AVAILABILITY", new=availability_runtime),
-                mock.patch.object(host, "run_snapshot"),
+                mock.patch.object(host.LIFECYCLE, "run_snapshot"),
                 mock.patch.object(host.CONFIG.SAFETY, "popen_group", side_effect=OSError("launch failed")),
                 self.assertRaises(OSError),
             ):
@@ -2456,7 +2456,7 @@ class HostV2Tests(TestCase):
                 mock.patch.object(host.CONFIG, "resolve_settings", return_value=resolved),
                 mock.patch.object(host.CONFIG, "require_peer_cli_version", return_value="2.1.257"),
                 mock.patch.object(host.CONFIG, "AVAILABILITY", new=availability_runtime),
-                mock.patch.object(host, "run_snapshot"),
+                mock.patch.object(host.LIFECYCLE, "run_snapshot"),
                 mock.patch.object(host.CONFIG.SAFETY, "popen_group", return_value=SpawnedProcess()),
                 mock.patch.object(
                     host.CONFIG.SAFETY,
@@ -2543,17 +2543,17 @@ class HostV2Tests(TestCase):
                     "finish", str(run_dir), "--run-root", str(run_root), "--repo-root", str(root),
                 ])
                 with (
-                    mock.patch.object(host, "wait_for_peer_report", return_value="report_ready"),
-                    mock.patch.object(host, "record_host_workspace_mutation", return_value=None),
+                    mock.patch.object(host.LIFECYCLE, "wait_for_peer_report", return_value="report_ready"),
+                    mock.patch.object(host.LIFECYCLE, "record_host_workspace_mutation", return_value=None),
                     redirect_stdout(io.StringIO()),
                 ):
-                    self.assertEqual(host.finish(finish_args), 0)
+                    self.assertEqual(host.LIFECYCLE.finish(finish_args), 0)
                 self.assertTrue(guard.exists())
                 self.assertEqual(json.loads((run_dir / "host-result.json").read_text())["phase"], "ready_for_synthesis")
                 self.assertEqual(host.CONFIG.STATE.find_job(run_root, request()["run_id"])["status"], "synthesizing")
                 with (
-                    mock.patch.object(host, "wait_for_peer_report", return_value="report_ready"),
-                    mock.patch.object(host, "record_host_workspace_mutation", return_value=None),
+                    mock.patch.object(host.LIFECYCLE, "wait_for_peer_report", return_value="report_ready"),
+                    mock.patch.object(host.LIFECYCLE, "record_host_workspace_mutation", return_value=None),
                     mock.patch.object(
                         host.CONFIG.SAFETY,
                         "process_group_alive",
@@ -2561,15 +2561,15 @@ class HostV2Tests(TestCase):
                     ),
                     redirect_stdout(io.StringIO()),
                 ):
-                    self.assertEqual(host.finish(finish_args), 0)
+                    self.assertEqual(host.LIFECYCLE.finish(finish_args), 0)
                 complete_args = host.build_parser().parse_args([
                     "complete", str(run_dir), "--run-root", str(run_root), "--repo-root", str(root),
                 ])
                 with (
-                    mock.patch.object(host, "record_host_workspace_mutation", return_value=None),
+                    mock.patch.object(host.LIFECYCLE, "record_host_workspace_mutation", return_value=None),
                     self.assertRaises(SystemExit),
                 ):
-                    host.complete(complete_args)
+                    host.LIFECYCLE.complete(complete_args)
                 self.assertTrue(guard.exists())
                 complete_args.synthesis = author_synthesis_input(host, run_dir)
                 adjudicator = json.loads((run_dir / "adjudicator-report.json").read_text())
@@ -2580,35 +2580,35 @@ class HostV2Tests(TestCase):
                 )
                 admit_host_input(host, run_dir, "adjudicator-report.json", adjudicator)
                 with (
-                    mock.patch.object(host, "record_host_workspace_mutation", return_value=None),
+                    mock.patch.object(host.LIFECYCLE, "record_host_workspace_mutation", return_value=None),
                     self.assertRaisesRegex(ValueError, "stale review"),
                 ):
-                    host.complete(complete_args)
+                    host.LIFECYCLE.complete(complete_args)
                 with (
-                    mock.patch.object(host, "wait_for_peer_report", return_value="report_ready"),
-                    mock.patch.object(host, "record_host_workspace_mutation", return_value=None),
+                    mock.patch.object(host.LIFECYCLE, "wait_for_peer_report", return_value="report_ready"),
+                    mock.patch.object(host.LIFECYCLE, "record_host_workspace_mutation", return_value=None),
                     redirect_stdout(io.StringIO()),
                 ):
-                    self.assertEqual(host.finish(finish_args), 0)
+                    self.assertEqual(host.LIFECYCLE.finish(finish_args), 0)
                 complete_args.synthesis = author_synthesis_input(host, run_dir)
                 with (
-                    mock.patch.object(host, "process_identity_matches", return_value=True),
-                    mock.patch.object(host, "process_alive", return_value=True),
-                    mock.patch.object(host, "record_host_workspace_mutation", return_value=None),
+                    mock.patch.object(host.PROCESS_TREE, "process_identity_matches", return_value=True),
+                    mock.patch.object(host.PROCESS_TREE, "process_alive", return_value=True),
+                    mock.patch.object(host.LIFECYCLE, "record_host_workspace_mutation", return_value=None),
                     redirect_stdout(io.StringIO()),
                 ):
-                    self.assertEqual(host.complete(complete_args), 0)
+                    self.assertEqual(host.LIFECYCLE.complete(complete_args), 0)
                 self.assertFalse(guard.exists())
                 self.assertEqual(json.loads((run_dir / "host-result.json").read_text())["phase"], "done")
                 self.assertEqual(host.CONFIG.STATE.find_job(run_root, request()["run_id"])["status"], "completed")
                 with self.assertRaises(SystemExit):
-                    host.finish(finish_args)
+                    host.LIFECYCLE.finish(finish_args)
                 self.assertEqual(
                     host.CONFIG.STATE.find_job(run_root, request()["run_id"])["status"],
                     "completed",
                 )
                 with redirect_stdout(io.StringIO()):
-                    self.assertEqual(host.complete(complete_args), 0)
+                    self.assertEqual(host.LIFECYCLE.complete(complete_args), 0)
                 host.REGISTRY.acquire_workspace_guard(root, request()["run_id"], "codex", run_dir)
                 host.REGISTRY.update_workspace_guard(
                     root,
@@ -2617,14 +2617,14 @@ class HostV2Tests(TestCase):
                     peer_identity=valid_process_identity(),
                 )
                 with self.assertRaisesRegex(SystemExit, "owner mismatch"):
-                    host.complete(complete_args)
+                    host.LIFECYCLE.complete(complete_args)
                 self.assertTrue(guard.exists())
                 host.REGISTRY.release_workspace_guard(root, request()["run_id"], owner=host.REGISTRY.read_workspace_guard(root, request()["run_id"])[1])
                 (run_dir / "host-synthesis.json").write_text(
                     json.dumps({**valid_host_synthesis(run_dir=run_dir), "final_answer_ready": False})
                 )
                 with self.assertRaisesRegex(ValueError, "cannot rewrite a completed synthesis"):
-                    host.complete(complete_args)
+                    host.LIFECYCLE.complete(complete_args)
 
     def test_complete_requires_resynthesis_when_mutation_evidence_changes(self):
         host = load_host()
@@ -2646,16 +2646,16 @@ class HostV2Tests(TestCase):
                 (run_dir / "provider-process.json").write_text(json.dumps(valid_provider_process()))
                 admit_host_input(host, run_dir, "host-first-pass.json", valid_host_first_pass())
                 (run_dir / "peer-report.json").write_text(json.dumps(valid_report()))
-                host.run_snapshot(root, run_dir / "before.snapshot", ignored_paths=[run_dir])
+                host.LIFECYCLE.run_snapshot(root, run_dir / "before.snapshot", ignored_paths=[run_dir])
                 finish_args = host.build_parser().parse_args([
                     "finish", str(run_dir), "--run-root", str(run_root), "--repo-root", str(root),
                 ])
                 with (
-                    mock.patch.object(host, "wait_for_peer_report", return_value="report_ready"),
+                    mock.patch.object(host.LIFECYCLE, "wait_for_peer_report", return_value="report_ready"),
                     mock.patch.object(host.CONFIG.SAFETY, "process_group_alive", return_value=False),
                     redirect_stdout(io.StringIO()),
                 ):
-                    self.assertEqual(host.finish(finish_args), 0)
+                    self.assertEqual(host.LIFECYCLE.finish(finish_args), 0)
                 draft = author_synthesis_input(host, run_dir)
                 tracked.write_text("after", encoding="utf-8")
                 complete_args = host.build_parser().parse_args([
@@ -2663,7 +2663,7 @@ class HostV2Tests(TestCase):
                 ])
                 complete_args.synthesis = draft
                 with self.assertRaisesRegex(SystemExit, "resynthesize"):
-                    host.complete(complete_args)
+                    host.LIFECYCLE.complete(complete_args)
                 self.assertTrue(guard.exists())
                 refreshed = json.loads((run_dir / "host-result.json").read_text())
                 self.assertIs(refreshed["workspace_mutation"]["changed"], True)
@@ -2672,7 +2672,7 @@ class HostV2Tests(TestCase):
                 synthesis["workspace_mutation_sha256"] = refreshed["workspace_mutation_sha256"]
                 complete_args.synthesis = author_synthesis_input(host, run_dir, synthesis)
                 with redirect_stdout(io.StringIO()):
-                    self.assertEqual(host.complete(complete_args), 0)
+                    self.assertEqual(host.LIFECYCLE.complete(complete_args), 0)
                 self.assertFalse(guard.exists())
 
     def test_cancel_releases_workspace_guard_without_pid_reuse_risk(self):
@@ -2692,36 +2692,36 @@ class HostV2Tests(TestCase):
                     "cancel", str(run_dir), "--run-root", str(run_root), "--repo-root", str(root),
                 ])
                 with (
-                    mock.patch.object(host, "process_identity_matches", return_value=True),
-                    mock.patch.object(host, "process_alive", return_value=False),
+                    mock.patch.object(host.PROCESS_TREE, "process_identity_matches", return_value=True),
+                    mock.patch.object(host.PROCESS_TREE, "process_alive", return_value=False),
                     mock.patch.object(
                         host.CONFIG.SAFETY,
                         "terminate_process_group",
                         return_value={"outcome": "not_running", "quiescent": True, "pgid": 43210},
                     ),
                     mock.patch.object(
-                        host,
+                        host.LIFECYCLE,
                         "record_cancel_workspace_mutation",
                         side_effect=host.ARTIFACTS.ArtifactValidationError("post-cancel snapshot failed"),
                     ),
                     self.assertRaises(SystemExit),
                 ):
-                    host.cancel(args)
+                    host.LIFECYCLE.cancel(args)
                 self.assertTrue(guard.exists())
                 self.assertEqual((run_dir / "peer-report.json").read_text(), "{malformed")
                 self.assertFalse((run_dir / "cancel-result.json").exists())
                 with (
-                    mock.patch.object(host, "process_identity_matches", return_value=True),
-                    mock.patch.object(host, "process_alive", return_value=False),
+                    mock.patch.object(host.PROCESS_TREE, "process_identity_matches", return_value=True),
+                    mock.patch.object(host.PROCESS_TREE, "process_alive", return_value=False),
                     mock.patch.object(
                         host.CONFIG.SAFETY,
                         "terminate_process_group",
                         return_value={"outcome": "not_running", "quiescent": True, "pgid": 43210},
                     ),
-                    mock.patch.object(host, "record_cancel_workspace_mutation", return_value=None),
+                    mock.patch.object(host.LIFECYCLE, "record_cancel_workspace_mutation", return_value=None),
                     redirect_stdout(io.StringIO()),
                 ):
-                    self.assertEqual(host.cancel(args), 0)
+                    self.assertEqual(host.LIFECYCLE.cancel(args), 0)
                 self.assertFalse(guard.exists())
                 self.assertEqual(host.CONFIG.STATE.find_job(run_root, request()["run_id"])["status"], "cancelled")
                 self.assertEqual((run_dir / "peer-report.json").read_text(), "{malformed")
@@ -2734,7 +2734,7 @@ class HostV2Tests(TestCase):
                 )
                 immutable_bytes = (run_dir / "cancel-result.json").read_bytes()
                 with redirect_stdout(io.StringIO()) as retry_stdout:
-                    self.assertEqual(host.cancel(args), 0)
+                    self.assertEqual(host.LIFECYCLE.cancel(args), 0)
                 self.assertEqual(json.loads(retry_stdout.getvalue())["outcome"], "already_cancelled")
                 self.assertEqual((run_dir / "cancel-result.json").read_bytes(), immutable_bytes)
 
@@ -2758,10 +2758,10 @@ class HostV2Tests(TestCase):
                 ])
                 with (
                     mock.patch.object(host.CONFIG.SAFETY, "process_group_alive", return_value=False),
-                    mock.patch.object(host, "record_cancel_workspace_mutation") as mutation,
+                    mock.patch.object(host.LIFECYCLE, "record_cancel_workspace_mutation") as mutation,
                     redirect_stdout(io.StringIO()) as stdout,
                 ):
-                    self.assertEqual(host.cancel(args), 1)
+                    self.assertEqual(host.LIFECYCLE.cancel(args), 1)
                 self.assertEqual(json.loads(stdout.getvalue())["outcome"], "already_terminal")
                 mutation.assert_not_called()
                 self.assertTrue(guard.exists())
@@ -2787,15 +2787,15 @@ class HostV2Tests(TestCase):
 
             with (
                 mock.patch.object(host.REGISTRY, "workspace_guard_path", return_value=guard),
-                mock.patch.object(host, "wait_for_peer_report", side_effect=wait_then_exit),
-                mock.patch.object(host, "process_identity_matches", return_value=True),
-                mock.patch.object(host, "process_alive", return_value=False),
+                mock.patch.object(host.LIFECYCLE, "wait_for_peer_report", side_effect=wait_then_exit),
+                mock.patch.object(host.PROCESS_TREE, "process_identity_matches", return_value=True),
+                mock.patch.object(host.PROCESS_TREE, "process_alive", return_value=False),
                 mock.patch.object(
                     host.CONFIG.SAFETY,
                     "terminate_process_group",
                     return_value={"outcome": "not_running", "quiescent": True, "pgid": 43210},
                 ),
-                mock.patch.object(host, "record_cancel_workspace_mutation", return_value=None),
+                mock.patch.object(host.LIFECYCLE, "record_cancel_workspace_mutation", return_value=None),
             ):
                 host.REGISTRY.acquire_workspace_guard(root, request()["run_id"], "codex", run_dir)
                 (run_dir / "host-request.json").write_text(json.dumps(request()))
@@ -2814,7 +2814,7 @@ class HostV2Tests(TestCase):
 
                 def run_finish():
                     try:
-                        host.finish(finish_args)
+                        host.LIFECYCLE.finish(finish_args)
                     except BaseException as exc:
                         finish_errors.append(exc)
 
@@ -2822,7 +2822,7 @@ class HostV2Tests(TestCase):
                 thread.start()
                 self.assertTrue(entered_wait.wait(5))
                 with redirect_stdout(io.StringIO()):
-                    self.assertEqual(host.cancel(cancel_args), 0)
+                    self.assertEqual(host.LIFECYCLE.cancel(cancel_args), 0)
                 release_wait.set()
                 thread.join(5)
                 self.assertFalse(thread.is_alive())
@@ -2857,11 +2857,11 @@ class HostV2Tests(TestCase):
                     "finish", str(run_dir), "--run-root", str(run_root), "--repo-root", str(root),
                 ])
                 with (
-                    mock.patch.object(host, "wait_for_peer_report", return_value="report_ready"),
-                    mock.patch.object(host, "record_host_workspace_mutation", return_value=None),
+                    mock.patch.object(host.LIFECYCLE, "wait_for_peer_report", return_value="report_ready"),
+                    mock.patch.object(host.LIFECYCLE, "record_host_workspace_mutation", return_value=None),
                     redirect_stdout(io.StringIO()),
                 ):
-                    self.assertEqual(host.finish(finish_args), 0)
+                    self.assertEqual(host.LIFECYCLE.finish(finish_args), 0)
                 draft = author_synthesis_input(host, run_dir)
 
                 entered_wait = threading.Event()
@@ -2876,7 +2876,7 @@ class HostV2Tests(TestCase):
 
                 def run_finish():
                     try:
-                        host.finish(finish_args)
+                        host.LIFECYCLE.finish(finish_args)
                     except BaseException as exc:
                         finish_errors.append(exc)
 
@@ -2885,14 +2885,14 @@ class HostV2Tests(TestCase):
                 ])
                 complete_args.synthesis = draft
                 with (
-                    mock.patch.object(host, "wait_for_peer_report", side_effect=wait_then_exit),
-                    mock.patch.object(host, "record_host_workspace_mutation", return_value=None),
+                    mock.patch.object(host.LIFECYCLE, "wait_for_peer_report", side_effect=wait_then_exit),
+                    mock.patch.object(host.LIFECYCLE, "record_host_workspace_mutation", return_value=None),
                 ):
                     thread = threading.Thread(target=run_finish)
                     thread.start()
                     self.assertTrue(entered_wait.wait(5))
                     with redirect_stdout(io.StringIO()):
-                        self.assertEqual(host.complete(complete_args), 0)
+                        self.assertEqual(host.LIFECYCLE.complete(complete_args), 0)
                     release_wait.set()
                     thread.join(5)
                     self.assertFalse(thread.is_alive())
@@ -2926,7 +2926,7 @@ class HostV2Tests(TestCase):
         try:
             with tempfile.TemporaryDirectory() as tmp_name:
                 run_dir = Path(tmp_name)
-                host.write_json(
+                host.CONFIG.STRICT_JSON.write(
                     run_dir / "provider-process.json",
                     {
                         "schema_version": "2.0",
@@ -2939,7 +2939,7 @@ class HostV2Tests(TestCase):
                         "completed_at": None,
                     },
                 )
-                cleanup = host.terminate_tracked_process_tree(
+                cleanup = host.PROCESS_TREE.terminate_tracked_process_tree(
                     {"pid": process.pid, "pgid": identity["pgid"], "process_identity": identity},
                     run_dir,
                     request(),
@@ -2959,18 +2959,18 @@ class HostV2Tests(TestCase):
             running = valid_provider_process(
                 status="running", cleanup_outcome=None, completed_at=None
             )
-            host.write_json(run_dir / "provider-process.json", running)
+            host.CONFIG.STRICT_JSON.write(run_dir / "provider-process.json", running)
             process_info = {
                 "pid": 43210,
                 "pgid": 43210,
                 "process_identity": valid_process_identity(),
             }
             with (
-                mock.patch.object(host, "process_identity_matches", return_value=False),
+                mock.patch.object(host.PROCESS_TREE, "process_identity_matches", return_value=False),
                 mock.patch.object(host.CONFIG.SAFETY, "process_identity_matches", return_value=False),
                 mock.patch.object(host.CONFIG.SAFETY, "process_group_alive", return_value=False),
             ):
-                cleanup = host.terminate_tracked_process_tree(process_info, run_dir, request())
+                cleanup = host.PROCESS_TREE.terminate_tracked_process_tree(process_info, run_dir, request())
             self.assertIs(cleanup["quiescent"], True)
             terminal = json.loads((run_dir / "provider-process.json").read_text())
             self.assertEqual(terminal["status"], "quiescent")
@@ -2981,30 +2981,30 @@ class HostV2Tests(TestCase):
                 process_identity=None,
                 cleanup_outcome="identity_unavailable",
             )
-            host.write_json(run_dir / "provider-process.json", null_identity)
+            host.CONFIG.STRICT_JSON.write(run_dir / "provider-process.json", null_identity)
             with (
-                mock.patch.object(host, "process_identity_matches", return_value=False),
+                mock.patch.object(host.PROCESS_TREE, "process_identity_matches", return_value=False),
                 mock.patch.object(host.CONFIG.SAFETY, "process_group_alive", return_value=False),
             ):
-                cleanup = host.terminate_tracked_process_tree(process_info, run_dir, request())
+                cleanup = host.PROCESS_TREE.terminate_tracked_process_tree(process_info, run_dir, request())
             self.assertIs(cleanup["quiescent"], True)
             terminal = json.loads((run_dir / "provider-process.json").read_text())
             host.ARTIFACTS.validate_provider_process(terminal, request())
             self.assertIsNone(terminal["process_identity"])
             self.assertEqual(terminal["cleanup_outcome"], "identity_mismatch_group_empty")
 
-            host.write_json(run_dir / "provider-process.json", running)
+            host.CONFIG.STRICT_JSON.write(run_dir / "provider-process.json", running)
 
             def group_alive(pgid):
                 return pgid == running["pgid"]
 
             with (
-                mock.patch.object(host, "process_identity_matches", return_value=False),
+                mock.patch.object(host.PROCESS_TREE, "process_identity_matches", return_value=False),
                 mock.patch.object(host.CONFIG.SAFETY, "process_identity_matches", return_value=False),
                 mock.patch.object(host.CONFIG.SAFETY, "process_group_alive", side_effect=group_alive),
                 mock.patch.object(host.CONFIG.SAFETY, "terminate_process_group") as terminate,
             ):
-                cleanup = host.terminate_tracked_process_tree(process_info, run_dir, request())
+                cleanup = host.PROCESS_TREE.terminate_tracked_process_tree(process_info, run_dir, request())
             self.assertIs(cleanup["quiescent"], False)
             self.assertEqual(cleanup["provider"]["outcome"], "identity_mismatch_group_live")
             terminate.assert_not_called()
@@ -3013,13 +3013,13 @@ class HostV2Tests(TestCase):
                 status="cleanup_failed",
                 cleanup_outcome="capture_channel_not_quiescent",
             )
-            host.write_json(run_dir / "provider-process.json", escaped_tracker)
+            host.CONFIG.STRICT_JSON.write(run_dir / "provider-process.json", escaped_tracker)
             with (
-                mock.patch.object(host, "process_identity_matches", return_value=False),
+                mock.patch.object(host.PROCESS_TREE, "process_identity_matches", return_value=False),
                 mock.patch.object(host.CONFIG.SAFETY, "process_identity_matches", return_value=False),
                 mock.patch.object(host.CONFIG.SAFETY, "process_group_alive", return_value=False),
             ):
-                cleanup = host.terminate_tracked_process_tree(process_info, run_dir, request())
+                cleanup = host.PROCESS_TREE.terminate_tracked_process_tree(process_info, run_dir, request())
             self.assertIs(cleanup["quiescent"], False)
             self.assertEqual(cleanup["provider"]["outcome"], "capture_channel_not_quiescent")
             self.assertEqual(
@@ -3030,14 +3030,14 @@ class HostV2Tests(TestCase):
     def test_finish_timeout_and_artifacts_require_v2(self):
         host = load_host()
         with self.assertRaises(ValueError):
-            host.resolve_finish_wait_timeout(None, {})
+            host.LIFECYCLE.resolve_finish_wait_timeout(None, {})
         with self.assertRaises(ValueError):
-            host.resolve_finish_wait_timeout(None, {"peer_timeout_seconds": "invalid"})
+            host.LIFECYCLE.resolve_finish_wait_timeout(None, {"peer_timeout_seconds": "invalid"})
         self.assertEqual(
-            host.resolve_finish_wait_timeout(None, {"peer_timeout_seconds": 2700}),
+            host.LIFECYCLE.resolve_finish_wait_timeout(None, {"peer_timeout_seconds": 2700}),
             (2730.0, "peer_timeout_plus_grace"),
         )
-        actual_wait, hard_deadline = host.remaining_finish_wait_seconds(
+        actual_wait, hard_deadline = host.LIFECYCLE.remaining_finish_wait_seconds(
             {"started_at_epoch": 100.0, "peer_timeout_seconds": 2700},
             2730.0,
             now=3000.0,
@@ -3121,13 +3121,13 @@ class HostV2Tests(TestCase):
                     "wrapper": {"outcome": "not_running", "quiescent": True},
                 }
                 with (
-                    mock.patch.object(host, "wait_for_peer_report", return_value="peer_exited"),
-                    mock.patch.object(host, "require_process_tree_quiescent", side_effect=host.ARTIFACTS.ArtifactValidationError("provider running")),
-                    mock.patch.object(host, "terminate_tracked_process_tree", return_value=cleanup) as terminate,
-                    mock.patch.object(host, "record_host_workspace_mutation", return_value=None),
+                    mock.patch.object(host.LIFECYCLE, "wait_for_peer_report", return_value="peer_exited"),
+                    mock.patch.object(host.PROCESS_TREE, "require_process_tree_quiescent", side_effect=host.ARTIFACTS.ArtifactValidationError("provider running")),
+                    mock.patch.object(host.PROCESS_TREE, "terminate_tracked_process_tree", return_value=cleanup) as terminate,
+                    mock.patch.object(host.LIFECYCLE, "record_host_workspace_mutation", return_value=None),
                     redirect_stdout(io.StringIO()),
                 ):
-                    self.assertEqual(host.finish(args), 0)
+                    self.assertEqual(host.LIFECYCLE.finish(args), 0)
                 terminate.assert_called_once()
                 timed_out = json.loads((run_dir / "peer-report.json").read_text())
                 self.assertEqual(timed_out["error"]["kind"], "timeout")
@@ -3137,18 +3137,18 @@ class HostV2Tests(TestCase):
         process = {"pid": 123, "process_identity": valid_process_identity(123, 123)}
         with (
             tempfile.TemporaryDirectory() as tmp,
-            mock.patch.object(host, "process_identity_matches", return_value=False),
-            mock.patch.object(host, "process_alive", return_value=False),
+            mock.patch.object(host.PROCESS_TREE, "process_identity_matches", return_value=False),
+            mock.patch.object(host.PROCESS_TREE, "process_alive", return_value=False),
         ):
             report = Path(tmp) / "peer-report.json"
-            self.assertEqual(host.wait_for_peer_report(report, process, 2700), "peer_exited")
+            self.assertEqual(host.LIFECYCLE.wait_for_peer_report(report, process, 2700), "peer_exited")
             report.write_text("{}")
-            self.assertEqual(host.wait_for_peer_report(report, process, 2700), "report_ready")
+            self.assertEqual(host.LIFECYCLE.wait_for_peer_report(report, process, 2700), "report_ready")
             with (
-                mock.patch.object(host, "process_identity_matches", return_value=True),
-                mock.patch.object(host, "process_alive", return_value=True),
+                mock.patch.object(host.PROCESS_TREE, "process_identity_matches", return_value=True),
+                mock.patch.object(host.PROCESS_TREE, "process_alive", return_value=True),
             ):
-                self.assertEqual(host.wait_for_peer_report(report, process, 0), "timeout")
+                self.assertEqual(host.LIFECYCLE.wait_for_peer_report(report, process, 0), "timeout")
 
     def test_status_tolerates_partial_report_only_while_process_tree_is_active(self):
         host = load_host()
@@ -3169,10 +3169,10 @@ class HostV2Tests(TestCase):
             )
             (run_dir / "peer-report.json").write_text('{"schema_version":')
             with (
-                mock.patch.object(host, "process_identity_matches", return_value=False),
+                mock.patch.object(host.PROCESS_TREE, "process_identity_matches", return_value=False),
                 mock.patch.object(host.CONFIG.SAFETY, "process_group_alive", return_value=False),
             ):
-                summary = host.summarize_run(run_dir)
+                summary = host.RUNS.summarize_run(run_dir)
             self.assertIs(summary["peer_alive"], True)
             self.assertIs(summary["provider_active"], True)
             self.assertIs(summary["process_tree_quiescent"], False)
@@ -3180,11 +3180,11 @@ class HostV2Tests(TestCase):
 
             (run_dir / "provider-process.json").write_text(json.dumps(valid_provider_process()))
             with (
-                mock.patch.object(host, "process_identity_matches", return_value=False),
+                mock.patch.object(host.PROCESS_TREE, "process_identity_matches", return_value=False),
                 mock.patch.object(host.CONFIG.SAFETY, "process_group_alive", return_value=False),
                 self.assertRaises(SystemExit),
             ):
-                host.summarize_run(run_dir)
+                host.RUNS.summarize_run(run_dir)
 
     def test_host_normalization_never_recovers_from_peer_raw(self):
         host = load_host()
@@ -3244,7 +3244,7 @@ class HostV2Tests(TestCase):
             ])
             output = io.StringIO()
             with mock.patch.object(host.shutil, "which", return_value=None), redirect_stdout(output):
-                self.assertEqual(host.doctor(args), 1)
+                self.assertEqual(host.ADMIN.doctor(args), 1)
             report = json.loads(output.getvalue())
         self.assertFalse(report["ok"])
         self.assertFalse(report["checks"]["state_file"]["ok"])
@@ -3288,9 +3288,9 @@ class HostV2Tests(TestCase):
             run_dir.mkdir(parents=True)
             changed = root / "tracked.txt"
             changed.write_text("before", encoding="utf-8")
-            host.run_snapshot(root, run_dir / "before.snapshot", ignored_paths=[run_dir])
+            host.LIFECYCLE.run_snapshot(root, run_dir / "before.snapshot", ignored_paths=[run_dir])
             changed.write_text("after", encoding="utf-8")
-            diagnostic = host.record_host_workspace_mutation(root, run_dir, request())
+            diagnostic = host.LIFECYCLE.record_host_workspace_mutation(root, run_dir, request())
 
         self.assertIsNotNone(diagnostic)
         self.assertIs(diagnostic["changed"], True)

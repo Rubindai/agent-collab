@@ -89,12 +89,12 @@ class StateRootTests(TestCase):
             (run_dir / "host-request.json").write_text("{}")
             guard = {"run_id": "agent-collab-test", "run_dir": str(run_dir)}
             with mock.patch.object(host.REGISTRY, "read_workspace_guard", return_value=(root / "guard", guard)):
-                self.assertEqual(host.guarded_run_dir(repo, "agent-collab-test"), run_dir.resolve())
-                self.assertIsNone(host.guarded_run_dir(repo, "agent-collab-other"))
-                resolved = host.resolve_run_reference(repo, "agent-collab-test", root / "my-runs")
+                self.assertEqual(host.RUNS.guarded_run_dir(repo, "agent-collab-test"), run_dir.resolve())
+                self.assertIsNone(host.RUNS.guarded_run_dir(repo, "agent-collab-other"))
+                resolved = host.RUNS.resolve_run_reference(repo, "agent-collab-test", root / "my-runs")
                 self.assertEqual(resolved, run_dir.resolve())
                 args = SimpleNamespace(repo_root=repo, run_root=root / "my-runs", run="agent-collab-test")
-                self.assertEqual(host.resolve_run_context(args), (repo.resolve(), other_root.resolve(), run_dir.resolve()))
+                self.assertEqual(host.RUNS.resolve_run_context(args), (repo.resolve(), other_root.resolve(), run_dir.resolve()))
 
 
 class IsolationBoundaryTests(TestCase):
@@ -544,7 +544,7 @@ class SharedHistoryCleanupTests(TestCase):
         args = host.build_parser().parse_args([
             "clear-history", "--all", "--yes", "--run-root", str(run_root), "--repo-root", str(repo),
         ])
-        return host.build_clear_history_output(args)
+        return host.ADMIN.build_clear_history_output(args)
 
     def test_another_worktrees_guarded_run_and_young_orphans_survive(self):
         host = fixtures.load_host()
@@ -644,8 +644,8 @@ class NormalizationSourceTests(TestCase):
             (run_dir / "peer-process.json").write_text(json.dumps(
                 fixtures.valid_peer_process(run_dir, Path(tmp), Path(tmp) / "guard.json")
             ))
-            with mock.patch.object(host, "process_identity_matches", return_value=False):
-                summary = host.summarize_run(run_dir)
+            with mock.patch.object(host.PROCESS_TREE, "process_identity_matches", return_value=False):
+                summary = host.RUNS.summarize_run(run_dir)
         self.assertEqual(summary["normalization_source"], "none")
 
 

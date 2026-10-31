@@ -89,7 +89,7 @@ class LifecycleAuditTests(TestCase):
             "provider-process.json": fixtures.valid_provider_process(),
             "peer-report.json": fixtures.valid_report(),
         }.items():
-            host.write_json(run_dir / name, data)
+            host.CONFIG.STRICT_JSON.write(run_dir / name, data)
         fixtures.admit_host_input(host, run_dir, "host-first-pass.json", fixtures.valid_host_first_pass())
         return req
 
@@ -101,8 +101,8 @@ class LifecycleAuditTests(TestCase):
             guard = root / "active-v2.json"
             with (
                 mock.patch.object(host.REGISTRY, "workspace_guard_path", return_value=guard),
-                mock.patch.object(host, "wait_for_peer_report", return_value="report_ready"),
-                mock.patch.object(host, "record_host_workspace_mutation", return_value=None),
+                mock.patch.object(host.LIFECYCLE, "wait_for_peer_report", return_value="report_ready"),
+                mock.patch.object(host.LIFECYCLE, "record_host_workspace_mutation", return_value=None),
                 mock.patch.object(host.CONFIG.SAFETY, "process_group_alive", return_value=False),
                 redirect_stdout(io.StringIO()),
             ):
@@ -110,21 +110,21 @@ class LifecycleAuditTests(TestCase):
                 common = [str(run_dir), "--run-root", str(run_root), "--repo-root", str(root)]
                 finish_args = host.build_parser().parse_args(["finish", *common])
                 complete_args = host.build_parser().parse_args(["complete", *common])
-                self.assertEqual(host.finish(finish_args), 0)
+                self.assertEqual(host.LIFECYCLE.finish(finish_args), 0)
                 synthesis = fixtures.valid_host_synthesis()
                 synthesis["claim_matrix_sha256"] = host.ARTIFACTS.load_json(run_dir / "host-result.json")["claim_matrix_sha256"]
                 complete_args.synthesis = fixtures.author_synthesis_input(host, run_dir, synthesis)
                 if artifact_name in host.CONFIG.REVIEW.HOST_INPUT_FILES:
                     fixtures.admit_host_input(host, run_dir, artifact_name, changed_report)
                 else:
-                    host.write_json(run_dir / artifact_name, changed_report)
-                self.assertEqual(host.finish(finish_args), 0)
+                    host.CONFIG.STRICT_JSON.write(run_dir / artifact_name, changed_report)
+                self.assertEqual(host.LIFECYCLE.finish(finish_args), 0)
                 with self.assertRaisesRegex(ValueError, "stale review"):
-                    host.complete(complete_args)
+                    host.LIFECYCLE.complete(complete_args)
                 self.assertTrue(guard.exists())
                 synthesis["claim_matrix_sha256"] = host.ARTIFACTS.load_json(run_dir / "host-result.json")["claim_matrix_sha256"]
                 complete_args.synthesis = fixtures.author_synthesis_input(host, run_dir, synthesis)
-                self.assertEqual(host.complete(complete_args), 0)
+                self.assertEqual(host.LIFECYCLE.complete(complete_args), 0)
                 self.assertFalse(guard.exists())
 
     def test_complete_one_run_preserves_another_hosts_active_run(self):
@@ -139,22 +139,22 @@ class LifecycleAuditTests(TestCase):
             guard = root / "active-v2.json"
             with (
                 mock.patch.object(host.REGISTRY, "workspace_guard_path", return_value=guard),
-                mock.patch.object(host, "wait_for_peer_report", return_value="report_ready"),
-                mock.patch.object(host, "record_host_workspace_mutation", return_value=None),
+                mock.patch.object(host.LIFECYCLE, "wait_for_peer_report", return_value="report_ready"),
+                mock.patch.object(host.LIFECYCLE, "record_host_workspace_mutation", return_value=None),
                 mock.patch.object(host.CONFIG.SAFETY, "process_group_alive", return_value=False),
                 redirect_stdout(io.StringIO()),
             ):
                 self.prepare_run(host, root, run_dir, guard)
                 host.REGISTRY.acquire_workspace_guard(root, "other-run", "claude", other_dir)
-                self.assertEqual(host.resolve_run_reference(root, "other-run", run_root), other_dir)
+                self.assertEqual(host.RUNS.resolve_run_reference(root, "other-run", run_root), other_dir)
                 common = [str(run_dir), "--run-root", str(run_root), "--repo-root", str(root)]
-                self.assertEqual(host.finish(host.build_parser().parse_args(["finish", *common])), 0)
+                self.assertEqual(host.LIFECYCLE.finish(host.build_parser().parse_args(["finish", *common])), 0)
                 synthesis = fixtures.valid_host_synthesis(run_dir=run_dir)
                 common.extend(["--synthesis", str(fixtures.author_synthesis_input(host, run_dir, synthesis))])
-                self.assertEqual(host.complete(host.build_parser().parse_args(["complete", *common])), 0)
+                self.assertEqual(host.LIFECYCLE.complete(host.build_parser().parse_args(["complete", *common])), 0)
                 self.assertEqual(set(host.REGISTRY.read_workspace_guards(root)[1]), {"other-run"})
                 # Repeating completion must leave the other host's entry intact.
-                self.assertEqual(host.complete(host.build_parser().parse_args(["complete", *common])), 0)
+                self.assertEqual(host.LIFECYCLE.complete(host.build_parser().parse_args(["complete", *common])), 0)
                 self.assertEqual(set(host.REGISTRY.read_workspace_guards(root)[1]), {"other-run"})
                 host.REGISTRY.release_workspace_guard(root, "other-run", owner=host.REGISTRY.read_workspace_guard(root, "other-run")[1])
 
@@ -204,12 +204,12 @@ class LifecycleAuditTests(TestCase):
             with (
                 mock.patch.object(host.REGISTRY, "workspace_guard_path", return_value=guard),
                 mock.patch.object(host.CONFIG.SAFETY, "process_group_alive", return_value=False),
-                mock.patch.object(host, "process_identity_matches", return_value=False),
+                mock.patch.object(host.PROCESS_TREE, "process_identity_matches", return_value=False),
                 redirect_stdout(io.StringIO()),
             ):
                 req = self.prepare_run(host, root, run_dir, guard)
                 (run_dir / "peer-report.json").write_text("{malformed")
-                host.run_snapshot(root, run_dir / "before.snapshot", ignored_paths=[run_dir])
+                host.LIFECYCLE.run_snapshot(root, run_dir / "before.snapshot", ignored_paths=[run_dir])
                 tracked.write_text("after")
                 snapshot = host.CONFIG.SNAPSHOT
                 after = snapshot.mutation_snapshot(root, ignored_paths=[run_dir])
@@ -218,7 +218,7 @@ class LifecycleAuditTests(TestCase):
                 args = host.build_parser().parse_args([
                     "cancel", str(run_dir), "--run-root", str(run_root), "--repo-root", str(root),
                 ])
-                write_once = host.write_json_once
+                write_once = host.LIFECYCLE.write_json_once
 
                 def interrupt_result(path, data):
                     if path.name == "cancel-result.json":
@@ -228,10 +228,10 @@ class LifecycleAuditTests(TestCase):
                 with (
                     mock.patch.object(host.CONFIG, "SNAPSHOT", new=snapshot),
                     mock.patch.object(snapshot, "mutation_snapshot", return_value=after),
-                    mock.patch.object(host, "write_json_once", side_effect=interrupt_result),
+                    mock.patch.object(host.LIFECYCLE, "write_json_once", side_effect=interrupt_result),
                     self.assertRaises(KeyboardInterrupt),
                 ):
-                    host.cancel(args)
+                    host.LIFECYCLE.cancel(args)
                 mutation_path = run_dir / "cancel-workspace-mutation.json"
                 after_path = run_dir / "cancel-after.snapshot.json"
                 original_mutation, original_after = mutation_path.read_bytes(), after_path.read_bytes()
@@ -241,11 +241,11 @@ class LifecycleAuditTests(TestCase):
                 tracked.write_text("later unrelated edit")
                 after_path.write_text("{}")
                 with self.assertRaisesRegex(SystemExit, "snapshot changed"):
-                    host.cancel(args)
+                    host.LIFECYCLE.cancel(args)
                 self.assertTrue(guard.exists())
                 after_path.write_bytes(original_after)
-                with mock.patch.object(host, "run_snapshot", side_effect=AssertionError("must reuse capture")):
-                    self.assertEqual(host.cancel(args), 0)
+                with mock.patch.object(host.LIFECYCLE, "run_snapshot", side_effect=AssertionError("must reuse capture")):
+                    self.assertEqual(host.LIFECYCLE.cancel(args), 0)
                 self.assertEqual(mutation_path.read_bytes(), original_mutation)
                 self.assertEqual(after_path.read_bytes(), original_after)
                 self.assertFalse(guard.exists())
