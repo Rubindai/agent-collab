@@ -541,6 +541,9 @@ def _complete_locked(args: argparse.Namespace, context: RUNS.RunContext,
                      host_result: dict[str, Any] | None = None) -> tuple[int, dict[str, Any]]:
     repo_root, run_root, run_dir = context.repo_root, context.run_root, context.run_dir
     request, process_info = context.request, context.process
+    job = CONFIG.STATE.find_job(run_root, request["run_id"])
+    if (run_dir / "cancel-result.json").exists() or (job and job["status"] == "cancelled"):
+        raise ValueError("run has cancellation evidence; use cancel RUN to validate or resume cancellation")
     host_result_path = run_dir / "host-result.json"
     if host_result is None:
         host_result = ARTIFACTS.load_json(host_result_path)
@@ -744,13 +747,11 @@ def _cancel_locked(args: argparse.Namespace, context: RUNS.RunContext) -> tuple[
         released: str | None = None
         if active_guard is not None:
             REGISTRY.validate_guard_owner(active_guard, process_info)
-            wrapper_quiescence_proven = PROCESS_TREE.guard_wrapper_proof(active_guard, process_info)
             try:
+                # The validated immutable cancellation already proves wrapper
+                # quiescence. Its historical PGID may since have been reused.
                 PROCESS_TREE.require_process_tree_quiescent(
-                    process_info,
-                    run_dir,
-                    request,
-                    wrapper_quiescence_proven=wrapper_quiescence_proven,
+                    process_info, run_dir, request, wrapper_quiescence_proven=True,
                 )
             except ARTIFACTS.ArtifactValidationError as exc:
                 raise ValueError(

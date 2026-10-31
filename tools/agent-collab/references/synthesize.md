@@ -102,7 +102,17 @@ The bounded provider telemetry files `peer-stdout.txt` and `peer.stderr.log` are
 too.
 If cancellation is interrupted after its mutation diagnostic is committed, retrying validates
 and reuses the recorded snapshot hashes without overwriting that evidence. The recorded snapshot
-describes the cancellation capture point; later workspace edits are outside that capture.
+describes the cancellation capture point; later workspace edits are outside that capture. Cancellation
+retries use the validated immutable cleanup proof for wrapper quiescence, while still
+checking ownership, provider state and isolation cleanup. They do not probe a historical
+wrapper PGID that may have been reused. Cancellation digest checks cover peer report/raw/
+normalization, host result/synthesis and claim matrix; admitted host reports are retained
+but are not part of that cancellation digest set.
+
+Completion commits at the completed/failed state update, after synthesis validation. A
+synthesis file written before that point is not a completed run: explicit cancellation can
+preserve and supersede it. Once cancellation evidence is committed, every completion path
+refuses it before writing, including low-level `complete`; retry `cancel` to finish cleanup.
 
 ## Claim labels and verdicts
 

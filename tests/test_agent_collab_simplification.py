@@ -300,6 +300,53 @@ class CompactWorkflowTests(TestCase):
         self.invoke('complete', '--synthesis', authored)
         self.assertFalse(self.guard.exists())
 
+    def check_interrupted_cancel(self, target, method):
+        result = self.finish()
+        authored = self.author(result)
+        with (mock.patch.object(self.host.LIFECYCLE, 'record_cancel_workspace_mutation', return_value=None),
+              mock.patch.object(target, method, side_effect=OSError('interrupted cancellation'))):
+            with self.assertRaises(OSError):
+                self.invoke('cancel')
+        before = {p.name: p.read_bytes() for p in self.run.glob('*.json')}
+        with self.assertRaisesRegex(ValueError, 'cancel'):
+            self.invoke('complete', '--synthesis', authored)
+        self.assertEqual(before, {p.name: p.read_bytes() for p in self.run.glob('*.json')})
+        self.assertTrue(self.guard.exists())
+        self.invoke('cancel')
+        self.assertFalse(self.guard.exists())
+
+    def test_complete_cannot_replace_cancel_before_state_commit(self):
+        self.check_interrupted_cancel(self.host.CONFIG.STATE, 'upsert_job')
+
+    def test_complete_cannot_replace_cancel_before_guard_release(self):
+        self.check_interrupted_cancel(self.host.REGISTRY, 'release_workspace_guard')
+
+    def test_cancel_retry_uses_committed_quiescence_after_pgid_reuse(self):
+        cleanup = {'quiescent': True,
+                   'provider': {'outcome': 'terminated', 'quiescent': True},
+                   'wrapper': {'outcome': 'terminated', 'quiescent': True}}
+        with (mock.patch.object(self.host.PROCESS_TREE, 'terminate_tracked_process_tree', return_value=cleanup),
+              mock.patch.object(self.host.LIFECYCLE, 'record_cancel_workspace_mutation', return_value=None),
+              mock.patch.object(self.host.REGISTRY, 'release_workspace_guard', side_effect=OSError('interrupted release'))):
+            with self.assertRaises(OSError):
+                self.invoke('cancel')
+        with mock.patch.object(self.host.CONFIG.SAFETY, 'process_group_alive', return_value=True) as group_alive:
+            self.invoke('cancel')
+        group_alive.assert_not_called()
+        self.assertFalse(self.guard.exists())
+
+    def test_cancel_can_preserve_synthesis_before_completed_state(self):
+        result = self.finish()
+        with mock.patch.object(self.host.CONFIG.STATE, 'upsert_job', side_effect=OSError('before completed state')):
+            with self.assertRaises(OSError):
+                self.invoke('complete', '--synthesis', self.author(result))
+        synthesis = (self.run / 'host-synthesis.json').read_bytes()
+        with mock.patch.object(self.host.LIFECYCLE, 'record_cancel_workspace_mutation', return_value=None):
+            self.invoke('cancel')
+        self.assertEqual(synthesis, (self.run / 'host-synthesis.json').read_bytes())
+        self.assertEqual(self.host.CONFIG.STATE.find_job(self.run.parent, self.run.name)['status'], 'cancelled')
+        self.assertFalse(self.guard.exists())
+
     def test_lifecycle_cli_validates_request_first_with_exit_two(self):
         (self.run / 'host-request.json').write_text('{broken')
         (self.run / 'peer-process.json').write_text('{also broken')
