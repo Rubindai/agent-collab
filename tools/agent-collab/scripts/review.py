@@ -9,6 +9,7 @@ import hashlib
 import re
 from pathlib import Path
 from typing import Any
+import validation as V
 import strict_json as JSON
 
 
@@ -27,7 +28,7 @@ def digest(value: Any) -> str:
 
 
 def admissions(run_dir: Path, owner: dict[str, Any]) -> dict[str, Any]:
-    expected = {"schema_version": "2.0", "run_id": owner["run_id"], "owner_token": owner["owner_token"],
+    expected = {"schema_version": V.RUN_SCHEMA_VERSION, "run_id": owner["run_id"], "owner_token": owner["owner_token"],
                 "reports": {name: None for name in HOST_INPUT_FILES}}
     path = run_dir / "host-inputs.json"
     if not path.exists():
@@ -61,12 +62,12 @@ def verify_admissions(run_dir: Path, owner: dict[str, Any], *, replacing: set[st
     return receipt
 
 
-def context(owner: dict[str, Any], documents: dict[str, Any]) -> dict[str, Any]:
+def context(owner: dict[str, Any], documents: dict[str, Any], rendered: bytes) -> dict[str, Any]:
     return {
-        "schema_version": "2.0",
+        "schema_version": V.RUN_SCHEMA_VERSION,
         **{key: owner[key] for key in ("run_id", "host", "owner_token")},
         **{key: str(Path(owner[key]).resolve()) for key in ("run_dir", "repo_root")},
-        "rendered_sha256": hashlib.sha256(markdown(documents).encode("utf-8")).hexdigest(),
+        "rendered_sha256": hashlib.sha256(rendered).hexdigest(),
         "evidence_sha256": {name: digest(documents[name]) if documents[name] is not None else None
                             for name in EVIDENCE_FILES},
     }
@@ -81,7 +82,8 @@ def check_directory(run_dir: Path, directory: Path) -> Path:
 
 
 def prepare(run_dir: Path, owner: dict[str, Any], documents: dict[str, Any]) -> dict[str, Any]:
-    receipt = context(owner, documents)
+    rendered = markdown(documents).encode("utf-8")
+    receipt = context(owner, documents, rendered)
     directory = check_directory(run_dir, run_dir.resolve() / "reviews" / digest(receipt))
     JSON.ensure_private_directory(directory)
     receipt_path = directory / "context.json"
@@ -93,7 +95,6 @@ def prepare(run_dir: Path, owner: dict[str, Any], documents: dict[str, Any]) -> 
         JSON.write(receipt_path, receipt)
     evidence_path = directory / "evidence.md"
     JSON.reject_symlink_destination(evidence_path)
-    rendered = markdown(documents).encode("utf-8")
     if evidence_path.exists():
         verify_rendered(evidence_path, rendered)
     else:
@@ -118,9 +119,10 @@ def verify(run_dir: Path, directory: Path, owner: dict[str, Any], documents: dic
     receipt = JSON.load(receipt_path, max_bytes=16_384)
     if directory.name != digest(receipt):
         raise ValueError(f"review receipt was modified: {receipt_path}")
-    if receipt != context(owner, documents):
+    rendered = markdown(documents).encode("utf-8")
+    if receipt != context(owner, documents, rendered):
         raise ValueError("stale review evidence or wrong run instance; resume advance without --synthesis and review the new revision")
-    verify_rendered(directory / "evidence.md", markdown(documents).encode("utf-8"))
+    verify_rendered(directory / "evidence.md", rendered)
 
 
 def judgments(run_dir: Path, input_path: Path, owner: dict[str, Any], documents: dict[str, Any]) -> dict[str, Any]:

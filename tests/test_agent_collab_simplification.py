@@ -251,6 +251,73 @@ class CompactWorkflowTests(TestCase):
         self.host.CONFIG.STRICT_JSON.write(path, payload)
         return path
 
+    def test_immediate_cancel_defaults_reason_and_preserves_reports(self):
+        report = (self.run / 'peer-report.json').read_bytes()
+        cleanup = {'quiescent': True,
+                   'provider': {'outcome': 'terminated', 'quiescent': True},
+                   'wrapper': {'outcome': 'terminated', 'quiescent': True}}
+        with (mock.patch.object(self.host.PROCESS_TREE, 'peer_elapsed_seconds', return_value=0),
+              mock.patch.object(self.host.PROCESS_TREE, 'process_identity_matches', return_value=True),
+              mock.patch.object(self.host.PROCESS_TREE, 'process_alive', return_value=True),
+              mock.patch.object(self.host.PROCESS_TREE, 'terminate_tracked_process_tree', return_value=cleanup) as terminate,
+              mock.patch.object(self.host.LIFECYCLE, 'record_cancel_workspace_mutation', return_value=None)):
+            result = json.loads(self.invoke('cancel'))
+        self.assertEqual(result['outcome'], 'cancelled_quiescent')
+        terminate.assert_called_once()
+        saved = self.host.ARTIFACTS.load_json(self.run / 'cancel-result.json')
+        self.assertEqual(saved['reason'], 'user_cancelled')
+        self.assertEqual(saved['elapsed_seconds'], 0)
+        self.assertTrue(saved['peer_was_alive'])
+        self.assertTrue({'forced', 'minimum_wait_seconds', 'before_minimum_wait'}.isdisjoint(saved))
+        self.assertEqual(report, (self.run / 'peer-report.json').read_bytes())
+        self.assertFalse(self.guard.exists())
+
+    def test_completed_run_cannot_be_cancelled(self):
+        result = self.finish()
+        self.invoke('complete', '--synthesis', self.author(result))
+        before = {p.name: p.read_bytes() for p in self.run.glob('*.json')}
+        with self.assertRaisesRegex(ValueError, 'completed runs'):
+            self.invoke('cancel')
+        self.assertEqual(before, {p.name: p.read_bytes() for p in self.run.glob('*.json')})
+
+    def test_lifecycle_cli_validates_request_first_with_exit_two(self):
+        (self.run / 'host-request.json').write_text('{broken')
+        (self.run / 'peer-process.json').write_text('{also broken')
+        for command in ('finish', 'complete', 'cancel', 'advance'):
+            with self.subTest(command=command):
+                result = subprocess.run([sys.executable, str(fixtures.HOST_RUNTIME), command,
+                                         str(self.run), '--repo-root', str(self.root)],
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn('host-request.json', result.stderr)
+                self.assertNotIn('Traceback', result.stderr)
+        self.assertTrue(self.guard.exists())
+
+    def test_old_run_root_and_registry_block_new_admission_without_rewriting(self):
+        host = self.host
+        old = {'schema_version': '2.0', 'jobs': []}
+        state = self.run.parent / 'state.json'
+        state.write_text(json.dumps(old))
+        with self.assertRaises(ValueError):
+            host.RUNS.require_run_root_format(self.run.parent)
+        self.assertEqual(json.loads(state.read_text()), old)
+        state.unlink()
+        request = host.ARTIFACTS.load_json(self.run / 'host-request.json')
+        request['schema_version'] = '2.0'
+        (self.run / 'host-request.json').write_text(json.dumps(request))
+        with self.assertRaises(ValueError):
+            host.RUNS.require_run_root_format(self.run.parent)
+        registry = self.guard.read_bytes()
+        data = json.loads(registry)
+        data['schema_version'] = '2.0'
+        self.guard.write_text(json.dumps(data))
+        original = self.guard.read_bytes()
+        with self.assertRaises(SystemExit):
+            host.REGISTRY.acquire_workspace_guard(self.root, 'new', 'codex', self.root / 'new')
+        self.assertEqual(self.guard.read_bytes(), original)
+        self.assertEqual(host.CONFIG.default_run_root(self.root).parts[-2:], ('runs', 'v3'))
+        self.assertEqual(host.CONFIG.default_local_settings_path(self.root).name, 'settings.local.json')
+
     def test_missing_peer_report_keeps_summary_and_diagnostic_distinct(self):
         (self.run / 'peer-report.json').unlink()
         self.finish()
@@ -311,7 +378,7 @@ class CompactWorkflowTests(TestCase):
         mutation = self.capture_mutation(self.root, self.run, fixtures.request())
         self.assertIsNotNone(mutation)
         with mock.patch.object(self.host.LIFECYCLE, 'record_host_workspace_mutation', return_value=mutation):
-            with self.assertRaisesRegex(SystemExit, 'mutation evidence changed'):
+            with self.assertRaisesRegex(ValueError, 'mutation evidence changed'):
                 self.invoke('complete', '--synthesis', authored)
             self.assertFalse((self.run / 'host-synthesis.json').exists())
             self.assertTrue(self.guard.exists())

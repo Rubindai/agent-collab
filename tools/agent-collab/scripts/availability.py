@@ -20,7 +20,7 @@ import strict_json as STRICT_JSON
 import safety as SAFETY
 
 
-SCHEMA_VERSION = "2.0"
+SCHEMA_VERSION = V.RUN_SCHEMA_VERSION
 PEERS = {"claude", "codex"}
 CLAUDE_PROVIDER_EFFORT_CHOICES = {"low", "medium", "high", "xhigh", "max"}
 # Claude Code exposes ``ultracode`` as a CLI orchestration mode. It requests

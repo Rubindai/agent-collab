@@ -115,7 +115,7 @@ def load_availability():
 
 def availability_attestation(peer, model, effort):
     return {
-        "schema_version": "2.0",
+        "schema_version": "3.0",
         "status": "available",
         "peer": peer,
         "requested_model": model,
@@ -136,7 +136,7 @@ def request(**overrides):
     model = overrides.get("peer_model", "claude-opus-5-5" if peer == "claude" else "gpt-6-astra")
     effort = overrides.get("peer_effort", "xhigh")
     data = {
-        "schema_version": "2.0",
+        "schema_version": "3.0",
         "origin": host,
         "host": host,
         "peer": peer,
@@ -209,7 +209,7 @@ def claude_result_runner(completed):
 def valid_report(**overrides):
     req = request()
     data = {
-        "schema_version": "2.0",
+        "schema_version": "3.0",
         "run_id": req["run_id"],
         "origin": req["origin"],
         "host": req["host"],
@@ -317,7 +317,7 @@ class IsolatedWorkspaceTests(TestCase):
             (victim / "keep").write_text("untouched")
             state = root / "isolation-state.json"
             state.write_text(json.dumps({
-                "schema_version": "2.0", "scratch": str(victim),
+                "schema_version": "3.0", "scratch": str(victim),
                 "mounts": [str(victim / "home" / "merged"), str(victim / "repo" / "merged")],
                 "status": "mounted",
             }))
@@ -340,7 +340,7 @@ class IsolatedWorkspaceTests(TestCase):
 
 def valid_host_first_pass(run_id="agent-collab-test"):
     return {
-        "schema_version": "2.0",
+        "schema_version": "3.0",
         "run_id": run_id,
         "summary": "Independent host pass.",
         "claims": [{"claim": "Host claim", "status": "confirmed", "evidence": "host evidence"}],
@@ -349,7 +349,7 @@ def valid_host_first_pass(run_id="agent-collab-test"):
 
 def valid_host_synthesis(run_id="agent-collab-test", run_dir=None):
     return {
-        "schema_version": "2.0",
+        "schema_version": "3.0",
         "run_id": run_id,
         "summary": "Host synthesis is ready for the final answer.",
         "verdict": "pass_with_concerns",
@@ -385,7 +385,7 @@ def valid_peer_process(run_dir, repo_root, guard_path, **overrides):
     request_path = run_dir / "host-request.json"
     req = json.loads(request_path.read_text()) if request_path.exists() else request()
     data = {
-        "schema_version": "2.0",
+        "schema_version": "3.0",
         "pid": 43210,
         "pgid": 43210,
         "process_identity": valid_process_identity(),
@@ -435,7 +435,7 @@ def author_synthesis_input(host, run_dir, report=None):
 
 def valid_provider_process(run_id="agent-collab-test", **overrides):
     data = {
-        "schema_version": "2.0",
+        "schema_version": "3.0",
         "run_id": run_id,
         "pid": 54321,
         "pgid": 54321,
@@ -1269,15 +1269,6 @@ class PeerV2Tests(TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["peer"], "codex")
 
-    def test_host_cli_shadow_is_executable_and_refuses_peer_recursion(self):
-        peer = load_peer()
-        with tempfile.TemporaryDirectory() as tmp:
-            guard_bin = peer.make_host_cli_guard(Path(tmp), "codex")
-            completed = subprocess.run(
-                [str(guard_bin / "codex")], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-            )
-        self.assertEqual(completed.returncode, 64)
-        self.assertIn("may not call the host CLI", completed.stderr)
 
     def test_successful_pipe_capture_proves_provider_quiescence_once(self):
         peer = load_peer()
@@ -1642,7 +1633,7 @@ class PeerV2Tests(TestCase):
         self.assertNotIn("$schema", schema)
         self.assertNotIn("$id", schema)
         self.assertNotIn("title", schema)
-        self.assertEqual(schema["properties"]["schema_version"]["const"], "2.0")
+        self.assertEqual(schema["properties"]["schema_version"]["const"], "3.0")
 
         unsupported = {"allOf", "not", "dependentRequired", "dependentSchemas", "if", "then", "else"}
 
@@ -1664,7 +1655,7 @@ class PeerV2Tests(TestCase):
             normalized = peer.normalize_json_payload(json.dumps(payload), source)
             self.assertEqual(normalized.report, report)
             self.assertEqual(normalized.metadata["source"], source)
-            self.assertEqual(normalized.metadata["schema_version"], "2.0")
+            self.assertEqual(normalized.metadata["schema_version"], "3.0")
         with self.assertRaises(peer.PeerOutputContractError):
             peer.normalize_json_payload(json.dumps(report), "structured_output")
         with self.assertRaises(peer.PeerOutputContractError):
@@ -2200,7 +2191,7 @@ class HostV2Tests(TestCase):
         self.assertIsNone(saved["claude_max_turns"])
         self.assertEqual(saved["helper_enforcement"]["limit_semantics"], "total_agent_calls")
         self.assertIs(saved["adjudicator_enabled"], True)
-        self.assertEqual(process["schema_version"], "2.0")
+        self.assertEqual(process["schema_version"], "3.0")
         self.assertEqual(process["peer_cli_version"], "2.1.257")
         self.assertEqual(private_modes["run_dir"], 0o700)
         for name, mode in private_modes.items():
@@ -2231,7 +2222,7 @@ class HostV2Tests(TestCase):
             legacy_job = valid_state_job()
             legacy_job.pop("adjudicator_enabled")
             legacy_job["profile"] = "thorough"
-            (run_root / "state.json").write_text(json.dumps({"schema_version": "2.0", "jobs": [legacy_job]}))
+            (run_root / "state.json").write_text(json.dumps({"schema_version": "3.0", "jobs": [legacy_job]}))
             guard = root / "active-v2.json"
             args = host.build_parser().parse_args([
                 "start", "--host", "codex", "--target", "diff", "--brief", "review",
@@ -2244,8 +2235,7 @@ class HostV2Tests(TestCase):
                 self.assertRaises(SystemExit) as raised,
             ):
                 host.start(args)
-            self.assertIn("invalid v2 Agent Collab state", str(raised.exception))
-            self.assertIn("Archive", str(raised.exception))
+            self.assertIn("invalid v3 Agent Collab state", str(raised.exception))
             self.assertIn("fresh --run-root", str(raised.exception))
             acquire.assert_not_called()
             popen.assert_not_called()
@@ -2325,7 +2315,7 @@ class HostV2Tests(TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             guard = root / "guard.json"
-            guard.write_text('{"schema_version":"2.0","run_id":"old"}')
+            guard.write_text('{"schema_version":"3.0","run_id":"old"}')
             original = guard.read_bytes()
             with mock.patch.object(host.REGISTRY, "workspace_guard_path", return_value=guard):
                 with self.assertRaisesRegex(SystemExit, "legacy"):
@@ -2500,7 +2490,7 @@ class HostV2Tests(TestCase):
             run_dir = Path(tmp)
             path = run_dir / "helper-reports.json"
             payload = {
-                "schema_version": "2.0",
+                "schema_version": "3.0",
                 "run_id": request()["run_id"],
                 "reports": [{
                     "name": "reviewer", "summary": "checked",
@@ -2567,7 +2557,7 @@ class HostV2Tests(TestCase):
                 ])
                 with (
                     mock.patch.object(host.LIFECYCLE, "record_host_workspace_mutation", return_value=None),
-                    self.assertRaises(SystemExit),
+                    self.assertRaises(ValueError),
                 ):
                     host.LIFECYCLE.complete(complete_args)
                 self.assertTrue(guard.exists())
@@ -2662,7 +2652,7 @@ class HostV2Tests(TestCase):
                     "complete", str(run_dir), "--run-root", str(run_root), "--repo-root", str(root),
                 ])
                 complete_args.synthesis = draft
-                with self.assertRaisesRegex(SystemExit, "resynthesize"):
+                with self.assertRaisesRegex(ValueError, "resynthesize"):
                     host.LIFECYCLE.complete(complete_args)
                 self.assertTrue(guard.exists())
                 refreshed = json.loads((run_dir / "host-result.json").read_text())
@@ -2704,7 +2694,7 @@ class HostV2Tests(TestCase):
                         "record_cancel_workspace_mutation",
                         side_effect=host.ARTIFACTS.ArtifactValidationError("post-cancel snapshot failed"),
                     ),
-                    self.assertRaises(SystemExit),
+                    self.assertRaises(ValueError),
                 ):
                     host.LIFECYCLE.cancel(args)
                 self.assertTrue(guard.exists())
@@ -2738,7 +2728,7 @@ class HostV2Tests(TestCase):
                 self.assertEqual(json.loads(retry_stdout.getvalue())["outcome"], "already_cancelled")
                 self.assertEqual((run_dir / "cancel-result.json").read_bytes(), immutable_bytes)
 
-    def test_cancel_preserves_a_valid_terminal_report_and_directs_finish(self):
+    def test_cancel_preserves_a_valid_terminal_report_and_closes_run(self):
         host = load_host()
         with tempfile.TemporaryDirectory() as tmp:
             root, run_root = Path(tmp), Path(tmp) / "runs"
@@ -2758,14 +2748,14 @@ class HostV2Tests(TestCase):
                 ])
                 with (
                     mock.patch.object(host.CONFIG.SAFETY, "process_group_alive", return_value=False),
-                    mock.patch.object(host.LIFECYCLE, "record_cancel_workspace_mutation") as mutation,
+                    mock.patch.object(host.LIFECYCLE, "record_cancel_workspace_mutation", return_value=None) as mutation,
                     redirect_stdout(io.StringIO()) as stdout,
                 ):
-                    self.assertEqual(host.LIFECYCLE.cancel(args), 1)
-                self.assertEqual(json.loads(stdout.getvalue())["outcome"], "already_terminal")
-                mutation.assert_not_called()
-                self.assertTrue(guard.exists())
-                self.assertFalse((run_dir / "cancel-result.json").exists())
+                    self.assertEqual(host.LIFECYCLE.cancel(args), 0)
+                self.assertEqual(json.loads(stdout.getvalue())["outcome"], "cancelled_quiescent")
+                mutation.assert_called_once()
+                self.assertFalse(guard.exists())
+                self.assertTrue((run_dir / "cancel-result.json").exists())
                 self.assertEqual(json.loads((run_dir / "peer-report.json").read_text()), valid_report())
 
     def test_finish_cancel_race_preserves_cancellation_as_the_terminal_transition(self):
@@ -2929,7 +2919,7 @@ class HostV2Tests(TestCase):
                 host.CONFIG.STRICT_JSON.write(
                     run_dir / "provider-process.json",
                     {
-                        "schema_version": "2.0",
+                        "schema_version": "3.0",
                         "run_id": request()["run_id"],
                         "pid": None,
                         "pgid": None,
@@ -3027,7 +3017,7 @@ class HostV2Tests(TestCase):
                 "cleanup_failed",
             )
 
-    def test_finish_timeout_and_artifacts_require_v2(self):
+    def test_finish_timeout_and_artifacts_require_v3(self):
         host = load_host()
         with self.assertRaises(ValueError):
             host.LIFECYCLE.resolve_finish_wait_timeout(None, {})
@@ -3051,7 +3041,7 @@ class HostV2Tests(TestCase):
             )
         with self.assertRaises(host.ARTIFACTS.ArtifactValidationError):
             host.ARTIFACTS.validate_host_first_pass(
-                {"schema_version": "2.0", "run_id": "x", "summary": "x", "claims": [], "extra": True},
+                {"schema_version": "3.0", "run_id": "x", "summary": "x", "claims": [], "extra": True},
                 request(run_id="x"),
             )
 
@@ -3059,7 +3049,7 @@ class HostV2Tests(TestCase):
             run_dir = Path(tmp_name)
             disabled_request = request(adjudicator_enabled=False)
             result = {
-                "schema_version": "2.0",
+                "schema_version": "3.0",
                 "run_id": disabled_request["run_id"],
                 "run_dir": str(run_dir),
                 "phase": "ready_for_synthesis",
@@ -3182,7 +3172,7 @@ class HostV2Tests(TestCase):
             with (
                 mock.patch.object(host.PROCESS_TREE, "process_identity_matches", return_value=False),
                 mock.patch.object(host.CONFIG.SAFETY, "process_group_alive", return_value=False),
-                self.assertRaises(SystemExit),
+                self.assertRaises(ValueError),
             ):
                 host.RUNS.summarize_run(run_dir)
 
@@ -3238,7 +3228,7 @@ class HostV2Tests(TestCase):
             legacy_job = valid_state_job()
             legacy_job.pop("adjudicator_enabled")
             legacy_job["profile"] = "thorough"
-            (run_root / "state.json").write_text(json.dumps({"schema_version": "2.0", "jobs": [legacy_job]}))
+            (run_root / "state.json").write_text(json.dumps({"schema_version": "3.0", "jobs": [legacy_job]}))
             args = host.build_parser().parse_args([
                 "doctor", "--run-root", str(run_root), "--repo-root", str(root),
             ])
@@ -3252,7 +3242,7 @@ class HostV2Tests(TestCase):
         self.assertIn("Archive", report["checks"]["state_file"]["recovery"])
         self.assertTrue(report["checks"]["schemas"]["ok"])
 
-    def test_state_and_snapshots_are_v2(self):
+    def test_state_and_snapshots_are_v3(self):
         state = load_state()
         snapshot = load_snapshot()
         with tempfile.TemporaryDirectory() as tmp:
@@ -3261,13 +3251,13 @@ class HostV2Tests(TestCase):
             with self.assertRaises(ValueError):
                 state.load_state(root)
             for malformed in (
-                {"schema_version": "2.0", "jobs": [{"id": "incomplete"}]},
-                {"schema_version": "2.0", "jobs": [{**valid_state_job(), "legacy": True}]},
-                {"schema_version": "2.0", "jobs": [{**valid_state_job(), "pid": "1"}]},
-                {"schema_version": "2.0", "jobs": [{**valid_state_job(), "status": "running", "phase": "done"}]},
-                {"schema_version": "2.0", "jobs": [{**valid_state_job(), "status": "cancelled", "phase": "cancelled"}]},
-                {"schema_version": "2.0", "jobs": [{**valid_state_job(), "cancel_result": "/tmp/cancel-result.json"}]},
-                {"schema_version": "2.0", "jobs": [valid_state_job(), valid_state_job()]},
+                {"schema_version": "3.0", "jobs": [{"id": "incomplete"}]},
+                {"schema_version": "3.0", "jobs": [{**valid_state_job(), "legacy": True}]},
+                {"schema_version": "3.0", "jobs": [{**valid_state_job(), "pid": "1"}]},
+                {"schema_version": "3.0", "jobs": [{**valid_state_job(), "status": "running", "phase": "done"}]},
+                {"schema_version": "3.0", "jobs": [{**valid_state_job(), "status": "cancelled", "phase": "cancelled"}]},
+                {"schema_version": "3.0", "jobs": [{**valid_state_job(), "cancel_result": "/tmp/cancel-result.json"}]},
+                {"schema_version": "3.0", "jobs": [valid_state_job(), valid_state_job()]},
             ):
                 (root / "state.json").write_text(json.dumps(malformed))
                 with self.assertRaises(ValueError):
@@ -3275,10 +3265,10 @@ class HostV2Tests(TestCase):
             (root / "state.json").unlink()
             with ThreadPoolExecutor(max_workers=4) as pool:
                 list(pool.map(lambda i: state.upsert_job(root, valid_state_job_patch("job-" + str(i))), range(8)))
-            self.assertEqual(state.load_state(root)["schema_version"], "2.0")
+            self.assertEqual(state.load_state(root)["schema_version"], "3.0")
             (root / "a.txt").write_text("a")
-            self.assertEqual(snapshot.mutation_snapshot(root)["schema_version"], "2.0")
-            self.assertEqual(snapshot.SNAPSHOT_HEADER, "agent_collab_workspace_snapshot_v2")
+            self.assertEqual(snapshot.mutation_snapshot(root)["schema_version"], "3.0")
+            self.assertEqual(snapshot.SNAPSHOT_HEADER, "agent_collab_workspace_snapshot_v3")
 
     def test_host_independently_records_workspace_mutation(self):
         host = load_host()
@@ -3402,7 +3392,7 @@ class PackageTests(TestCase):
             ["name", "description"],
         )
         launch = (CODEX_SKILL_ROOT / "references" / "launch.md").read_text()
-        for token in ("--peer-model", "--peer-effort", '"schema_version": "2.0"'):
+        for token in ("--peer-model", "--peer-effort", '"schema_version": "3.0"'):
             self.assertIn(token, codex)
         for reference in ("launch.md", "peer-only.md", "synthesize.md"):
             self.assertIn("references/" + reference, codex)
@@ -3561,7 +3551,7 @@ class PackageTests(TestCase):
                 peer.validate_peer_report(invalid_report)
         jsonschema.validate(
             {
-                "schema_version": "2.0",
+                "schema_version": "3.0",
                 "source": "direct_json",
                 "artifact_source": "peer_report",
                 "input_bytes": 10,
@@ -3606,12 +3596,12 @@ class PackageTests(TestCase):
         with self.assertRaises(host.ARTIFACTS.ArtifactValidationError):
             host.ARTIFACTS.validate_provider_process(invalid_cleanup, request())
         jsonschema.validate(
-            {"schema_version": "2.0", "jobs": [valid_state_job()]},
+            {"schema_version": "3.0", "jobs": [valid_state_job()]},
             json.loads((RUNTIME_ROOT / "schemas/state.schema.json").read_text()),
         )
         with self.assertRaises(jsonschema.ValidationError):
             jsonschema.validate(
-                {"schema_version": "2.0", "jobs": [{**valid_state_job(), "legacy": True}]},
+                {"schema_version": "3.0", "jobs": [{**valid_state_job(), "legacy": True}]},
                 json.loads((RUNTIME_ROOT / "schemas/state.schema.json").read_text()),
             )
         jsonschema.validate(
@@ -3620,22 +3610,19 @@ class PackageTests(TestCase):
         )
         jsonschema.validate(
             {
-                "schema_version": "2.0", "run_id": request()["run_id"],
+                "schema_version": "3.0", "run_id": request()["run_id"],
                 "reports": [{"name": "reviewer", "summary": "ok", "claims": []}],
             },
             json.loads((RUNTIME_ROOT / "schemas/helper-reports.schema.json").read_text()),
         )
         jsonschema.validate(
             {
-                "schema_version": "2.0",
+                "schema_version": "3.0",
                 "run_id": request()["run_id"],
                 "status": "cancelled",
                 "outcome": "cancelled_quiescent",
-                "forced": False,
                 "reason": "peer_not_running",
                 "elapsed_seconds": 61,
-                "minimum_wait_seconds": 60,
-                "before_minimum_wait": False,
                 "peer_was_alive": False,
                 "process_cleanup": {
                     "quiescent": True,

@@ -18,6 +18,7 @@ from typing import Any, Mapping
 sys.dont_write_bytecode = True
 if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
+import validation as V
 
 MAX_LOCAL_SUBAGENTS = 64
 # A cold interpreter start can take seconds on Windows and macOS; a timed-out
@@ -658,7 +659,7 @@ def claude_helper_policy_failure(model: str, effort: str) -> dict[str, Any] | No
     if effort != "ultracode":
         return None
     return {
-        "schema_version": "2.0",
+        "schema_version": V.RUN_SCHEMA_VERSION,
         "status": "helper_policy_unavailable",
         "peer": "claude",
         "requested_model": model,
@@ -686,7 +687,7 @@ def codex_fanout_overrides(
         raise ValueError("Codex helper model and effort must be non-empty strings")
     enabled = local_subagents_allowed and max_local_subagents > 0
     if not enabled:
-        # An enabled multi_agent_v2 feature outranks agents.enabled=false.
+        # An enabled multi_agent_v3 feature outranks agents.enabled=false.
         return ["agents.enabled=false", "features.multi_agent_v2=false"]
     return [
         "agents.enabled=true",

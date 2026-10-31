@@ -33,7 +33,6 @@ def _contains_any(text: str, needles: tuple[str, ...]) -> bool:
     )
 
 
-
 MODE_KEYWORDS = {
     "review": (
         'review', 'audit', 'diff', 'patch', 'pull request', 'pr', 'safe to ship', 'ship',
@@ -59,7 +58,6 @@ MODE_KEYWORDS = {
 }
 
 
-
 def classify_mode(target: str, brief: str) -> str:
     text = f"{target}\n{brief}".casefold()
     contexts = {mode: _contains_any(text, words) for mode, words in MODE_KEYWORDS.items()}
@@ -68,7 +66,6 @@ def classify_mode(target: str, brief: str) -> str:
         if contexts[mode]:
             return mode
     return "research" if contexts["research"] and not contexts["review"] else "review"
-
 
 
 def check_availability(args: argparse.Namespace) -> int:
@@ -116,7 +113,6 @@ def check_availability(args: argparse.Namespace) -> int:
                 )
     availability.validate_result(output)
     return RUNS.emit_result((availability.EXIT_CODES[output["status"]], output))
-
 
 
 def build_start_request(args: argparse.Namespace, settings: dict[str, Any]) -> dict[str, Any]:
@@ -202,7 +198,6 @@ def build_start_request(args: argparse.Namespace, settings: dict[str, Any]) -> d
     return request
 
 
-
 def preflight_start(request: dict[str, Any], repo_root: Path) -> str:
     peer = request["peer"]
     peer_model, peer_effort = request["peer_model"], request["peer_effort"]
@@ -258,7 +253,6 @@ def preflight_start(request: dict[str, Any], repo_root: Path) -> str:
     return peer_cli_version
 
 
-
 def peer_process_artifact(request: dict[str, Any], resolved: dict[str, Any], repo_root: Path,
                           run_dir: Path, guard_path: Path, owner: dict[str, Any],
                           peer_identity: dict[str, Any], started_at_epoch: float, peer_cli_version: str) -> dict[str, Any]:
@@ -292,7 +286,6 @@ def peer_process_artifact(request: dict[str, Any], resolved: dict[str, Any], rep
     }
 
 
-
 def spawn_peer_wrapper(request_path: Path, repo_root: Path, run_dir: Path,
                        peer_stdout: Any, peer_stderr: Any, startup_gate_read: int) -> Any:
     env = dict(os.environ)
@@ -323,7 +316,6 @@ def spawn_peer_wrapper(request_path: Path, repo_root: Path, run_dir: Path,
         encoding="utf-8",
         **popen_options,
     )
-
 
 
 def launch_start(repo_root: Path, run_root: Path, resolved: dict[str, Any], request: dict[str, Any], peer_cli_version: str) -> int:
@@ -463,7 +455,6 @@ def launch_start(repo_root: Path, run_root: Path, resolved: dict[str, Any], requ
                            "next_action": LIFECYCLE.next_action(run_dir, repo_root, "first_pass")}))
 
 
-
 def start(args: argparse.Namespace) -> int:
     CONFIG.require_supported_platform()
     peer_runtime = CONFIG.PEER
@@ -471,15 +462,13 @@ def start(args: argparse.Namespace) -> int:
         raise SystemExit("nested Agent Collab invocation refused by the cross-agent depth guard")
     repo_root = CONFIG.canonical_repo_root(args.repo_root or CONFIG.default_repo_root())
     run_root = (args.run_root or CONFIG.default_run_root(repo_root)).resolve()
-    state = CONFIG.STATE
     try:
-        state.load_state(run_root)
+        RUNS.require_run_root_format(run_root)
     except (OSError, ValueError) as exc:
-        state_path = run_root / "state.json"
         raise SystemExit(
-            "invalid v2 Agent Collab state; refusing to launch a peer: "
-            f"{exc}\nArchive {state_path} for evidence and remove or rename it, or select a fresh "
-            "--run-root. Agent Collab will not migrate or coerce legacy state."
+            "invalid v3 Agent Collab state; refusing to launch a peer: "
+            f"{exc}\nUse the original runtime to close or inspect old runs, or select a fresh "
+            "--run-root. Existing history is not migrated or rewritten."
         ) from exc
     REGISTRY.require_workspace_guard_available(repo_root)
     resolved = CONFIG.resolve_settings(repo_root)
@@ -490,13 +479,11 @@ def start(args: argparse.Namespace) -> int:
     return launch_start(repo_root, run_root, resolved, request, peer_cli_version)
 
 
-
 def recover(args: argparse.Namespace) -> int:
     repo_root = CONFIG.canonical_repo_root(args.repo_root or CONFIG.default_repo_root())
     path = REGISTRY.recover_workspace_guard(repo_root, args.run)
     print(CONFIG.STRICT_JSON.dumps({"status": "recovered", "run_id": args.run, "registry": str(path)}))
     return 0
-
 
 
 def status(args: argparse.Namespace) -> int:
@@ -536,7 +523,6 @@ def status(args: argparse.Namespace) -> int:
     return RUNS.emit_result((0, result))
 
 
-
 def result(args: argparse.Namespace) -> int:
     repo_root = CONFIG.canonical_repo_root(args.repo_root or CONFIG.default_repo_root())
     run_root = (args.run_root or CONFIG.default_run_root(repo_root)).resolve()
@@ -572,7 +558,6 @@ def result(args: argparse.Namespace) -> int:
         "peer_stderr_tail": RUNS.stderr_tail(run_dir / "peer.stderr.log"),
     }
     return RUNS.emit_result((0, output))
-
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -714,12 +699,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     cancel_parser = sub.add_parser("cancel", help="Cancel an active peer run.")
     cancel_parser.add_argument("run", help="Run ID, unique prefix, or run directory.")
-    cancel_parser.add_argument(
-        "--force-before-min-wait",
-        action="store_true",
-        help="Allow cancellation before the minimum peer wait; requires --reason.",
-    )
-    cancel_parser.add_argument("--reason", help="Required with --force-before-min-wait; use USER_REQUESTED_STOP for user stop requests.")
+    cancel_parser.add_argument("--reason", help="Optional reason for explicitly cancelling the run.")
     cancel_parser.add_argument("--run-root", type=Path)
     cancel_parser.add_argument("--repo-root", type=Path)
     cancel_parser.set_defaults(func=LIFECYCLE.cancel)
@@ -736,7 +716,6 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-
 def main(argv: list[str] | None = None) -> int:
     CONFIG.STRICT_JSON.use_utf8_stdio()
     parser = build_parser()
@@ -745,7 +724,6 @@ def main(argv: list[str] | None = None) -> int:
         return args.func(args)
     except (OSError, ValueError, RuntimeError) as exc:
         parser.exit(2, f"Agent Collab: {exc}\n")
-
 
 
 if __name__ == "__main__":

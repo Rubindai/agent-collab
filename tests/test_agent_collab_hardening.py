@@ -154,7 +154,7 @@ class IsolationBoundaryTests(TestCase):
                 workspace = isolation.Workspace(root, run)
                 workspace.scratch = own
                 (run / "isolation-state.json").write_text(json.dumps({
-                    "schema_version": "2.0", "scratch": str(victim),
+                    "schema_version": "3.0", "scratch": str(victim),
                     "mounts": [str(victim / "home" / "merged"), str(victim / "repo" / "merged")],
                     "status": "mounted",
                 }))

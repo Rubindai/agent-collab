@@ -60,7 +60,7 @@ class AuditRegressionTests(TestCase):
         (case.run / 'host-inputs.json').write_bytes(receipt)
         case.finish()
         case.host.CONFIG.STRICT_JSON.write(case.run / 'host-synthesis.json', fixtures.valid_host_synthesis(run_dir=case.run))
-        with self.assertRaisesRegex(SystemExit, 'requires --synthesis'):
+        with self.assertRaisesRegex(ValueError, 'requires --synthesis'):
             case.invoke('complete')
         self.assertTrue(case.guard.exists())
 
@@ -147,7 +147,7 @@ class AuditRegressionTests(TestCase):
             destination = root / 'storage' / 'repos' / 'repo' / 'runs'
             previous = os.umask(0)
             try:
-                host.CONFIG.STATE.save_state(destination, {'schema_version':'2.0', 'jobs':[]})
+                host.CONFIG.STATE.save_state(destination, {'schema_version':'3.0', 'jobs':[]})
             finally:
                 os.umask(previous)
             self.assertEqual(root.stat().st_mode & 0o777, 0o755)
@@ -337,7 +337,7 @@ class AuditRegressionTests(TestCase):
         for kind in ('invalid_json', 'noncanonical_output', 'schema_validation_failed', 'peer_report_mismatch'):
             with self.subTest(kind=kind):
                 case.host.CONFIG.STRICT_JSON.write(case.run / 'peer-report.json', peer.failure(kind, 'provider failure', fixtures.request()))
-                metadata = {'schema_version': '2.0', 'source': 'none', 'artifact_source': 'peer_raw',
+                metadata = {'schema_version': '3.0', 'source': 'none', 'artifact_source': 'peer_raw',
                             'input_bytes': 42, 'warnings': [], 'validation_status': kind, 'error': 'provider failure'}
                 case.host.CONFIG.STRICT_JSON.write(case.run / 'peer-normalization.json', metadata)
                 self.assertEqual(case.finish()['validation_status'], kind)

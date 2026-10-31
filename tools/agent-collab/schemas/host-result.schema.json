@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://local.agent-collab/host-result.schema.json",
-  "title": "Agent Collab Host Result v2",
+  "title": "Agent Collab Host Result v3",
   "oneOf": [
     {
       "type": "object",
@@ -19,7 +19,7 @@
         "message"
       ],
       "properties": {
-        "schema_version": {"const": "2.0"},
+        "schema_version": {"const": "3.0"},
         "run_id": {"type": "string", "minLength": 1},
         "run_dir": {"type": "string", "minLength": 1},
         "status": {"const": "peer_running"},
@@ -51,7 +51,7 @@
         "workspace_mutation_sha256"
       ],
       "properties": {
-        "schema_version": {"const": "2.0"},
+        "schema_version": {"const": "3.0"},
         "run_id": {"type": "string", "minLength": 1},
         "run_dir": {"type": "string", "minLength": 1},
         "phase": {"enum": ["ready_for_synthesis", "done"]},

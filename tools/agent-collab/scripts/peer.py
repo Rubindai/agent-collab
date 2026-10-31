@@ -131,7 +131,7 @@ def _provider_tracker_payload(
     cleanup_outcome: str | None,
 ) -> dict[str, Any]:
     return {
-        "schema_version": "2.0",
+        "schema_version": V.RUN_SCHEMA_VERSION,
         "run_id": run_id,
         "pid": identity["pid"] if identity is not None else None,
         "pgid": identity["pgid"] if identity is not None else None,
@@ -648,7 +648,7 @@ def build_prompt(request: dict[str, Any], repo_root: Path, schema_path: Path) ->
     }
     escaped = {key: html.escape(value, quote=False) for key, value in values.items()}
     identity = (
-        f"Set report identity exactly: schema_version=2.0; run_id={html.escape(request['run_id'], quote=False)}; "
+        f"Set report identity exactly: schema_version={V.RUN_SCHEMA_VERSION}; run_id={html.escape(request['run_id'], quote=False)}; "
         f"origin={request['origin']}; host={request['host']}; peer={request['peer']}; mode={request['mode']}; "
         "copy the decoded task target exactly; return its characters rather than XML entity spellings."
     )
@@ -860,7 +860,7 @@ def failure(
     else:
         serialized_details = STRICT_JSON.dumps(details, indent=None)
     return {
-        "schema_version": "2.0",
+        "schema_version": V.RUN_SCHEMA_VERSION,
         "run_id": request["run_id"] if V.RUN_ID.accepts(request.get("run_id")) else "agent-collab-unknown",
         "origin": host,
         "host": host,
@@ -1171,33 +1171,8 @@ def mutation_error_details(before: dict[str, Any], after: dict[str, Any], peer_r
             "changed_paths_truncated": False,
         }
     details["peer_report"] = peer_report
-    details["schema_version"] = "2.0"
+    details["schema_version"] = V.RUN_SCHEMA_VERSION
     return details
-
-
-def make_host_cli_guard(tmp: Path, host: str) -> Path:
-    bin_dir = tmp / "bin"
-    bin_dir.mkdir(parents=True, exist_ok=True)
-    message = f"{host} is the Agent Collab host; peer runs may not call the host CLI."
-    wrapper = bin_dir / host
-    wrapper.write_text(
-        "#!/usr/bin/env bash\n"
-        f'echo "{message}" >&2\n'
-        "exit 64\n",
-        encoding="utf-8",
-        newline="\n",
-    )
-    wrapper.chmod(0o755)
-    if os.name == "nt":
-        # PowerShell and cmd.exe resolve a bare name through PATHEXT, so this
-        # shim shadows the host's native executable later on PATH. Git Bash
-        # uses the extensionless script above.
-        (bin_dir / f"{host}.cmd").write_text(
-            f"@echo {message} 1>&2\r\n@exit /b 64\r\n",
-            encoding="utf-8",
-            newline="",
-        )
-    return bin_dir
 
 
 def write_json(path: Path, data: dict[str, Any]) -> None:
@@ -1226,7 +1201,7 @@ def workspace_mutation_output_path(
 
 def _base_normalization_metadata(source: str, text: str, warnings: list[str] | None = None) -> dict[str, Any]:
     return {
-        "schema_version": "2.0",
+        "schema_version": V.RUN_SCHEMA_VERSION,
         "source": source,
         "input_bytes": len(text.encode("utf-8")),
         "warnings": warnings or [],
@@ -1305,7 +1280,7 @@ PEER_REPORT_REQUEST_BINDING_KEYS = ("run_id", "origin", "host", "peer", "mode", 
 def validate_peer_report_matches_request(report: dict[str, Any], request: dict[str, Any]) -> None:
     for key in PEER_REPORT_REQUEST_BINDING_KEYS:
         if report.get(key) != request.get(key):
-            raise PeerReportValidationError(f"peer report {key} does not match the v2 request")
+            raise PeerReportValidationError(f"peer report {key} does not match the v3 request")
 
 
 def canonicalize_peer_report_target(
@@ -1567,7 +1542,7 @@ def normalize_provider_result(request: dict[str, Any], completed: Any, output_pa
             write_provider_normalization(
                 normalization_output_path,
                 {
-                    "schema_version": "2.0",
+                    "schema_version": V.RUN_SCHEMA_VERSION,
                     "source": "none",
                     "input_bytes": len(output_text.encode("utf-8")),
                     "warnings": [],
@@ -1647,8 +1622,6 @@ def execute_peer(request: dict[str, Any], repo_root: Path, effective_env: dict[s
     peer_env["AGENT_COLLAB_HOST"] = request["host"]
     peer_env["AGENT_COLLAB_PEER"] = request["peer"]
     peer_env["AGENT_COLLAB_RUN_ID"] = request["run_id"]
-    guard_bin = make_host_cli_guard(tmp, request["host"])
-    peer_env["PATH"] = f"{guard_bin}{os.pathsep}{peer_env.get('PATH', '')}"
     completed = run_provider(request, repo_root, peer_env, command, tmp, raw_output_path, absolute_deadline)
     if isinstance(completed, dict):
         return completed

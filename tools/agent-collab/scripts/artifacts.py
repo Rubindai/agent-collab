@@ -165,9 +165,8 @@ def validate_cleanup_evidence(value: Any, label: str) -> None:
 def validate_cancel_result(report: dict[str, Any], request: dict[str, Any], run_dir: Path) -> None:
     validate_artifact(report, request, "cancel-result", {
         "status": {"cancelled"}, "outcome": {"cancelled_quiescent"},
-        "forced": bool, "before_minimum_wait": bool, "peer_was_alive": bool, "reason": V.NONEMPTY,
+        "peer_was_alive": bool, "reason": V.NONEMPTY,
         "elapsed_seconds": (V.Rule(lambda v: V.NUMBER.accepts(v) and v >= 0, "a non-negative finite number"), type(None)),
-        "minimum_wait_seconds": V.number(CONFIG.MIN_PEER_WAIT_SECONDS, CONFIG.MIN_PEER_WAIT_SECONDS),
         "process_cleanup": {"quiescent": {True}, "provider": dict, "wrapper": dict},
         "preserved_artifacts": dict.fromkeys(CANCEL_PRESERVED_ARTIFACTS, (V.DIGEST, type(None))),
         "workspace_mutation": (str, type(None)), "workspace_mutation_sha256": V.DIGEST, "completed_at": str,
@@ -224,19 +223,12 @@ def read_json_if_exists(path: Path) -> dict[str, Any] | None:
     return load_json(path)
 
 
-def require_artifact_version(data: dict[str, Any], label: str) -> None:
-    if data.get("schema_version") != CONFIG.ARTIFACT_SCHEMA_VERSION:
-        raise SystemExit(
-            f"{label} schema_version must be {CONFIG.ARTIFACT_SCHEMA_VERSION}; legacy runs are not supported"
-        )
-
-
 def validate_peer_process(data: dict[str, Any], request: dict[str, Any], run_dir: Path) -> None:
     validate_artifact(data, request, "peer-process", {
         "pid": V.integer(1), "pgid": V.integer(1), "process_identity": dict,
         "run_dir": str, "host": V.ORIGINS, "peer": V.ORIGINS, "adjudicator_enabled": bool,
         "started_at": str, "started_at_epoch": V.NUMBER,
-        "peer_timeout_seconds": V.number(CONFIG.MIN_PEER_WAIT_SECONDS, CONFIG.SAFETY.MAX_AGENT_TIMEOUT_SECONDS),
+        "peer_timeout_seconds": V.number(CONFIG.MIN_PEER_TIMEOUT_SECONDS, CONFIG.SAFETY.MAX_AGENT_TIMEOUT_SECONDS),
         "owner_token": V.Rule(lambda v: type(v) is str and re.fullmatch(r"[0-9a-f]{32}", v) is not None,
                               "32 lowercase hexadecimal characters"),
         "request_sha256": V.DIGEST, "settings": {"local": V.NONEMPTY, "global": V.NONEMPTY},
@@ -280,12 +272,12 @@ def validate_peer_process(data: dict[str, Any], request: dict[str, Any], run_dir
     }
     for key, expected_path in expected_paths.items():
         if Path(data[key]).resolve() != expected_path.resolve():
-            raise ArtifactValidationError(f"peer-process {key} path does not match the v2 run layout")
+            raise ArtifactValidationError(f"peer-process {key} path does not match the v3 run layout")
 
 
 def validate_provider_process(data: dict[str, Any], request: dict[str, Any]) -> None:
     if not isinstance(data, dict) or set(data) != PROVIDER_PROCESS_KEYS:
-        raise ArtifactValidationError("provider-process keys must match schema 2.0 exactly")
+        raise ArtifactValidationError("provider-process keys must match schema 3.0 exactly")
     if data["schema_version"] != CONFIG.ARTIFACT_SCHEMA_VERSION or data["run_id"] != request["run_id"]:
         raise ArtifactValidationError("provider-process schema_version/run_id does not match the request")
     status = data["status"]
@@ -391,7 +383,7 @@ def validate_host_result(report: dict[str, Any], request: dict[str, Any], run_di
     phase = report.get("phase")
     V.check(phase, str, "host-result phase", ArtifactValidationError)
     fields = {"run_dir": str, "phase": {"waiting_for_peer", "ready_for_synthesis", "done"},
-              "finish_wait_seconds": V.number(CONFIG.MIN_PEER_WAIT_SECONDS, CONFIG.SAFETY.MAX_AGENT_TIMEOUT_SECONDS + CONFIG.FINISH_TIMEOUT_GRACE_SECONDS),
+              "finish_wait_seconds": V.number(CONFIG.MIN_PEER_TIMEOUT_SECONDS, CONFIG.SAFETY.MAX_AGENT_TIMEOUT_SECONDS + CONFIG.FINISH_TIMEOUT_GRACE_SECONDS),
               "finish_timeout_source": FINISH_TIMEOUT_SOURCES}
     if phase == "waiting_for_peer":
         fields.update(status={"peer_running"}, peer_pid=V.integer(1), peer_report=str, message=V.NONBLANK)
@@ -493,10 +485,9 @@ def load_helper_evidence(
 
 
 def validate_host_helper_budget(helpers: dict[str, Any] | None, adjudicator: dict[str, Any] | None,
-                                request: dict[str, Any]) -> None:
+                                request: dict[str, Any]) -> tuple[list[dict[str, Any]], str | None]:
     """Count admitted helper reports, including one actual advisory report."""
-    if helpers is not None:
-        validate_helper_evidence(helpers, request)
+    claims, digest = validate_helper_evidence(helpers, request) if helpers is not None else ([], None)
     if adjudicator is not None:
         validate_adjudicator_report(adjudicator, request)
     used = len(helpers["reports"]) if helpers else 0
@@ -504,6 +495,7 @@ def validate_host_helper_budget(helpers: dict[str, Any] | None, adjudicator: dic
     limit = request["max_local_subagents"] if request["local_subagents_allowed"] else 0
     if used > limit:
         raise ArtifactValidationError(f"host helper reports including adjudication exceed the resolved per-run limit {limit}")
+    return claims, digest
 
 
 def validate_helper_evidence(data: dict[str, Any], request: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
@@ -586,11 +578,11 @@ def validate_peer_normalization(metadata: dict[str, Any]) -> None:
     required = common if status == "ok" else common | {"error"}
     if set(metadata) != required:
         raise ArtifactValidationError(
-            "peer-normalization keys must match schema 2.0 exactly; "
+            "peer-normalization keys must match schema 3.0 exactly; "
             f"missing={sorted(required - set(metadata))}, unknown={sorted(set(metadata) - required)}"
         )
     if metadata["schema_version"] != CONFIG.ARTIFACT_SCHEMA_VERSION:
-        raise ArtifactValidationError("peer-normalization schema_version must be 2.0")
+        raise ArtifactValidationError("peer-normalization schema_version must be 3.0")
     if status not in VALIDATION_STATUSES:
         raise ArtifactValidationError("peer-normalization validation_status is invalid")
     if metadata["artifact_source"] not in {"peer_report", "peer_raw"}:
@@ -681,51 +673,27 @@ def normalize_peer_report_from_artifacts(
     return peer_report, failure_kind
 
 
-def valid_terminal_peer_report(
-    peer_runtime: Any,
-    run_dir: Path,
-    request: dict[str, Any],
-) -> bool:
-    path = run_dir / "peer-report.json"
-    if not path.exists() or path.stat().st_size == 0:
-        return False
-    try:
-        normalized = peer_runtime.normalize_json_payload(
-            CONFIG.STRICT_JSON.read_text(path, max_bytes=16 * 1024 * 1024).strip(),
-            "direct_json",
-        )
-        peer_runtime.validate_peer_report(normalized.report)
-        validate_peer_report_matches_request(normalized.report, request)
-    except Exception:
-        return False
-    return True
-
-
 def validate_completion_artifacts(
     run_dir: Path,
     request: dict[str, Any],
     host_result: dict[str, Any],
     peer_runtime: Any,
+    documents: dict[str, Any],
+    host_synthesis: dict[str, Any],
 ) -> dict[str, Any]:
-    peer_report = load_json(run_dir / "peer-report.json")
-    host_report = load_json(run_dir / "host-first-pass.json")
-    host_synthesis_path = run_dir / "host-synthesis.json"
-    if not host_synthesis_path.exists():
-        raise ArtifactValidationError(f"missing required host synthesis attestation: {host_synthesis_path}")
-    host_synthesis = load_json(host_synthesis_path)
-    claim_matrix = load_json(run_dir / "claim-matrix.json")
-    normalization = load_json(run_dir / "peer-normalization.json")
+    peer_report = documents["peer-report.json"]
+    host_report = documents["host-first-pass.json"]
+    claim_matrix = documents["claim-matrix.json"]
+    normalization = documents["peer-normalization.json"]
     peer_runtime.validate_peer_report(peer_report)
     validate_peer_report_matches_request(peer_report, request)
     validate_host_first_pass(host_report, request)
     validate_host_synthesis(host_synthesis, request)
     validate_claim_matrix(claim_matrix, request)
-    adjudicator_path = run_dir / "adjudicator-report.json"
-    adjudicator: dict[str, Any] | None = None
+    adjudicator = documents["adjudicator-report.json"]
     if request["adjudicator_enabled"]:
-        adjudicator = load_json(adjudicator_path)
         validate_adjudicator_report(adjudicator, request)
-    elif adjudicator_path.exists():
+    elif adjudicator is not None:
         raise ArtifactValidationError(
             "adjudicator-report.json is forbidden because adjudication is disabled"
         )
@@ -734,15 +702,15 @@ def validate_completion_artifacts(
         raise ArtifactValidationError("peer-normalization validation_status does not match host-result")
     if host_result["peer_status"] != peer_report["status"]:
         raise ArtifactValidationError("host-result peer_status does not match peer-report")
-    workspace_mutation = read_json_if_exists(run_dir / "workspace-mutation.json")
+    workspace_mutation = documents["workspace-mutation.json"]
     if host_result["workspace_mutation"] != workspace_mutation:
         raise ArtifactValidationError("host-result workspace_mutation does not match the run artifact")
     if host_synthesis["workspace_mutation_sha256"] != host_result["workspace_mutation_sha256"]:
         raise ArtifactValidationError(
             "host-synthesis does not bind the current workspace mutation evidence; inspect the diagnostic and resynthesize"
         )
-    helper_claims, helper_digest = load_helper_evidence(run_dir, request)
-    validate_host_helper_budget(read_json_if_exists(run_dir / "helper-reports.json"), adjudicator, request)
+    helpers = documents["helper-reports.json"]
+    helper_claims, helper_digest = validate_host_helper_budget(helpers, adjudicator, request)
     expected_claim_matrix = build_claim_matrix(
         request,
         host_report,

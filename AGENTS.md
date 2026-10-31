@@ -41,7 +41,7 @@ Agent Collab launches an independent opposite-product peer, then the host verifi
 - Accept semantic host judgments only through explicit CLI input flags. Bind generated synthesis drafts to an immutable evidence revision; never refresh hashes on an old judgment automatically.
 - Keep the normal host workflow self-contained in `SKILL.md` within 8 KB. `start` and `advance` return the next semantic action; guided waits default to 60 seconds without extending the peer deadline. `advance` shares finalization and closure with the low-level commands and captures a readable evidence file and its revision under the same operation lock. Bind and verify the rendered bytes; keep control output compact. Do not infer admission from an edited file or submit evidence updates and synthesis together.
 - Preserve the first admitted host pass and verify admission hashes for host reports. Bind the saved request to its launch-time digest so post-start edits cannot silently change helper admission or other resolved settings.
-- Enforce strict schema 2.0 for settings, state, requests, helper reports, and synthesis. Reject older, incomplete, noncanonical, or wrongly typed files without coercion or translation.
+- Enforce strict schema 2.0 for saved settings and schema 3.0 for run artifacts, state, and the guard registry. Reject older, incomplete, noncanonical, or wrongly typed files without coercion or translation.
 - On supported POSIX hosts, create run directories as `0700` and persisted artifacts, settings, state, locks, snapshots, raw output, stderr, and helper counters as `0600`, independent of umask. Reject symlink destinations where no-follow creation is available. On Windows, POSIX modes do not apply; files inherit their directory's access control list. Write artifacts with LF line endings on every platform.
 
 ### Helpers
@@ -60,7 +60,7 @@ Agent Collab launches an independent opposite-product peer, then the host verifi
 - Serialize every guard check, stale-start recovery, acquisition, update, and release with one stable per-worktree OS file lock and a bounded wait. Never unlink a guard based on an unlocked stale read.
 - Serialize terminal `finish`, `complete`, and `cancel` transitions with a separate bounded per-run lock; do not hold it while waiting for a live provider.
 - Gate the wrapper's peer work and the provider launch on committing their exact process artifacts. Release the guard only after tracked groups are terminal and quiescent. Rebuild the claim matrix from current admitted artifacts before completion so stale synthesis cannot release it.
-- Peer depth markers, host-CLI shadows, and helper instructions deter nested workflows; they do not prevent a peer from deliberately clearing its environment or using other launch surfaces. Do not claim a hard cross-product recursion boundary.
+- Peer depth markers and helper instructions deter nested workflows; they do not prevent a peer from deliberately clearing its environment or using other launch surfaces. Do not claim a hard cross-product recursion boundary.
 - Require a finite absolute peer deadline, default 2700 seconds. At expiry terminate with a structured timeout result. Never support indefinite waits. Claude has no default turn cap; `--claude-max-turns` is an explicit per-run override, and reaching it is distinct from timeout.
 
 ## Prompt maintenance

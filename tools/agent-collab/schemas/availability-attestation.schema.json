@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://local.agent-collab/availability-attestation.schema.json",
-  "title": "Agent Collab Availability Result v2",
+  "title": "Agent Collab Availability Result v3",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -19,7 +19,7 @@
     "details"
   ],
   "properties": {
-    "schema_version": {"const": "2.0"},
+    "schema_version": {"const": "3.0"},
     "status": {"enum": ["available", "unavailable", "unknown"]},
     "peer": {"enum": ["claude", "codex"]},
     "requested_model": {"type": "string"},

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://local.agent-collab/host-request.schema.json",
-  "title": "Agent Collab Host Request v2",
+  "title": "Agent Collab Host Request v3",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -30,7 +30,7 @@
     "helper_enforcement"
   ],
   "properties": {
-    "schema_version": {"const": "2.0"},
+    "schema_version": {"const": "3.0"},
     "origin": {"enum": ["claude", "codex"]},
     "host": {"enum": ["claude", "codex"]},
     "peer": {"enum": ["claude", "codex"]},
@@ -70,7 +70,7 @@
         "details"
       ],
       "properties": {
-        "schema_version": {"const": "2.0"},
+        "schema_version": {"const": "3.0"},
         "status": {"const": "available"},
         "peer": {"enum": ["claude", "codex"]},
         "requested_model": {"type": "string", "minLength": 1},

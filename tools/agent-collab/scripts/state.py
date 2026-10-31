@@ -13,7 +13,7 @@ import validation as V
 import strict_json as STRICT_JSON
 
 
-STATE_SCHEMA_VERSION = "2.0"
+STATE_SCHEMA_VERSION = V.RUN_SCHEMA_VERSION
 MAX_JOBS = 50
 ACTIVE_STATUSES = {"running", "synthesizing"}
 ORIGINS = V.ORIGINS
@@ -48,8 +48,7 @@ JOB_OPTIONAL_FIELDS = {
     "finish_timeout_source": FINISH_TIMEOUT_SOURCES, "peer_status": PEER_STATUSES,
     "peer_verdict": PEER_VERDICTS, "validation_status": VALIDATION_STATUSES,
     "normalization_source": NORMALIZATION_SOURCES,
-    "cancel": {"forced": bool, "reason": V.NONEMPTY, "elapsed_seconds": (V.NUMBER, type(None)),
-               "minimum_wait_seconds": V.NUMBER, "before_minimum_wait": bool},
+    "cancel": {"reason": V.NONEMPTY, "elapsed_seconds": (V.NUMBER, type(None))},
 }
 JOB_OPTIONAL_KEYS = set(JOB_OPTIONAL_FIELDS)
 JOB_KEYS = JOB_REQUIRED_KEYS | JOB_OPTIONAL_KEYS

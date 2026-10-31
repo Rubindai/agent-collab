@@ -19,6 +19,8 @@ class Rule:
     description: str
 
 
+RUN_SCHEMA_VERSION = "3.0"
+
 ORIGINS = {"claude", "codex"}
 MODES = {"review", "research", "design", "plan", "debug"}
 VERDICTS = {"pass", "pass_with_concerns", "changes_recommended", "ready",
@@ -37,7 +39,7 @@ def finite_number(value: Any) -> bool:
 
 
 NUMBER = Rule(finite_number, "a finite number")
-VERSION = Rule(lambda v: v == "2.0", "2.0; legacy artifacts are not supported")
+VERSION = Rule(lambda v: v == RUN_SCHEMA_VERSION, f"{RUN_SCHEMA_VERSION}; legacy artifacts are not supported")
 DIGEST = Rule(lambda v: type(v) is str and re.fullmatch(r"[0-9a-f]{64}", v) is not None,
               "a lowercase SHA-256 digest")
 RUN_ID = Rule(lambda v: type(v) is str and v not in {".", ".."}

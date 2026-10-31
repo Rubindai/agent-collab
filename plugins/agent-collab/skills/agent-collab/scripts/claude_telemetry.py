@@ -13,6 +13,7 @@ from typing import Any
 sys.dont_write_bytecode = True
 if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
+import validation as V
 import strict_json as STRICT_JSON
 
 MAX_CAPTURE_BYTES = 1_000_000
@@ -22,7 +23,7 @@ EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 
 def new_receipt(run_id: str, expected_effort: str) -> dict[str, Any]:
     receipt = {
-        "schema_version": "2.0", "run_id": run_id,
+        "schema_version": V.RUN_SCHEMA_VERSION, "run_id": run_id,
         "expected_effort": expected_effort, "observations": [],
     }
     validate_receipt(receipt, run_id, expected_effort)
@@ -34,7 +35,7 @@ def validate_receipt(value: Any, run_id: str, expected_effort: str) -> None:
     if not isinstance(value, dict) or set(value) != keys:
         raise ValueError("Claude effort receipt must contain exactly the canonical fields")
     if (
-        value["schema_version"] != "2.0" or value["run_id"] != run_id
+        value["schema_version"] != V.RUN_SCHEMA_VERSION or value["run_id"] != run_id
         or not isinstance(run_id, str) or not run_id
         or value["expected_effort"] != expected_effort or expected_effort not in EFFORTS
     ):

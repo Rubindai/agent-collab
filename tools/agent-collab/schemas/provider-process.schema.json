@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://local.agent-collab/provider-process.schema.json",
-  "title": "Agent Collab Provider Process v2",
+  "title": "Agent Collab Provider Process v3",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -15,7 +15,7 @@
     "completed_at"
   ],
   "properties": {
-    "schema_version": {"const": "2.0"},
+    "schema_version": {"const": "3.0"},
     "run_id": {"type": "string", "minLength": 1},
     "pid": {"type": ["integer", "null"], "minimum": 1},
     "pgid": {"type": ["integer", "null"], "minimum": 1},

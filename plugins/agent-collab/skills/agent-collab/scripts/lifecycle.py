@@ -19,7 +19,6 @@ import process_tree as PROCESS_TREE
 FINISH_WAIT_POLL_SECONDS = 1
 
 
-
 def next_action(run_dir: Path, repo_root: Path, stage: str, synthesis_input: str | None = None) -> dict[str, Any]:
     """Return executable argv and only the instructions needed at this stage."""
     command = [sys.executable, str(CONFIG.runtime_dir() / "host.py"), "advance", str(run_dir), "--repo-root", str(repo_root)]
@@ -46,11 +45,9 @@ def next_action(run_dir: Path, repo_root: Path, stage: str, synthesis_input: str
     return result
 
 
-
 def host_policy(request: dict[str, Any]) -> dict[str, Any]:
     return {key: request[key] for key in ("adjudicator_enabled", "local_subagents_allowed",
         "max_local_subagents", "online_research", "edit_allowed", "workspace_mode", "peer_timeout_seconds")}
-
 
 
 def write_json_once(path: Path, data: dict[str, Any]) -> bool:
@@ -75,7 +72,6 @@ def write_json_once(path: Path, data: dict[str, Any]) -> bool:
         return True
     finally:
         temporary.unlink(missing_ok=True)
-
 
 
 def run_snapshot(
@@ -105,7 +101,6 @@ def run_snapshot(
         snapshot_data=data,
     )
     return data
-
 
 
 def record_workspace_mutation(
@@ -159,7 +154,6 @@ def record_workspace_mutation(
     return ARTIFACTS.read_json_if_exists(mutation_path)
 
 
-
 def record_host_workspace_mutation(
     repo_root: Path,
     run_dir: Path,
@@ -173,7 +167,6 @@ def record_host_workspace_mutation(
         mutation_name="workspace-mutation.json",
         source="host_snapshot",
     )
-
 
 
 def record_cancel_workspace_mutation(
@@ -191,16 +184,15 @@ def record_cancel_workspace_mutation(
     )
 
 
-
 def resolve_finish_wait_timeout(
     explicit_timeout_seconds: float | None,
     process_info: dict[str, Any],
     *, guided: bool = False,
 ) -> tuple[float, str]:
     if explicit_timeout_seconds is not None:
-        if not CONFIG.MIN_PEER_WAIT_SECONDS <= explicit_timeout_seconds <= CONFIG.SAFETY.MAX_AGENT_TIMEOUT_SECONDS + CONFIG.FINISH_TIMEOUT_GRACE_SECONDS:
+        if not CONFIG.MIN_PEER_TIMEOUT_SECONDS <= explicit_timeout_seconds <= CONFIG.SAFETY.MAX_AGENT_TIMEOUT_SECONDS + CONFIG.FINISH_TIMEOUT_GRACE_SECONDS:
             raise ValueError(
-                f"finish timeout must be between {CONFIG.MIN_PEER_WAIT_SECONDS} and "
+                f"finish timeout must be between {CONFIG.MIN_PEER_TIMEOUT_SECONDS} and "
                 f"{CONFIG.SAFETY.MAX_AGENT_TIMEOUT_SECONDS + CONFIG.FINISH_TIMEOUT_GRACE_SECONDS} seconds"
             )
         return explicit_timeout_seconds, "explicit"
@@ -209,14 +201,13 @@ def resolve_finish_wait_timeout(
         peer_timeout = process_info["peer_timeout_seconds"]
         try:
             derived = float(peer_timeout) + CONFIG.FINISH_TIMEOUT_GRACE_SECONDS
-            if not CONFIG.MIN_PEER_WAIT_SECONDS <= float(peer_timeout) <= CONFIG.SAFETY.MAX_AGENT_TIMEOUT_SECONDS:
+            if not CONFIG.MIN_PEER_TIMEOUT_SECONDS <= float(peer_timeout) <= CONFIG.SAFETY.MAX_AGENT_TIMEOUT_SECONDS:
                 raise ValueError("peer timeout is outside the finite supported range")
-            return (float(CONFIG.MIN_PEER_WAIT_SECONDS), "guided_default") if guided else (derived, "peer_timeout_plus_grace")
+            return (float(CONFIG.GUIDED_WAIT_SECONDS), "guided_default") if guided else (derived, "peer_timeout_plus_grace")
         except (TypeError, ValueError) as exc:
             raise ValueError("peer-process peer_timeout_seconds must be finite and bounded") from exc
 
     raise ValueError("peer-process is missing required peer_timeout_seconds")
-
 
 
 def remaining_finish_wait_seconds(
@@ -232,7 +223,6 @@ def remaining_finish_wait_seconds(
         + CONFIG.FINISH_TIMEOUT_GRACE_SECONDS
     )
     return min(configured_wait_seconds, max(0.0, hard_deadline - current_time)), hard_deadline
-
 
 
 def wait_for_peer_report(
@@ -264,10 +254,8 @@ def wait_for_peer_report(
         time.sleep(FINISH_WAIT_POLL_SECONDS)
 
 
-
 def review_documents(run_dir: Path) -> dict[str, Any]:
     return {name: ARTIFACTS.read_json_if_exists(run_dir / name) for name in CONFIG.REVIEW.EVIDENCE_FILES}
-
 
 
 def ingest_finish_inputs(args: argparse.Namespace, run_dir: Path, request: dict[str, Any], process_info: dict[str, Any]) -> None:
@@ -278,149 +266,99 @@ def ingest_finish_inputs(args: argparse.Namespace, run_dir: Path, request: dict[
     supplied = [item for item in inputs if getattr(args, item[0], None) is not None]
     if not supplied:
         return
-    with REGISTRY.run_operation_lock(run_dir):
-        REGISTRY.require_workspace_guard_owner(Path(process_info["repo_root"]), request["run_id"], owner=process_info)
-        current = ARTIFACTS.read_json_if_exists(run_dir / "host-result.json")
-        if (run_dir / "cancel-result.json").exists() or (current and current.get("phase") == "done"):
-            raise ARTIFACTS.ArtifactValidationError("cannot replace evidence of a terminal run")
-        pending = []
-        review = CONFIG.REVIEW
-        admission = review.verify_admissions(run_dir, process_info, replacing={item[1] for item in supplied})
-        for option, filename, allowed, validate in supplied:
-            if option == "first_pass" and admission["reports"][filename] is None and (
-                    (run_dir / filename).exists() or (run_dir / "reviews").exists()):
-                raise ARTIFACTS.ArtifactValidationError("cannot re-admit an existing first pass without its original receipt")
-            value = ARTIFACTS.load_json(getattr(args, option))
-            required = allowed - ({"claims"} if option == "adjudicator" else set())
-            if not required <= set(value) <= allowed:
-                raise ARTIFACTS.ArtifactValidationError(f"{option} input keys must be {sorted(allowed)}; only adjudicator claims are optional")
-            if option == "adjudicator" and (not request["adjudicator_enabled"] or value.get("status") == "advisory_pending"):
-                raise ARTIFACTS.ArtifactValidationError("adjudicator input requires enabled adjudication and an actual report, not advisory_pending")
-            artifact = {"schema_version": CONFIG.ARTIFACT_SCHEMA_VERSION, "run_id": request["run_id"], **value}
-            validate(artifact, request)
-            pending.append((run_dir / filename, artifact))
-        merged = {path.name: artifact for path, artifact in pending}
-        for name in ("helper-reports.json", "adjudicator-report.json"):
-            if name not in merged:
-                merged[name] = ARTIFACTS.read_json_if_exists(run_dir / name)
-        ARTIFACTS.validate_host_helper_budget(merged["helper-reports.json"], merged["adjudicator-report.json"], request)
-        for path, artifact in pending:
-            digest = review.digest(artifact)
-            if path.name == "host-first-pass.json" and admission["reports"][path.name] not in {None, digest}:
-                raise ARTIFACTS.ArtifactValidationError("the admitted independent first pass is immutable; put later judgments in synthesis")
-            admission["reports"][path.name] = digest
-        for path, artifact in pending:
-            CONFIG.STRICT_JSON.write(path, artifact)
-        CONFIG.STRICT_JSON.write(run_dir / "host-inputs.json", admission)
-
-
+    REGISTRY.require_workspace_guard_owner(Path(process_info["repo_root"]), request["run_id"], owner=process_info)
+    current = ARTIFACTS.read_json_if_exists(run_dir / "host-result.json")
+    if (run_dir / "cancel-result.json").exists() or (current and current.get("phase") == "done"):
+        raise ARTIFACTS.ArtifactValidationError("cannot replace evidence of a terminal run")
+    pending = []
+    review = CONFIG.REVIEW
+    admission = review.verify_admissions(run_dir, process_info, replacing={item[1] for item in supplied})
+    for option, filename, allowed, validate in supplied:
+        if option == "first_pass" and admission["reports"][filename] is None and (
+                (run_dir / filename).exists() or (run_dir / "reviews").exists()):
+            raise ARTIFACTS.ArtifactValidationError("cannot re-admit an existing first pass without its original receipt")
+        value = ARTIFACTS.load_json(getattr(args, option))
+        required = allowed - ({"claims"} if option == "adjudicator" else set())
+        if not required <= set(value) <= allowed:
+            raise ARTIFACTS.ArtifactValidationError(f"{option} input keys must be {sorted(allowed)}; only adjudicator claims are optional")
+        if option == "adjudicator" and (not request["adjudicator_enabled"] or value.get("status") == "advisory_pending"):
+            raise ARTIFACTS.ArtifactValidationError("adjudicator input requires enabled adjudication and an actual report, not advisory_pending")
+        artifact = {"schema_version": CONFIG.ARTIFACT_SCHEMA_VERSION, "run_id": request["run_id"], **value}
+        validate(artifact, request)
+        pending.append((run_dir / filename, artifact))
+    merged = {path.name: artifact for path, artifact in pending}
+    for name in ("helper-reports.json", "adjudicator-report.json"):
+        if name not in merged:
+            merged[name] = ARTIFACTS.read_json_if_exists(run_dir / name)
+    ARTIFACTS.validate_host_helper_budget(merged["helper-reports.json"], merged["adjudicator-report.json"], request)
+    for path, artifact in pending:
+        digest = review.digest(artifact)
+        if path.name == "host-first-pass.json" and admission["reports"][path.name] not in {None, digest}:
+            raise ARTIFACTS.ArtifactValidationError("the admitted independent first pass is immutable; put later judgments in synthesis")
+        admission["reports"][path.name] = digest
+    for path, artifact in pending:
+        CONFIG.STRICT_JSON.write(path, artifact)
+    CONFIG.STRICT_JSON.write(run_dir / "host-inputs.json", admission)
 
 def finish(args: argparse.Namespace) -> int:
     return RUNS.emit_result(finish_run(args))
 
 
+def prepare_finish(args: argparse.Namespace, context: RUNS.RunContext) -> dict[str, Any]:
+    run_dir, request, process = context.run_dir, context.request, context.process
+    ingest_finish_inputs(args, run_dir, request, process)
+    CONFIG.REVIEW.verify_admissions(run_dir, process)
+    host_report = ARTIFACTS.load_json(run_dir / "host-first-pass.json")
+    ARTIFACTS.validate_host_first_pass(host_report, request)
+    _, guard = REGISTRY.require_workspace_guard_owner(context.repo_root, request["run_id"], owner=process)
+    PROCESS_TREE.guard_wrapper_proof(guard, process)
+    return host_report
 
-def finish_run(args: argparse.Namespace, *, guided: bool = False) -> tuple[int, dict[str, Any]]:
-    _, run_root, run_dir = RUNS.resolve_run_context(args)
-    state = CONFIG.STATE
-    request = RUNS.require_run_request(run_dir)
-    process_info = ARTIFACTS.load_json(run_dir / "peer-process.json")
-    ARTIFACTS.validate_peer_process(process_info, request, run_dir)
-    ingest_finish_inputs(args, run_dir, request, process_info)
-    CONFIG.REVIEW.verify_admissions(run_dir, process_info)
-    host_first_pass = run_dir / "host-first-pass.json"
-    if not host_first_pass.exists():
-        raise SystemExit(f"missing required independent host analysis: {host_first_pass}")
-    host_report = ARTIFACTS.load_json(host_first_pass)
-    try:
-        ARTIFACTS.validate_host_first_pass(host_report, request)
-    except ARTIFACTS.ArtifactValidationError as exc:
-        raise SystemExit(f"invalid independent host analysis {host_first_pass}: {exc}") from exc
-    repo_root = Path(process_info["repo_root"]).resolve()
-    _, active_guard = REGISTRY.require_workspace_guard_owner(repo_root, request["run_id"], owner=process_info)
-    wrapper_quiescence_proven = bool(
-        active_guard is not None
-        and active_guard["phase"] == "ready_for_synthesis"
-        and active_guard["peer_identity"] == process_info["process_identity"]
-    )
-    if active_guard is not None and active_guard["phase"] == "ready_for_synthesis" and not wrapper_quiescence_proven:
-        raise SystemExit("ready-for-synthesis workspace guard contains an invalid wrapper-quiescence proof")
-    pid = int(process_info["pid"])
-    peer_report_path = run_dir / "peer-report.json"
-    configured_wait_seconds, finish_timeout_source = resolve_finish_wait_timeout(args.timeout_seconds, process_info, guided=guided)
-    actual_wait_seconds, hard_deadline = remaining_finish_wait_seconds(
-        process_info, configured_wait_seconds
-    )
-    finish_wait_seconds = configured_wait_seconds
-    wait_status = wait_for_peer_report(peer_report_path, process_info, actual_wait_seconds)
-    with REGISTRY.run_operation_lock(run_dir):
-        return _finish_after_wait_locked(
-            state=state,
-            run_root=run_root,
-            run_dir=run_dir,
-            request=request,
-            host_report=host_report,
-            process_info=process_info,
-            repo_root=repo_root,
-            peer_report_path=peer_report_path,
-            finish_wait_seconds=finish_wait_seconds,
-            finish_timeout_source=finish_timeout_source,
-            hard_deadline=hard_deadline,
-            wait_status=wait_status,
-            guided=guided,
-        )
 
+def finish_run(args: argparse.Namespace, *, guided: bool = False,
+               prepared: tuple[RUNS.RunContext, dict[str, Any]] | None = None) -> tuple[int, dict[str, Any]]:
+    if prepared is None:
+        paths = RUNS.resolve_run_context(args)
+        with REGISTRY.run_operation_lock(paths[2]):
+            context = RUNS.RunContext.load(paths)
+            host_report = prepare_finish(args, context)
+    else:
+        context, host_report = prepared
+    wait_seconds, source = resolve_finish_wait_timeout(args.timeout_seconds, context.process, guided=guided)
+    actual_wait, hard_deadline = remaining_finish_wait_seconds(context.process, wait_seconds)
+    wait_status = wait_for_peer_report(context.run_dir / "peer-report.json", context.process, actual_wait)
+    with REGISTRY.run_operation_lock(context.run_dir):
+        return _finish_after_wait_locked(context, host_report, wait_seconds, source, hard_deadline, wait_status, guided=guided)
 
 
 def _finish_after_wait_locked(
-    *,
-    state: Any,
-    run_root: Path,
-    run_dir: Path,
-    request: dict[str, Any],
-    host_report: dict[str, Any],
-    process_info: dict[str, Any],
-    repo_root: Path,
-    peer_report_path: Path,
-    finish_wait_seconds: float,
-    finish_timeout_source: str,
-    hard_deadline: float,
-    wait_status: str,
-    guided: bool = False,
+    context: RUNS.RunContext, host_report: dict[str, Any], finish_wait_seconds: float,
+    finish_timeout_source: str, hard_deadline: float, wait_status: str, *, guided: bool = False,
 ) -> tuple[int, dict[str, Any]]:
-    current_request = RUNS.require_run_request(run_dir)
-    if current_request != request:
-        raise SystemExit("host-request changed while finish was waiting; refusing finalization")
-    current_process = ARTIFACTS.load_json(run_dir / "peer-process.json")
-    if current_process != process_info:
-        raise SystemExit("peer-process changed while finish was waiting; refusing finalization")
+    repo_root, run_root, run_dir = context.repo_root, context.run_root, context.run_dir
+    request, process_info = context.request, context.process
+    state = CONFIG.STATE
+    peer_report_path = run_dir / "peer-report.json"
+    current = RUNS.RunContext.load((repo_root, run_root, run_dir))
+    if current != context:
+        raise ValueError("run request or process changed while finish was waiting; refusing finalization")
     CONFIG.REVIEW.verify_admissions(run_dir, process_info)
     current_host_report = ARTIFACTS.load_json(run_dir / "host-first-pass.json")
     if current_host_report != host_report:
-        raise SystemExit("host-first-pass changed while waiting; resume advance")
+        raise ValueError("host-first-pass changed while waiting; resume advance")
     if (run_dir / "cancel-result.json").exists():
-        raise SystemExit("run was cancelled while finish was waiting; terminal evidence was preserved")
+        raise ValueError("run was cancelled while finish was waiting; terminal evidence was preserved")
     current_job = state.find_job(run_root, request["run_id"])
     if current_job is not None and current_job.get("status") in {"completed", "failed", "cancelled"}:
-        raise SystemExit(
+        raise ValueError(
             f"run is already terminal with status {current_job['status']}; finish will not reactivate it"
         )
     existing_host_result = ARTIFACTS.read_json_if_exists(run_dir / "host-result.json")
     if existing_host_result is not None and existing_host_result.get("phase") == "done":
-        raise SystemExit("run is already complete; finish will not rewrite terminal evidence")
+        raise ValueError("run is already complete; finish will not rewrite terminal evidence")
 
     _, active_guard = REGISTRY.require_workspace_guard_owner(repo_root, request["run_id"], owner=process_info)
-    wrapper_quiescence_proven = bool(
-        active_guard is not None
-        and active_guard["phase"] == "ready_for_synthesis"
-        and active_guard["peer_identity"] == process_info["process_identity"]
-    )
-    if (
-        active_guard is not None
-        and active_guard["phase"] == "ready_for_synthesis"
-        and not wrapper_quiescence_proven
-    ):
-        raise SystemExit("ready-for-synthesis workspace guard contains an invalid wrapper-quiescence proof")
+    wrapper_quiescence_proven = PROCESS_TREE.guard_wrapper_proof(active_guard, process_info)
     pid = int(process_info["pid"])
 
     if wait_status == "timeout" and time.time() < hard_deadline:
@@ -439,11 +377,11 @@ def _finish_after_wait_locked(
         try:
             ARTIFACTS.validate_host_result(output, request, run_dir)
         except ARTIFACTS.ArtifactValidationError as exc:
-            raise SystemExit(f"refusing to persist an invalid waiting host result: {exc}") from exc
+            raise ValueError(f"refusing to persist an invalid waiting host result: {exc}") from exc
         state.upsert_job(
             run_root,
             {
-                **RUNS.job_patch_from_run(run_dir, "running", "waiting_for_peer"),
+                **RUNS.job_patch(context, "running", "waiting_for_peer"),
                 "pid": pid,
                 "finish_wait_seconds": ARTIFACTS.json_number(finish_wait_seconds),
                 "finish_timeout_source": finish_timeout_source,
@@ -466,7 +404,7 @@ def _finish_after_wait_locked(
         except ARTIFACTS.ArtifactValidationError:
             cleanup = PROCESS_TREE.terminate_tracked_process_tree(process_info, run_dir, request)
             if cleanup["quiescent"] is not True:
-                raise SystemExit(
+                raise ValueError(
                     "hard peer deadline elapsed but the tracked process tree could not be proven quiescent; "
                     "the workspace guard remains active:\n"
                     + json.dumps(cleanup, ensure_ascii=False, indent=2, sort_keys=True)
@@ -493,7 +431,7 @@ def _finish_after_wait_locked(
                 wrapper_quiescence_proven=wrapper_quiescence_proven,
             )
         except ARTIFACTS.ArtifactValidationError as exc:
-            raise SystemExit(
+            raise ValueError(
                 f"peer report is not terminal because the tracked process tree is not quiescent: {exc}"
             ) from exc
 
@@ -516,26 +454,26 @@ def _finish_after_wait_locked(
         try:
             ARTIFACTS.validate_adjudicator_report(adjudicator, request)
         except ARTIFACTS.ArtifactValidationError as exc:
-            raise SystemExit(f"invalid adjudicator report {adjudicator_path}: {exc}") from exc
+            raise ValueError(f"invalid adjudicator report {adjudicator_path}: {exc}") from exc
     elif adjudicator_path.exists():
-        raise SystemExit(
+        raise ValueError(
             "adjudicator-report.json is forbidden because adjudication is disabled in the immutable host request"
         )
 
     try:
-        helper_claims, helper_digest = ARTIFACTS.load_helper_evidence(run_dir, request)
-        ARTIFACTS.validate_host_helper_budget(ARTIFACTS.read_json_if_exists(run_dir / "helper-reports.json"), adjudicator, request)
+        helper_claims, helper_digest = ARTIFACTS.validate_host_helper_budget(
+            ARTIFACTS.read_json_if_exists(run_dir / "helper-reports.json"), adjudicator, request)
         claim_matrix = ARTIFACTS.build_claim_matrix(
             request, host_report, peer_report, helper_claims, adjudicator, helper_digest
         )
     except ARTIFACTS.ArtifactValidationError as exc:
-        raise SystemExit(f"invalid helper or claim-matrix artifact in {run_dir}: {exc}") from exc
+        raise ValueError(f"invalid helper or claim-matrix artifact in {run_dir}: {exc}") from exc
     CONFIG.STRICT_JSON.write(run_dir / "claim-matrix.json", claim_matrix)
 
     try:
         workspace_mutation = record_host_workspace_mutation(repo_root, run_dir, request)
     except (OSError, ValueError, ARTIFACTS.ArtifactValidationError) as exc:
-        raise SystemExit(f"host workspace mutation verification failed: {exc}") from exc
+        raise ValueError(f"host workspace mutation verification failed: {exc}") from exc
     result = {
         "schema_version": CONFIG.ARTIFACT_SCHEMA_VERSION,
         "run_id": request["run_id"],
@@ -555,11 +493,13 @@ def _finish_after_wait_locked(
     try:
         ARTIFACTS.validate_host_result(ready_result, request, run_dir)
     except ARTIFACTS.ArtifactValidationError as exc:
-        raise SystemExit(f"refusing to persist an invalid ready host result: {exc}") from exc
+        raise ValueError(f"refusing to persist an invalid ready host result: {exc}") from exc
+    # Commit evidence -> state -> owned ready proof -> host result. A retry
+    # rebuilds the same revision if interruption occurs between these writes.
     state.upsert_job(
         run_root,
         {
-            **RUNS.job_patch_from_run(run_dir, "synthesizing", "ready_for_synthesis"),
+            **RUNS.job_patch(context, "synthesizing", "ready_for_synthesis"),
             "peer_status": peer_report.get("status"),
             "peer_verdict": peer_report.get("verdict"),
             "validation_status": validation_status,
@@ -591,46 +531,30 @@ def _finish_after_wait_locked(
     return 0, {**ready_result, **review_paths}
 
 
-
 def complete(args: argparse.Namespace) -> int:
-    context = RUNS.resolve_run_context(args)
-    with REGISTRY.run_operation_lock(context[2]):
-        return RUNS.emit_result(_complete_locked(args, context))
+    paths = RUNS.resolve_run_context(args)
+    with REGISTRY.run_operation_lock(paths[2]):
+        return RUNS.emit_result(_complete_locked(args, RUNS.RunContext.load(paths)))
 
 
-
-def _complete_locked(args: argparse.Namespace, context: tuple[Path, Path, Path]) -> tuple[int, dict[str, Any]]:
-    _, run_root, run_dir = context
-    request = RUNS.require_run_request(run_dir)
-    process_info = ARTIFACTS.load_json(run_dir / "peer-process.json")
-    try:
-        ARTIFACTS.validate_peer_process(process_info, request, run_dir)
-    except ARTIFACTS.ArtifactValidationError as exc:
-        raise SystemExit(f"invalid peer-process artifact in {run_dir}: {exc}") from exc
-    repo_root = Path(process_info["repo_root"]).resolve()
-
+def _complete_locked(args: argparse.Namespace, context: RUNS.RunContext,
+                     host_result: dict[str, Any] | None = None) -> tuple[int, dict[str, Any]]:
+    repo_root, run_root, run_dir = context.repo_root, context.run_root, context.run_dir
+    request, process_info = context.request, context.process
     host_result_path = run_dir / "host-result.json"
-    host_result = ARTIFACTS.load_json(host_result_path)
-    try:
+    if host_result is None:
+        host_result = ARTIFACTS.load_json(host_result_path)
         ARTIFACTS.validate_host_result(host_result, request, run_dir)
-    except ARTIFACTS.ArtifactValidationError as exc:
-        raise SystemExit(f"invalid host-result artifact in {run_dir}: {exc}") from exc
     phase = host_result["phase"]
     if phase not in {"ready_for_synthesis", "done"}:
-        raise SystemExit("run is not ready to complete; resume advance and synthesize the evidence first")
+        raise ValueError("run is not ready to complete; resume advance and synthesize the evidence first")
     CONFIG.REVIEW.verify_admissions(run_dir, process_info)
     if phase != "done" and getattr(args, "synthesis", None) is None:
-        raise SystemExit("completion requires --synthesis with the revision-bound input returned by advance")
+        raise ValueError("completion requires --synthesis with the revision-bound input returned by advance")
     if phase == "ready_for_synthesis":
         _, active_guard = REGISTRY.require_workspace_guard_owner(repo_root, request["run_id"], owner=process_info)
-        if (
-            active_guard is None
-            or active_guard["phase"] != "ready_for_synthesis"
-            or active_guard["peer_identity"] != process_info["process_identity"]
-        ):
-            raise SystemExit(
-                "ready-for-synthesis workspace guard does not contain the persisted wrapper-quiescence proof"
-            )
+        if not PROCESS_TREE.guard_wrapper_proof(active_guard, process_info):
+            raise ValueError("run guard is not ready for synthesis")
         try:
             # finish already proved the wrapper group empty before atomically
             # advancing this owned guard. Never re-query its historical numeric
@@ -642,13 +566,13 @@ def _complete_locked(args: argparse.Namespace, context: tuple[Path, Path, Path])
                 wrapper_quiescence_proven=True,
             )
         except ARTIFACTS.ArtifactValidationError as exc:
-            raise SystemExit(
+            raise ValueError(
                 f"cannot complete while the tracked peer process tree is active: {exc}"
             ) from exc
         try:
             workspace_mutation = record_host_workspace_mutation(repo_root, run_dir, request)
         except (OSError, ValueError, ARTIFACTS.ArtifactValidationError) as exc:
-            raise SystemExit(f"final host workspace mutation verification failed: {exc}") from exc
+            raise ValueError(f"final host workspace mutation verification failed: {exc}") from exc
         if host_result["workspace_mutation"] != workspace_mutation:
             host_result = {
                 **host_result,
@@ -658,9 +582,9 @@ def _complete_locked(args: argparse.Namespace, context: tuple[Path, Path, Path])
             try:
                 ARTIFACTS.validate_host_result(host_result, request, run_dir)
             except ARTIFACTS.ArtifactValidationError as exc:
-                raise SystemExit(f"refusing to persist an invalid refreshed host result: {exc}") from exc
+                raise ValueError(f"refusing to persist an invalid refreshed host result: {exc}") from exc
             CONFIG.STRICT_JSON.write(host_result_path, host_result)
-            raise SystemExit(
+            raise ValueError(
                 "workspace mutation evidence changed after finish; host-result.json was refreshed. "
                 "Resume advance without --synthesis, inspect the new review revision, and resynthesize before completing."
             )
@@ -668,13 +592,8 @@ def _complete_locked(args: argparse.Namespace, context: tuple[Path, Path, Path])
         _, active_guard = REGISTRY.read_workspace_guard(repo_root, request["run_id"])
         if active_guard is not None:
             REGISTRY.validate_guard_owner(active_guard, process_info)
-            if (
-                active_guard["phase"] != "ready_for_synthesis"
-                or active_guard["peer_identity"] != process_info["process_identity"]
-            ):
-                raise SystemExit(
-                    "completed run still has a guard without the persisted wrapper-quiescence proof"
-                )
+            if not PROCESS_TREE.guard_wrapper_proof(active_guard, process_info):
+                raise ValueError("completed run guard is not ready for synthesis")
             try:
                 PROCESS_TREE.require_process_tree_quiescent(
                     process_info,
@@ -683,12 +602,13 @@ def _complete_locked(args: argparse.Namespace, context: tuple[Path, Path, Path])
                     wrapper_quiescence_proven=True,
                 )
             except ARTIFACTS.ArtifactValidationError as exc:
-                raise SystemExit(
+                raise ValueError(
                     f"completed run guard cannot be released while provider state is unproven: {exc}"
                 ) from exc
 
+    documents = review_documents(run_dir)
     if getattr(args, "synthesis", None) is not None:
-        judgments = CONFIG.REVIEW.judgments(run_dir, args.synthesis, process_info, review_documents(run_dir))
+        judgments = CONFIG.REVIEW.judgments(run_dir, args.synthesis, process_info, documents)
         synthesis = {"schema_version": CONFIG.ARTIFACT_SCHEMA_VERSION, "run_id": request["run_id"],
                      **judgments, "claim_matrix_sha256": host_result["claim_matrix_sha256"],
                      "workspace_mutation_sha256": host_result["workspace_mutation_sha256"], "final_answer_ready": True}
@@ -699,12 +619,16 @@ def _complete_locked(args: argparse.Namespace, context: tuple[Path, Path, Path])
         else:
             CONFIG.STRICT_JSON.write(run_dir / "host-synthesis.json", synthesis)
 
+    else:
+        synthesis = ARTIFACTS.load_json(run_dir / "host-synthesis.json")
     peer_runtime = CONFIG.PEER
     try:
-        peer_report = ARTIFACTS.validate_completion_artifacts(run_dir, request, host_result, peer_runtime)
+        peer_report = ARTIFACTS.validate_completion_artifacts(run_dir, request, host_result, peer_runtime, documents, synthesis)
     except (OSError, ValueError, getattr(peer_runtime, "PeerReportValidationError")) as exc:
-        raise SystemExit(f"cannot complete run with invalid v2 synthesis artifacts: {exc}") from exc
+        raise ValueError(f"cannot complete run with invalid v3 synthesis artifacts: {exc}") from exc
 
+    # Synthesis validation precedes state -> done result -> guard release.
+    # A persisted done result lets a retry finish the owned release.
     state_status = "completed" if peer_report["status"] == "ok" else "failed"
     completed_at = (
         host_result["completed_at"]
@@ -715,7 +639,7 @@ def _complete_locked(args: argparse.Namespace, context: tuple[Path, Path, Path])
     state.upsert_job(
         run_root,
         {
-            **RUNS.job_patch_from_run(run_dir, state_status, "done"),
+            **RUNS.job_patch(context, state_status, "done"),
             "peer_status": peer_report["status"],
             "peer_verdict": peer_report["verdict"],
             "completed_at": completed_at,
@@ -743,18 +667,16 @@ def _complete_locked(args: argparse.Namespace, context: tuple[Path, Path, Path])
     }
 
 
-
 def advance(args: argparse.Namespace) -> int:
     """Resume from validated artifacts, using the same finalization and closure paths."""
     evidence_inputs = any(getattr(args, key) is not None for key in ("first_pass", "helpers", "adjudicator"))
     if args.synthesis is not None and evidence_inputs:
         raise ValueError("submit evidence and synthesis separately so the new evidence is reviewed first")
-    context = RUNS.resolve_run_context(args)
-    _, _, run_dir = context
+    paths = RUNS.resolve_run_context(args)
+    run_dir = paths[2]
     with REGISTRY.run_operation_lock(run_dir):
-        request = RUNS.require_run_request(run_dir)
-        process = ARTIFACTS.load_json(run_dir / "peer-process.json")
-        ARTIFACTS.validate_peer_process(process, request, run_dir)
+        context = RUNS.RunContext.load(paths)
+        request, process = context.request, context.process
         if (run_dir / "cancel-result.json").exists():
             raise ValueError("run has cancellation evidence; use cancel RUN to validate or resume cancellation")
         current = ARTIFACTS.read_json_if_exists(run_dir / "host-result.json")
@@ -765,7 +687,7 @@ def advance(args: argparse.Namespace) -> int:
         if args.synthesis is not None or (current and current["phase"] == "done"):
             if evidence_inputs:
                 raise ValueError("cannot replace evidence of a terminal run")
-            code, output = _complete_locked(args, context)
+            code, output = _complete_locked(args, context, current)
             return RUNS.emit_result((code, {**output, "next_action": None}))
         REGISTRY.require_workspace_guard_owner(Path(process["repo_root"]), request["run_id"], owner=process)
         admission = CONFIG.REVIEW.verify_admissions(run_dir, process)
@@ -776,42 +698,35 @@ def advance(args: argparse.Namespace) -> int:
                 raise ValueError("submit the independent first pass before other host reports")
             return RUNS.emit_result((0, {"run_dir": str(run_dir), "host_policy": host_policy(request),
                                    "next_action": next_action(run_dir, Path(process["repo_root"]), "first_pass")}))
+        host_report = prepare_finish(args, context)
     # No run-operation lock is held while waiting for the provider. Finalization
     # rechecks ownership and evidence under the lock before publishing a revision.
-    return RUNS.emit_result(finish_run(args, guided=True))
-
+    return RUNS.emit_result(finish_run(args, guided=True, prepared=(context, host_report)))
 
 
 def cancel(args: argparse.Namespace) -> int:
-    context = RUNS.resolve_run_context(args)
-    with REGISTRY.run_operation_lock(context[2]):
-        return _cancel_locked(args, context)
+    paths = RUNS.resolve_run_context(args)
+    with REGISTRY.run_operation_lock(paths[2]):
+        return RUNS.emit_result(_cancel_locked(args, RUNS.RunContext.load(paths)))
 
 
-
-def cancellation_job_patch(run_dir: Path, result: dict[str, Any]) -> dict[str, Any]:
+def cancellation_job_patch(context: RUNS.RunContext, result: dict[str, Any]) -> dict[str, Any]:
     """Project persisted cancellation evidence without moving lifecycle operations."""
     return {
-        **RUNS.job_patch_from_run(run_dir, "cancelled", "cancelled"),
+        **RUNS.job_patch(context, "cancelled", "cancelled"),
         "pid": None,
         "completed_at": result["completed_at"],
         "cancel": {key: result[key] for key in (
-            "forced", "reason", "elapsed_seconds", "minimum_wait_seconds", "before_minimum_wait",
+            "reason", "elapsed_seconds",
         )},
-        "cancel_result": str(run_dir / "cancel-result.json"),
+        "cancel_result": str(context.run_dir / "cancel-result.json"),
     }
 
 
-
-def _cancel_locked(args: argparse.Namespace, context: tuple[Path, Path, Path]) -> int:
-    repo_root, run_root, run_dir = context
-    process_info = ARTIFACTS.load_json(run_dir / "peer-process.json")
-    request = RUNS.require_run_request(run_dir)
-    try:
-        ARTIFACTS.validate_peer_process(process_info, request, run_dir)
-    except ARTIFACTS.ArtifactValidationError as exc:
-        raise SystemExit(f"invalid peer-process artifact in {run_dir}: {exc}") from exc
-    peer_repo_root = Path(process_info["repo_root"]).resolve()
+def _cancel_locked(args: argparse.Namespace, context: RUNS.RunContext) -> tuple[int, dict[str, Any]]:
+    repo_root, run_root, run_dir = context.repo_root, context.run_root, context.run_dir
+    request, process_info = context.request, context.process
+    peer_repo_root = repo_root
     cancel_result_path = run_dir / "cancel-result.json"
     state = CONFIG.STATE
 
@@ -820,19 +735,16 @@ def _cancel_locked(args: argparse.Namespace, context: tuple[Path, Path, Path]) -
         try:
             ARTIFACTS.validate_cancel_result(existing, request, run_dir)
         except ARTIFACTS.ArtifactValidationError as exc:
-            raise SystemExit(f"invalid immutable cancel result {cancel_result_path}: {exc}") from exc
+            raise ValueError(f"invalid immutable cancel result {cancel_result_path}: {exc}") from exc
         if ARTIFACTS.preserved_artifact_hashes(run_dir) != existing["preserved_artifacts"]:
-            raise SystemExit(
+            raise ValueError(
                 "preserved run evidence changed after cancellation; refusing an idempotent guard transition"
             )
         guard_path, active_guard = REGISTRY.read_workspace_guard(peer_repo_root, request["run_id"])
         released: str | None = None
         if active_guard is not None:
             REGISTRY.validate_guard_owner(active_guard, process_info)
-            wrapper_quiescence_proven = bool(
-                active_guard["phase"] == "ready_for_synthesis"
-                and active_guard["peer_identity"] == process_info["process_identity"]
-            )
+            wrapper_quiescence_proven = PROCESS_TREE.guard_wrapper_proof(active_guard, process_info)
             try:
                 PROCESS_TREE.require_process_tree_quiescent(
                     process_info,
@@ -841,11 +753,11 @@ def _cancel_locked(args: argparse.Namespace, context: tuple[Path, Path, Path]) -
                     wrapper_quiescence_proven=wrapper_quiescence_proven,
                 )
             except ARTIFACTS.ArtifactValidationError as exc:
-                raise SystemExit(
+                raise ValueError(
                     f"immutable cancellation exists but process-tree quiescence is unproven: {exc}"
                 ) from exc
             released = str(REGISTRY.release_workspace_guard(peer_repo_root, request["run_id"], owner=process_info))
-        state.upsert_job(run_root, cancellation_job_patch(run_dir, existing))
+        state.upsert_job(run_root, cancellation_job_patch(context, existing))
         output = {
             "schema_version": CONFIG.ARTIFACT_SCHEMA_VERSION,
             "run_id": request["run_id"],
@@ -855,88 +767,36 @@ def _cancel_locked(args: argparse.Namespace, context: tuple[Path, Path, Path]) -
             "workspace_guard": str(guard_path),
             "workspace_guard_released": released,
         }
-        return RUNS.emit_result((0, output))
+        return 0, output
 
+    current = ARTIFACTS.read_json_if_exists(run_dir / "host-result.json")
+    if current is not None and current.get("phase") == "done":
+        raise ValueError("completed runs cannot be cancelled")
     _, active_guard = REGISTRY.require_workspace_guard_owner(peer_repo_root, request["run_id"], owner=process_info)
-    if active_guard is None or active_guard["run_id"] != request["run_id"]:
-        raise SystemExit("active Agent Collab workspace guard disappeared during cancellation")
-    wrapper_quiescence_proven = bool(
-        active_guard["phase"] == "ready_for_synthesis"
-        and active_guard["peer_identity"] == process_info["process_identity"]
-    )
     pid = int(process_info["pid"])
-    force_before_min_wait = bool(getattr(args, "force_before_min_wait", False))
-    reason = str(getattr(args, "reason", "") or "").strip()
-    if force_before_min_wait and not reason:
-        raise SystemExit("--reason is required with --force-before-min-wait")
-
-    identity_matches = PROCESS_TREE.process_identity_matches(process_info)
-    peer_alive = PROCESS_TREE.process_alive(pid) if identity_matches else False
+    reason = str(getattr(args, "reason", "") or "").strip() or "user_cancelled"
+    peer_alive = PROCESS_TREE.process_identity_matches(process_info) and PROCESS_TREE.process_alive(pid)
     elapsed_seconds = PROCESS_TREE.peer_elapsed_seconds(process_info, run_dir)
-    before_minimum_wait = (
-        peer_alive
-        and elapsed_seconds is not None
-        and elapsed_seconds < CONFIG.MIN_PEER_WAIT_SECONDS
-    )
 
-    try:
-        PROCESS_TREE.require_process_tree_quiescent(
-            process_info,
-            run_dir,
-            request,
-            wrapper_quiescence_proven=wrapper_quiescence_proven,
-        )
-    except ARTIFACTS.ArtifactValidationError:
-        pass
+    if PROCESS_TREE.guard_wrapper_proof(active_guard, process_info):
+        # The ready guard binds prior quiescence; its historical PGID may now
+        # belong to a different process. Recheck provider/isolation evidence only.
+        PROCESS_TREE.require_process_tree_quiescent(process_info, run_dir, request, wrapper_quiescence_proven=True)
+        cleanup = {"quiescent": True, "provider": {"outcome": "already_quiescent", "quiescent": True},
+                   "wrapper": {"outcome": "already_quiescent", "quiescent": True}}
     else:
-        peer_runtime = CONFIG.PEER
-        if ARTIFACTS.valid_terminal_peer_report(peer_runtime, run_dir, request):
-            output = {
-                "schema_version": CONFIG.ARTIFACT_SCHEMA_VERSION,
-                "run_id": request["run_id"],
-                "run_dir": str(run_dir),
-                "pid": pid,
-                "outcome": "already_terminal",
-                "message": (
-                    "A valid terminal peer report already exists. The workspace guard was retained; "
-                    "resume advance and synthesize so the evidence is not converted into a cancellation."
-                ),
-            }
-            return RUNS.emit_result((1, output))
-
-    if before_minimum_wait and not force_before_min_wait:
-        output = {
-            "run_id": request["run_id"],
-            "run_dir": str(run_dir),
-            "pid": pid,
-            "outcome": "refused",
-            "reason": "minimum_wait_not_elapsed",
-            "elapsed_seconds": ARTIFACTS.json_number(elapsed_seconds),
-            "minimum_wait_seconds": CONFIG.MIN_PEER_WAIT_SECONDS,
-            "minimum_wait_remaining_seconds": ARTIFACTS.json_number(CONFIG.MIN_PEER_WAIT_SECONDS - elapsed_seconds),
-            "message": "Peer is still inside the minimum wait window; use finish/status and keep waiting. Empty peer-report.json or stderr is normal while the peer is alive.",
-        }
-        return RUNS.emit_result((1, output))
-
-    cleanup = PROCESS_TREE.terminate_tracked_process_tree(process_info, run_dir, request)
+        cleanup = PROCESS_TREE.terminate_tracked_process_tree(process_info, run_dir, request)
     if cleanup["quiescent"] is not True:
-        raise SystemExit(
+        raise ValueError(
             "refusing to release the workspace guard because the tracked process tree is not quiescent:\n"
             + json.dumps(cleanup, ensure_ascii=False, indent=2, sort_keys=True)
         )
-    cancel_reason = reason or ("minimum_wait_elapsed" if peer_alive else "peer_not_running")
-    cancel_details = {
-        "forced": force_before_min_wait,
-        "reason": cancel_reason,
-        "elapsed_seconds": ARTIFACTS.json_number(elapsed_seconds),
-        "minimum_wait_seconds": CONFIG.MIN_PEER_WAIT_SECONDS,
-        "before_minimum_wait": before_minimum_wait,
-    }
+    cancel_details = {"reason": reason, "elapsed_seconds": ARTIFACTS.json_number(elapsed_seconds)}
     preserved = ARTIFACTS.preserved_artifact_hashes(run_dir)
     try:
         workspace_mutation = record_cancel_workspace_mutation(peer_repo_root, run_dir, request)
     except (OSError, ValueError, ARTIFACTS.ArtifactValidationError) as exc:
-        raise SystemExit(
+        raise ValueError(
             f"refusing to release the workspace guard because mutation verification failed: {exc}"
         ) from exc
     completed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -960,18 +820,19 @@ def _cancel_locked(args: argparse.Namespace, context: tuple[Path, Path, Path]) -
     try:
         ARTIFACTS.validate_cancel_result(cancel_result, request, run_dir)
     except ARTIFACTS.ArtifactValidationError as exc:
-        raise SystemExit(f"refusing to persist an invalid cancel result: {exc}") from exc
+        raise ValueError(f"refusing to persist an invalid cancel result: {exc}") from exc
     if not write_json_once(cancel_result_path, cancel_result):
         existing = ARTIFACTS.load_json(cancel_result_path)
         try:
             ARTIFACTS.validate_cancel_result(existing, request, run_dir)
         except ARTIFACTS.ArtifactValidationError as exc:
-            raise SystemExit(f"concurrent cancellation wrote an invalid result: {exc}") from exc
+            raise ValueError(f"concurrent cancellation wrote an invalid result: {exc}") from exc
         if existing != cancel_result:
-            raise SystemExit(
+            raise ValueError(
                 "a concurrent cancellation committed different immutable evidence; manual inspection is required"
             )
-    state.upsert_job(run_root, cancellation_job_patch(run_dir, cancel_result))
+    # Immutable cancellation -> state -> owned release; retries reuse evidence.
+    state.upsert_job(run_root, cancellation_job_patch(context, cancel_result))
     guard_path = REGISTRY.release_workspace_guard(peer_repo_root, request["run_id"], owner=process_info)
     output = {
         "schema_version": CONFIG.ARTIFACT_SCHEMA_VERSION,
@@ -979,13 +840,11 @@ def _cancel_locked(args: argparse.Namespace, context: tuple[Path, Path, Path]) -
         "run_dir": str(run_dir),
         "pid": pid,
         "outcome": "cancelled_quiescent",
-        "forced": force_before_min_wait,
-        "reason": cancel_reason,
+        "reason": reason,
         "elapsed_seconds": ARTIFACTS.json_number(elapsed_seconds),
-        "minimum_wait_seconds": CONFIG.MIN_PEER_WAIT_SECONDS,
         "cancel_result": str(cancel_result_path),
         "workspace_mutation": cancel_result["workspace_mutation"],
         "workspace_guard_released": str(guard_path),
     }
-    return RUNS.emit_result((0, output))
+    return 0, output
 

@@ -24,9 +24,7 @@ def run_dir_timestamp(run_dir: Path) -> str:
     return datetime.fromtimestamp(timestamp, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-
 ORPHAN_STARTUP_GRACE_SECONDS = 24 * 60 * 60
-
 
 
 def history_candidates(run_root: Path, state_runtime: Any) -> list[dict[str, Any]]:
@@ -70,7 +68,6 @@ def history_candidates(run_root: Path, state_runtime: Any) -> list[dict[str, Any
     return sorted(candidates.values(), key=lambda item: (str(item["sort_key"]), str(item["run_id"])), reverse=True)
 
 
-
 def delete_history_candidates(run_root: Path, state_runtime: Any, candidates: list[dict[str, Any]], dry_run: bool) -> list[dict[str, Any]]:
     deleted: list[dict[str, Any]] = []
     for candidate in candidates:
@@ -97,14 +94,12 @@ def delete_history_candidates(run_root: Path, state_runtime: Any, candidates: li
     return deleted
 
 
-
 def resolve_history_retain(args: argparse.Namespace, default_retained: int = CONFIG.DEFAULT_HISTORY_RETAINED_RUNS) -> int:
     if getattr(args, "all", False):
         return 0
     if getattr(args, "retain", None) is not None:
         return max(int(args.retain), 0)
     return max(int(default_retained), 0)
-
 
 
 def build_clear_history_output(args: argparse.Namespace, default_retained: int = CONFIG.DEFAULT_HISTORY_RETAINED_RUNS) -> tuple[int, dict[str, Any] | None]:
@@ -208,7 +203,6 @@ def build_clear_history_output(args: argparse.Namespace, default_retained: int =
     return 0, output
 
 
-
 def clear_history(args: argparse.Namespace) -> int:
     repo_root = CONFIG.canonical_repo_root(args.repo_root or CONFIG.default_repo_root())
     resolved = CONFIG.resolve_settings(repo_root)
@@ -218,7 +212,6 @@ def clear_history(args: argparse.Namespace) -> int:
     if output is not None:
         print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
     return status
-
 
 
 def reset_settings(args: argparse.Namespace, repo_root: Path) -> int:
@@ -241,7 +234,6 @@ def reset_settings(args: argparse.Namespace, repo_root: Path) -> int:
         "missing": missing,
     }
     return RUNS.emit_result((0, output))
-
 
 
 def setup(args: argparse.Namespace) -> int:
@@ -298,7 +290,6 @@ def setup(args: argparse.Namespace) -> int:
     return RUNS.emit_result((0, output))
 
 
-
 def run_command_capture(command: list[str], timeout: float = 20) -> dict[str, Any]:
     try:
         completed = subprocess.run(
@@ -329,7 +320,6 @@ def run_command_capture(command: list[str], timeout: float = 20) -> dict[str, An
         }
 
 
-
 def parse_json_command(command: list[str], timeout: float = 20) -> dict[str, Any]:
     result = run_command_capture(command, timeout)
     data: Any = None
@@ -342,7 +332,6 @@ def parse_json_command(command: list[str], timeout: float = 20) -> dict[str, Any
     return {**result, "json": data, "json_error": error}
 
 
-
 def summarize_claude_auth(report: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(report, dict):
         return {}
@@ -352,7 +341,6 @@ def summarize_claude_auth(report: dict[str, Any] | None) -> dict[str, Any]:
         "api_provider": report.get("apiProvider"),
         "subscription_type": report.get("subscriptionType"),
     }
-
 
 
 def doctor(args: argparse.Namespace) -> int:

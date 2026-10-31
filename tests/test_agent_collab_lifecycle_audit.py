@@ -45,7 +45,7 @@ class LifecycleAuditTests(TestCase):
                 mock.patch.object(host.CONFIG, "AVAILABILITY", new=availability),
                 mock.patch.object(host.CONFIG, "SNAPSHOT", new=snapshot),
                 mock.patch.object(snapshot, "mutation_snapshot", return_value={
-                    "schema_version": "2.0", "mode": "git", "repo_root": str(root),
+                    "schema_version": "3.0", "mode": "git", "repo_root": str(root),
                     "digest": "a" * 64, "sections": {"diff": "x" * host.ARTIFACTS.MAX_JSON_ARTIFACT_BYTES},
                 }),
                 # Patch the launch itself: macOS reads process identity with ps
@@ -160,7 +160,7 @@ class LifecycleAuditTests(TestCase):
 
     def test_changed_helper_claims_require_new_synthesis_after_finish(self):
         self.assert_report_change_requires_resynthesis("helper-reports.json", {
-            "schema_version": "2.0", "run_id": fixtures.request()["run_id"], "reports": [{
+            "schema_version": "3.0", "run_id": fixtures.request()["run_id"], "reports": [{
                 "name": "later-review", "summary": "Additional evidence.", "claims": [{
                     "claim": "New material finding", "status": "confirmed", "evidence": "source:42",
                 }],
@@ -240,7 +240,7 @@ class LifecycleAuditTests(TestCase):
                 self.assertFalse((run_dir / "cancel-result.json").exists())
                 tracked.write_text("later unrelated edit")
                 after_path.write_text("{}")
-                with self.assertRaisesRegex(SystemExit, "snapshot changed"):
+                with self.assertRaisesRegex(ValueError, "snapshot changed"):
                     host.LIFECYCLE.cancel(args)
                 self.assertTrue(guard.exists())
                 after_path.write_bytes(original_after)

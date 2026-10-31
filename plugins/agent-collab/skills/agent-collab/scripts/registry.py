@@ -6,11 +6,12 @@ import secrets
 import time
 from contextlib import contextmanager
 from pathlib import Path
+import validation as V
 from typing import Any
 import host_config as CONFIG
 import artifacts as ARTIFACTS
 
-WORKSPACE_GUARD_SCHEMA_VERSION = "2.0"
+WORKSPACE_GUARD_SCHEMA_VERSION = V.RUN_SCHEMA_VERSION
 
 
 WORKSPACE_GUARD_MAX_BYTES = 1_000_000

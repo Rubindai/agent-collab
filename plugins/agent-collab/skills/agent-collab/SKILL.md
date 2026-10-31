@@ -9,7 +9,7 @@ Launch the opposite product before host analysis, independently verify its evide
 
 A direct request invokes the actual peer workflow, even for a small task. Do not substitute host-only analysis or native helpers. Implicit discovery remains enabled; quoted mentions, informational questions, and source edits alone do not invoke a run.
 
-Use this file's directory as `<skill-root>` and only its current resources. The normal workflow is self-contained here. Runtime artifacts use strict `"schema_version": "2.0"`; hosts supply judgments, never mechanical metadata or hashes.
+Use this file's directory as `<skill-root>` and only its current resources. The normal workflow is self-contained here. Runtime artifacts use strict `"schema_version": "3.0"`; hosts supply judgments, never mechanical metadata or hashes.
 
 ## Start
 

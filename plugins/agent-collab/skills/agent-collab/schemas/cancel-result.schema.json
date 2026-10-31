@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://local.agent-collab/cancel-result.schema.json",
-  "title": "Agent Collab Cancellation Result v2",
+  "title": "Agent Collab Cancellation Result v3",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -9,11 +9,8 @@
     "run_id",
     "status",
     "outcome",
-    "forced",
     "reason",
     "elapsed_seconds",
-    "minimum_wait_seconds",
-    "before_minimum_wait",
     "peer_was_alive",
     "process_cleanup",
     "preserved_artifacts",
@@ -22,15 +19,12 @@
     "completed_at"
   ],
   "properties": {
-    "schema_version": {"const": "2.0"},
+    "schema_version": {"const": "3.0"},
     "run_id": {"type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9._-]+$"},
     "status": {"const": "cancelled"},
     "outcome": {"const": "cancelled_quiescent"},
-    "forced": {"type": "boolean"},
     "reason": {"type": "string", "minLength": 1},
     "elapsed_seconds": {"type": ["number", "null"], "minimum": 0},
-    "minimum_wait_seconds": {"const": 60},
-    "before_minimum_wait": {"type": "boolean"},
     "peer_was_alive": {"type": "boolean"},
     "process_cleanup": {
       "type": "object",

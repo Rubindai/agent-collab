@@ -369,15 +369,6 @@ class WindowsLaunchPolicyTests(TestCase):
         self.assertEqual(result["status"], "sandbox_unavailable")
         self.assertEqual(result["backend"], "windows")
 
-    def test_host_cli_guard_adds_a_cmd_shim_on_windows(self):
-        peer = fixtures.load_peer()
-        with tempfile.TemporaryDirectory() as tmp, windows(peer):
-            bin_dir = peer.make_host_cli_guard(Path(tmp), "claude")
-            shim = (bin_dir / "claude.cmd").read_bytes()
-            script = (bin_dir / "claude").read_bytes()
-        self.assertIn(b"@exit /b 64\r\n", shim)
-        self.assertNotIn(b"\r", script)
-
     def test_claude_hooks_use_exec_form_without_a_shell(self):
         peer = fixtures.load_peer()
         with tempfile.TemporaryDirectory() as tmp:

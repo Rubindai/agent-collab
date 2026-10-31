@@ -12,7 +12,6 @@ def process_alive(pid: int) -> bool:
     return CONFIG.SAFETY.pid_alive(pid)
 
 
-
 def peer_started_at_epoch(process_info: dict[str, Any], run_dir: Path) -> float | None:
     raw_epoch = process_info.get("started_at_epoch")
     if raw_epoch is not None:
@@ -32,7 +31,6 @@ def peer_started_at_epoch(process_info: dict[str, Any], run_dir: Path) -> float 
         return None
 
 
-
 def peer_elapsed_seconds(process_info: dict[str, Any], run_dir: Path, now: float | None = None) -> float | None:
     started_at = peer_started_at_epoch(process_info, run_dir)
     if started_at is None:
@@ -40,7 +38,6 @@ def peer_elapsed_seconds(process_info: dict[str, Any], run_dir: Path, now: float
     if now is None:
         now = time.time()
     return max(0.0, now - started_at)
-
 
 
 def require_process_tree_quiescent(
@@ -85,7 +82,6 @@ def require_process_tree_quiescent(
     return provider
 
 
-
 def cleanup_failed_start(process: Any, peer_identity: dict[str, Any] | None) -> dict[str, Any]:
     cleanup: dict[str, Any] = {"outcome": "not_started", "quiescent": True}
     if process is not None:
@@ -122,7 +118,6 @@ def cleanup_failed_start(process: Any, peer_identity: dict[str, Any] | None) -> 
                 "details": str(cleanup_error),
             }
     return cleanup
-
 
 
 def terminate_tracked_process_tree(
@@ -271,7 +266,15 @@ def terminate_tracked_process_tree(
     }
 
 
-
 def process_identity_matches(process_info: dict[str, Any]) -> bool:
     return CONFIG.SAFETY.process_identity_matches(process_info.get("process_identity"))
 
+
+
+def guard_wrapper_proof(guard: dict[str, Any], process: dict[str, Any]) -> bool:
+    """A ready guard records quiescence for this exact wrapper identity."""
+    if guard["phase"] != "ready_for_synthesis":
+        return False
+    if guard["peer_identity"] != process["process_identity"]:
+        raise ValueError("ready-for-synthesis workspace guard contains an invalid wrapper-quiescence proof")
+    return True

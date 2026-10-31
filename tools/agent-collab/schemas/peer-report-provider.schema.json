@@ -153,7 +153,7 @@
       "type": "string"
     },
     "schema_version": {
-      "const": "2.0"
+      "const": "3.0"
     },
     "status": {
       "enum": [

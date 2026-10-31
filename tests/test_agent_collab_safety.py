@@ -39,8 +39,8 @@ class SafetyTests(unittest.TestCase):
     def test_strict_json_write_is_round_trip(self):
         with tempfile.TemporaryDirectory() as tmp_name:
             path = Path(tmp_name) / "artifact.json"
-            strict_json.write(path, {"schema_version": "2.0", "ok": True})
-            self.assertEqual(strict_json.load(path), {"schema_version": "2.0", "ok": True})
+            strict_json.write(path, {"schema_version": "3.0", "ok": True})
+            self.assertEqual(strict_json.load(path), {"schema_version": "3.0", "ok": True})
             self.assertFalse(any(path.parent.glob(f".{path.name}.*")))
 
     @unittest.skipUnless(os.name == "posix", "POSIX owner-mode contract")
@@ -52,7 +52,7 @@ class SafetyTests(unittest.TestCase):
                 strict_json.ensure_private_directory(root)
                 json_path = root / "artifact.json"
                 text_path = root / "peer.stderr.log"
-                strict_json.write(json_path, {"schema_version": "2.0"})
+                strict_json.write(json_path, {"schema_version": "3.0"})
                 strict_json.write_text(text_path, "private\n")
                 with strict_json.open_private_text(root / "peer-report.json") as handle:
                     handle.write("{}\n")

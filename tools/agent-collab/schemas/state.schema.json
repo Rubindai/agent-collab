@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://local.agent-collab/state.schema.json",
-  "title": "Agent Collab State v2",
+  "title": "Agent Collab State v3",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "jobs"],
   "properties": {
-    "schema_version": {"const": "2.0"},
+    "schema_version": {"const": "3.0"},
     "jobs": {
       "type": "array",
       "items": {"$ref": "#/$defs/job"}
@@ -73,13 +73,10 @@
         "cancel": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["forced", "reason", "elapsed_seconds", "minimum_wait_seconds", "before_minimum_wait"],
+          "required": ["reason", "elapsed_seconds"],
           "properties": {
-            "forced": {"type": "boolean"},
             "reason": {"type": "string", "minLength": 1},
-            "elapsed_seconds": {"type": ["number", "null"]},
-            "minimum_wait_seconds": {"type": "number"},
-            "before_minimum_wait": {"type": "boolean"}
+            "elapsed_seconds": {"type": ["number", "null"]}
           }
         }
       },

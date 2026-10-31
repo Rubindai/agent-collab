@@ -13,11 +13,12 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
+import validation as V
 import strict_json as STRICT_JSON
 import safety as SAFETY
 
 
-SNAPSHOT_HEADER = "agent_collab_workspace_snapshot_v2"
+SNAPSHOT_HEADER = "agent_collab_workspace_snapshot_v3"
 IGNORED_DIR_NAMES = {
     ".cache",
     ".git",
@@ -706,7 +707,7 @@ def _git_snapshot(
         ]
     )
     return {
-        "schema_version": "2.0",
+        "schema_version": V.RUN_SCHEMA_VERSION,
         "mode": "git",
         "repo_root": str(_resolve(repo_root)),
         "digest": digest,
@@ -721,7 +722,7 @@ def _filesystem_snapshot(
 ) -> dict[str, Any]:
     entries, count, digest = _bounded_entries(_filesystem_entries(repo_root, ignored_paths, deadline))
     return {
-        "schema_version": "2.0",
+        "schema_version": V.RUN_SCHEMA_VERSION,
         "mode": "filesystem",
         "repo_root": str(_resolve(repo_root)),
         "digest": digest,

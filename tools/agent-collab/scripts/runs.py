@@ -1,6 +1,7 @@
 """Run resolution, validated inputs and read-only status projections."""
 from __future__ import annotations
 import argparse
+from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ import host_config as CONFIG
 import artifacts as ARTIFACTS
 import registry as REGISTRY
 import process_tree as PROCESS_TREE
+import validation as V
 
 
 RUN_ARTIFACT_NAMES = {
@@ -24,14 +26,12 @@ RUN_ARTIFACT_NAMES = {
 }
 
 
-
 def emit_result(result: tuple[int, dict[str, Any]]) -> int:
     code, output = result
     if "next_action" in output:
         output = {"next_action": output["next_action"], **output}
     print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys="next_action" not in output))
     return code
-
 
 
 def path_is_creatable(path: Path) -> bool:
@@ -44,7 +44,6 @@ def path_is_creatable(path: Path) -> bool:
     return os.access(current, os.W_OK)
 
 
-
 def file_info(path: Path) -> dict[str, Any]:
     return {
         "path": str(path),
@@ -53,16 +52,10 @@ def file_info(path: Path) -> dict[str, Any]:
     }
 
 
-
 def require_run_request(run_dir: Path) -> dict[str, Any]:
     request = ARTIFACTS.load_json(run_dir / "host-request.json")
-    ARTIFACTS.require_artifact_version(request, "host-request")
-    try:
-        CONFIG.PEER.validate_request(request)
-    except Exception as exc:
-        raise SystemExit(f"invalid v2 host request in {run_dir}: {exc}") from exc
+    CONFIG.PEER.validate_request(request)
     return request
-
 
 
 def stderr_tail(path: Path, limit: int = 4000) -> str:
@@ -76,15 +69,13 @@ def stderr_tail(path: Path, limit: int = 4000) -> str:
     return payload.decode("utf-8", errors="replace")[-limit:]
 
 
-
 def ensure_run_dir(path: Path, run_root: Path, *, allow_external: bool = False) -> Path:
     resolved = path.resolve()
     root = resolved.parent if allow_external else run_root
     if is_direct_run_dir(root, resolved):
         return resolved
     scope = "a valid Agent Collab run directory" if allow_external else f"a direct child of {run_root}"
-    raise SystemExit(f"invalid Agent Collab run directory: {resolved} must be {scope}")
-
+    raise ValueError(f"invalid Agent Collab run directory: {resolved} must be {scope}")
 
 
 def guarded_run_dir(repo_root: Path, run_id: str) -> Path | None:
@@ -104,7 +95,6 @@ def guarded_run_dir(repo_root: Path, run_id: str) -> Path | None:
     return ensure_run_dir(candidate, candidate.parent, allow_external=True)
 
 
-
 def resolve_run_context(args: argparse.Namespace) -> tuple[Path, Path, Path]:
     """Resolve repo root, owning run root, and run directory once for a run command."""
 
@@ -113,7 +103,6 @@ def resolve_run_context(args: argparse.Namespace) -> tuple[Path, Path, Path]:
     run_dir = resolve_run_reference(repo_root, args.run, default_root)
     # Runs are direct children of the run root whose state index tracks them.
     return repo_root, run_dir.parent, run_dir
-
 
 
 def resolve_run_reference(repo_root: Path, reference: str | None, run_root: Path | None = None) -> Path:
@@ -135,19 +124,35 @@ def resolve_run_reference(repo_root: Path, reference: str | None, run_root: Path
             job = state.find_job(root, reference)
             if job and job.get("run_dir"):
                 return ensure_run_dir(Path(str(job["run_dir"])).expanduser(), root)
-        raise SystemExit(f"unknown Agent Collab run: {reference}")
+        raise ValueError(f"unknown Agent Collab run: {reference}")
 
     state = CONFIG.STATE
     job = state.find_job(root, None)
     if job and job.get("run_dir"):
         return ensure_run_dir(Path(str(job["run_dir"])).expanduser(), root)
-    raise SystemExit(f"no Agent Collab runs found under {root}")
+    raise ValueError(f"no Agent Collab runs found under {root}")
 
 
+@dataclass(frozen=True)
+class RunContext:
+    """Inputs captured once under the run lock; never reused across a wait."""
+    repo_root: Path
+    run_root: Path
+    run_dir: Path
+    request: dict[str, Any]
+    process: dict[str, Any]
 
-def job_patch_from_run(run_dir: Path, status: str, phase: str, **extra: Any) -> dict[str, Any]:
-    request = ARTIFACTS.read_json_if_exists(run_dir / "host-request.json") or {}
-    process_info = ARTIFACTS.read_json_if_exists(run_dir / "peer-process.json") or {}
+    @classmethod
+    def load(cls, paths: tuple[Path, Path, Path]) -> RunContext:
+        _, run_root, run_dir = paths
+        request = require_run_request(run_dir)
+        process = ARTIFACTS.load_json(run_dir / "peer-process.json")
+        ARTIFACTS.validate_peer_process(process, request, run_dir)
+        return cls(Path(process["repo_root"]).resolve(), run_root, run_dir, request, process)
+
+
+def job_patch(context: RunContext, status: str, phase: str, **extra: Any) -> dict[str, Any]:
+    run_dir, request, process_info = context.run_dir, context.request, context.process
     return {
         "id": str(request.get("run_id") or process_info.get("run_id") or run_dir.name),
         "run_dir": str(run_dir),
@@ -163,14 +168,13 @@ def job_patch_from_run(run_dir: Path, status: str, phase: str, **extra: Any) -> 
     }
 
 
-
 def summarize_run(run_dir: Path) -> dict[str, Any]:
     request = require_run_request(run_dir)
     process_info = ARTIFACTS.load_json(run_dir / "peer-process.json")
     try:
         ARTIFACTS.validate_peer_process(process_info, request, run_dir)
     except ARTIFACTS.ArtifactValidationError as exc:
-        raise SystemExit(f"invalid peer-process artifact in {run_dir}: {exc}") from exc
+        raise ValueError(f"invalid peer-process artifact in {run_dir}: {exc}") from exc
     pid = process_info.get("pid")
     host_result = ARTIFACTS.read_json_if_exists(run_dir / "host-result.json") or {}
     phase = host_result.get("phase")
@@ -199,7 +203,7 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
         peer_report = ARTIFACTS.read_json_if_exists(run_dir / "peer-report.json")
     except (OSError, ValueError) as exc:
         if process_tree_quiescent:
-            raise SystemExit(f"terminal peer-report.json is invalid: {exc}") from exc
+            raise ValueError(f"terminal peer-report.json is invalid: {exc}") from exc
         peer_report = None
         peer_report_incomplete = True
     normalization = ARTIFACTS.read_json_if_exists(run_dir / "peer-normalization.json")
@@ -207,11 +211,6 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
     cancel_result = ARTIFACTS.read_json_if_exists(run_dir / "cancel-result.json")
     cancel_workspace_mutation = ARTIFACTS.read_json_if_exists(run_dir / "cancel-workspace-mutation.json")
     elapsed_seconds = PROCESS_TREE.peer_elapsed_seconds(process_info, run_dir)
-    early_cancel_blocked = (
-        peer_alive
-        and elapsed_seconds is not None
-        and elapsed_seconds < CONFIG.MIN_PEER_WAIT_SECONDS
-    )
     return {
         "run_id": process_info.get("run_id", run_dir.name),
         "run_dir": str(run_dir),
@@ -223,13 +222,6 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
         "provider_active": provider_active,
         "process_tree_quiescent": process_tree_quiescent,
         "elapsed_seconds": ARTIFACTS.json_number(elapsed_seconds),
-        "minimum_wait_seconds": CONFIG.MIN_PEER_WAIT_SECONDS,
-        "minimum_wait_remaining_seconds": (
-            ARTIFACTS.json_number(max(0.0, CONFIG.MIN_PEER_WAIT_SECONDS - elapsed_seconds))
-            if elapsed_seconds is not None
-            else None
-        ),
-        "early_cancel_blocked": early_cancel_blocked,
         "empty_output_guidance": "Empty peer-report.json or stderr does not imply a stalled peer while the peer process is alive.",
         "phase": phase,
         "peer_status": peer_report.get("status") if peer_report else None,
@@ -261,7 +253,6 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
     }
 
 
-
 def is_direct_run_dir(run_root: Path, run_dir: Path) -> bool:
     try:
         resolved_root = run_root.resolve()
@@ -270,3 +261,13 @@ def is_direct_run_dir(run_root: Path, run_dir: Path) -> bool:
         return False
     return resolved_run.parent == resolved_root and any((resolved_run / name).exists() for name in RUN_ARTIFACT_NAMES)
 
+
+
+def require_run_root_format(run_root: Path) -> None:
+    """Reject mixed history before startup; never translate an older run root."""
+    CONFIG.STATE.load_state(run_root)
+    if run_root.exists():
+        for directory in run_root.iterdir():
+            if directory.is_dir() and is_direct_run_dir(run_root, directory):
+                request = ARTIFACTS.load_json(directory / "host-request.json")
+                V.check(request.get("schema_version"), V.VERSION, "run-root host-request schema_version")

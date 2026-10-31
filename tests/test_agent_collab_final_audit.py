@@ -74,10 +74,9 @@ class FinalAuditTests(TestCase):
         request = fixtures.request()
         with tempfile.TemporaryDirectory() as tmp:
             report = {
-                'schema_version': '2.0', 'run_id': request['run_id'],
+                'schema_version': '3.0', 'run_id': request['run_id'],
                 'status': 'cancelled', 'outcome': 'cancelled_quiescent',
-                'forced': False, 'reason': 'peer_not_running', 'elapsed_seconds': 61,
-                'minimum_wait_seconds': 60, 'before_minimum_wait': False,
+                'reason': 'peer_not_running', 'elapsed_seconds': 61,
                 'peer_was_alive': False, 'process_cleanup': {
                     'quiescent': True,
                     'provider': {'outcome': 'already_quiescent', 'quiescent': True},

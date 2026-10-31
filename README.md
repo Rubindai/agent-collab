@@ -2,7 +2,7 @@
 
 Agent Collab is a peer-first, challenge-first collaboration plugin for Codex and Claude Code. It launches the opposite product with a neutral brief, keeps the host analysis independent, then validates and combines the evidence.
 
-Version 6.0.1 fixes Codex memory and message-board isolation, improves Linux safe-mode initialization, refreshes peer and helper guidance, and adds MIT licensing and plugin branding. It retains the Python 3.11 minimum and ASCII decimal numeric flags introduced in 6.0.0. See [CHANGELOG.md](CHANGELOG.md) for changes and upgrade steps. Strict schema 2.0 remains in force, and 1.x settings and run artifacts still have no compatibility layer.
+The upcoming 7.0.0 release simplifies lifecycle operations and uses schema 3.0 for new run history. Saved schema 2.0 settings remain compatible. Close old active runs with their original runtime before upgrading; existing history is not migrated. See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 **Latest provider-documentation and workflow evaluation: 2026-10-25.** A comprehensive audit checked the provider contracts used by this project against current OpenAI and Anthropic documentation, Codex 0.164.0 source, and independent Agent Collab Claude reviews. See the [source and coverage record](tools/agent-collab/references/provider-audit.md) and [evaluation evidence](#evaluation-evidence) for scope and limitations. Version 3.0.0 appeared on GitHub `main` without a release tag; formal tags begin with `v4.0.0`.
 
@@ -195,9 +195,9 @@ Use `start` with a neutral brief before host analysis, then follow the returned 
 
 The normal workflow is self-contained in [SKILL.md](tools/agent-collab/SKILL.md). The [synthesis contract](tools/agent-collab/references/synthesize.md) documents low-level operations and evidence details; the [launch policy](tools/agent-collab/references/launch.md) covers overrides and failures. Read these references only when applicable. [AGENTS.md](AGENTS.md) owns contributor invariants.
 
-Stored settings and artifacts use strict schema 2.0: no legacy translation, coercion, duplicate JSON keys, non-finite numbers, or silently ignored fields. Runtime-owned files, locks, and newly created storage parents are private on POSIX; Windows inherits directory ACLs. Provider output is normalized only from the expected product envelope and then independently validated. Host judgments require explicit CLI admission, the first admitted pass is preserved, and the saved request is checked against its launch-time digest. Hashes bind evidence freshness; they do not prove a conclusion or that the host read it.
+Saved settings use strict schema 2.0; run artifacts, state, and the guard registry use schema 3.0: no legacy translation, coercion, duplicate JSON keys, non-finite numbers, or silently ignored fields. Runtime-owned files, locks, and newly created storage parents are private on POSIX; Windows inherits directory ACLs. Provider output is normalized only from the expected product envelope and then independently validated. Host judgments require explicit CLI admission, the first admitted pass is preserved, and the saved request is checked against its launch-time digest. Hashes bind evidence freshness; they do not prove a conclusion or that the host read it.
 
-Every peer has a finite absolute deadline, 2700 seconds by default. Claude has no default turn cap; `--claude-max-turns N` is an explicit override and a reached turn cap is distinct from timeout. Do not replace a live peer before its deadline unless the user stops the run. Cancellation preserves immutable cancellation evidence rather than overwriting the peer's completed work.
+Every peer has a finite absolute deadline, 2700 seconds by default. Claude has no default turn cap; `--claude-max-turns N` is an explicit override and a reached turn cap is distinct from timeout. Do not replace a live peer before its deadline unless the user stops the run. Explicit `cancel` is immediate, including after a peer report exists. It preserves reports, proves process quiescence, records immutable cancellation evidence, and releases the owned guard. Completed runs cannot be cancelled. `--reason` is optional and defaults to `user_cancelled`; the old force and minimum-wait fields are removed.
 
 ## Runtime organization
 
@@ -227,7 +227,7 @@ Neither posture provides complete containment or observation. In isolated mode, 
 
 Use `--safe-mode` for provider-native restrictions. Linux Codex requires a `bwrap` initialization preflight; native Windows Codex safe mode fails closed. Claude uses `plan` permissions, not an OS container. Research controls limit configured provider research tools, not all networking through shells, MCP, or plugins.
 
-Peer depth markers, CLI shadows, and helper instructions deter recursion but are not a hard cross-product boundary. Claude's ordinary Agent calls have a runtime counter; Codex's total calls and V2 nesting remain instructional, while configured concurrency is enforced by the provider. See [runtime boundaries](tools/agent-collab/references/launch.md#runtime-boundaries-and-failures) and the [provider control audit](tools/agent-collab/references/provider-launch.md) for precise platform, helper, and policy limits.
+Peer depth markers and helper instructions deter recursion but are not a hard cross-product boundary. Claude's ordinary Agent calls have a runtime counter; Codex's total calls and V2 nesting remain instructional, while configured concurrency is enforced by the provider. See [runtime boundaries](tools/agent-collab/references/launch.md#runtime-boundaries-and-failures) and the [provider control audit](tools/agent-collab/references/provider-launch.md) for precise platform, helper, and policy limits.
 
 ## Settings audit
 
@@ -333,7 +333,7 @@ Run `doctor` to check versions, authentication, schemas, paths, resolved default
 python3 tools/agent-collab/scripts/host.py doctor
 ```
 
-`doctor` strictly parses every bundled schema and meta-validates it when Python `jsonschema` is installed; its `meta_validator` field distinguishes those checks. Release verification requires full schema meta-validation. Because 2.0 has no migration layer, an invalid legacy settings or state file must be archived or removed before retrying. `setup --reset local|global|all` removes Agent Collab settings files (`--dry-run` previews); archive a file first if you need it, then rerun `setup` to create canonical settings. For legacy run state, archive the old run root and start with a fresh default root or explicit `--run-root`. Do not edit installed caches or ask the runtime to coerce old artifacts.
+`doctor` strictly parses every bundled schema and meta-validates it when Python `jsonschema` is installed; its `meta_validator` field distinguishes those checks. Release verification requires full schema meta-validation. Saved settings remain schema 2.0. New runs use schema 3.0 and a separate default `runs/v3` history; explicit `--run-root` is used exactly. Existing history is untouched, with no migration or translation. Close active old runs using their original runtime before upgrading: the registry filename and lock are shared across versions, and an incompatible registry blocks admission even with a fresh run root. Invalid settings must be archived or removed before retrying. `setup --reset local|global|all` removes Agent Collab settings files (`--dry-run` previews); archive a file first if you need it, then rerun `setup` to create canonical settings. Inspect old run state with its original runtime; use the new default root or a fresh explicit `--run-root` for new runs. Do not edit installed caches or ask the runtime to coerce old artifacts.
 
 After the host has synthesized a run:
 
@@ -346,9 +346,9 @@ python3 tools/agent-collab/scripts/host.py complete RUN_ID --synthesis SYNTHESIS
 | Data | Location |
 | --- | --- |
 | Global settings | `$AGENT_COLLAB_HOME/settings.json`, else `${XDG_CONFIG_HOME:-~/.config}/agent-collab/settings.json` |
-| Local settings and run history (installed plugin) | `<state root>/repos/<repo-name>-<hash>/settings.local.json` and `.../runs/` |
+| Local settings and run history (installed plugin) | `<state root>/repos/<repo-name>-<hash>/settings.local.json` and `.../runs/v3/` |
 | State root | `$AGENT_COLLAB_STATE_HOME`; else `$CODEX_HOME/agent-collab` when the runtime is installed under `CODEX_HOME`; else `${XDG_STATE_HOME:-~/.local/state}/agent-collab` |
-| Local settings and run history (this repository's own checkout) | `tools/agent-collab/settings.local.json` and `tools/agent-collab/runs/`, only when the target repository is the Agent Collab checkout; other repositories use the state root |
+| Local settings and run history (this repository's own checkout) | `tools/agent-collab/settings.local.json` and `tools/agent-collab/runs/v3/`, only when the target repository is the Agent Collab checkout; other repositories use the state root |
 | Worktree guard | `<git dir>/agent-collab/active-v2.json`; non-Git folders use `${XDG_STATE_HOME:-~/.local/state}/agent-collab/workspace-guards/` |
 
 On Windows, `~` is `%USERPROFILE%`. Local settings written by `setup` from a checkout therefore do not affect an installed plugin, and a Codex host and a Claude host keep separate run histories for the same repository; an active run is still found by ID through the shared worktree guard registry. Agent Collab ignores an inherited `CLAUDE_PLUGIN_DATA`: Claude Code never exports it to Bash-tool commands, so any value present belongs to another plugin, whose data directory Claude Code deletes on uninstall. Versions before 5.0.0 could store state under such a directory; archive it if you need that history.

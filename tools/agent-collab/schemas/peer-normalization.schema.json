@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://local.agent-collab/peer-normalization.schema.json",
-  "title": "Agent Collab Peer Normalization v2",
+  "title": "Agent Collab Peer Normalization v3",
   "oneOf": [
     {
       "type": "object",
@@ -16,7 +16,7 @@
       ],
       "properties": {
         "schema_version": {
-          "const": "2.0"
+          "const": "3.0"
         },
         "source": {
           "enum": [
@@ -77,7 +77,7 @@
       ],
       "properties": {
         "schema_version": {
-          "const": "2.0"
+          "const": "3.0"
         },
         "source": {
           "const": "none"

@@ -17,6 +17,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+import validation as V
 from typing import Any
 
 sys.dont_write_bytecode = True
@@ -130,7 +131,7 @@ def cleanup_state(path: Path) -> None:
     )
     if (not isinstance(data, dict)
             or set(data) != {"schema_version", "scratch", "mounts", "status"}
-            or data["schema_version"] != "2.0"
+            or data["schema_version"] != V.RUN_SCHEMA_VERSION
             or not isinstance(data["scratch"], str)
             or not isinstance(data["status"], str)
             or not isinstance(data["mounts"], list)
@@ -195,7 +196,7 @@ class Workspace:
         os.chmod(self.scratch, 0o700)
         try:
             _write_state(self.state_path, {
-                "schema_version": "2.0", "scratch": str(self.scratch),
+                "schema_version": V.RUN_SCHEMA_VERSION, "scratch": str(self.scratch),
                 "mounts": [str(self.scratch / name / "merged") for name in ("home", "repo")],
                 "status": "preparing",
             })
@@ -204,7 +205,7 @@ class Workspace:
                 self.mounts.append(merged)
                 self.processes.append(process)
             _write_state(self.state_path, {
-                "schema_version": "2.0", "scratch": str(self.scratch),
+                "schema_version": V.RUN_SCHEMA_VERSION, "scratch": str(self.scratch),
                 "mounts": [str(item) for item in self.mounts], "status": "mounted",
             })
             return self
@@ -242,7 +243,7 @@ class Workspace:
                 shutil.rmtree(self.scratch)
             if self.scratch is not None and self.state_path.exists():
                 _write_state(self.state_path, {
-                    "schema_version": "2.0", "scratch": str(self.scratch),
+                    "schema_version": V.RUN_SCHEMA_VERSION, "scratch": str(self.scratch),
                     "mounts": [str(self.scratch / name / "merged") for name in ("home", "repo")],
                     "status": "cleaned",
                 })

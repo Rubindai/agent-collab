@@ -27,7 +27,7 @@ ORIGINS = V.ORIGINS
 MODES = V.MODES
 
 
-ARTIFACT_SCHEMA_VERSION = "2.0"
+ARTIFACT_SCHEMA_VERSION = V.RUN_SCHEMA_VERSION
 
 
 SETTINGS_SCHEMA_VERSION = "2.0"
@@ -89,7 +89,8 @@ MAX_AVAILABILITY_TIMEOUT_SECONDS = 60.0
 RUN_ID_SAFE_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
 
 
-MIN_PEER_WAIT_SECONDS = 60
+MIN_PEER_TIMEOUT_SECONDS = 60
+GUIDED_WAIT_SECONDS = 60
 
 
 FINISH_TIMEOUT_GRACE_SECONDS = 30
@@ -138,7 +139,7 @@ def default_storage_root(repo_root: Path) -> Path:
 
 
 def default_run_root(repo_root: Path) -> Path:
-    return default_storage_root(repo_root) / "runs"
+    return default_storage_root(repo_root) / "runs" / "v3"
 
 
 def default_local_settings_path(repo_root: Path) -> Path:
@@ -334,9 +335,9 @@ def normalize_timeout(value: Any) -> float | int:
         seconds = float(value)
     except (TypeError, ValueError) as exc:
         raise ValueError("timeout must be a finite number of seconds") from exc
-    if not MIN_PEER_WAIT_SECONDS <= seconds <= SAFETY.MAX_AGENT_TIMEOUT_SECONDS:
+    if not MIN_PEER_TIMEOUT_SECONDS <= seconds <= SAFETY.MAX_AGENT_TIMEOUT_SECONDS:
         raise ValueError(
-            f"timeout must be between {MIN_PEER_WAIT_SECONDS} and {SAFETY.MAX_AGENT_TIMEOUT_SECONDS} seconds"
+            f"timeout must be between {MIN_PEER_TIMEOUT_SECONDS} and {SAFETY.MAX_AGENT_TIMEOUT_SECONDS} seconds"
         )
     return int(seconds) if seconds.is_integer() else seconds
 
@@ -462,7 +463,7 @@ def validate_v2_settings_types(raw_settings: dict[str, Any], source: str) -> dic
         "max_local_subagents": V.integer(0, SAFETY.MAX_LOCAL_SUBAGENTS), "history_retained_runs": V.integer(),
         **dict.fromkeys(("codex_model", "codex_effort", "claude_model", "claude_effort", "claude_tools"), V.NONBLANK),
         "workspace_mode": {"isolated", "direct"},
-        "agent_timeout_seconds": V.number(MIN_PEER_WAIT_SECONDS, SAFETY.MAX_AGENT_TIMEOUT_SECONDS),
+        "agent_timeout_seconds": V.number(MIN_PEER_TIMEOUT_SECONDS, SAFETY.MAX_AGENT_TIMEOUT_SECONDS),
         "codex_config": [V.Rule(lambda v: type(v) is str and re.match(r"^[^=]+=", v) is not None,
                                 "a key=value string")],
     }, source)

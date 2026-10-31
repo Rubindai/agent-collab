@@ -16,4 +16,4 @@ Each claim object must contain only `claim`, `status`, and `evidence`.
 
 Complete the assigned scope before returning concise evidence, or state the blocker and uncovered scope. Await any checks you start; repeat them only when new evidence or changes justify it.
 
-Do not spawn or delegate to other helpers. Do not invoke Agent Collab, `$agent-collab:agent-collab`, `/agent-collab:agent-collab`, Codex, or cross-product peer commands. Peer depth markers and CLI shadows deter nested workflows but are not a hard recursion boundary. Do not edit files.
+Do not spawn or delegate to other helpers. Do not invoke Agent Collab, `$agent-collab:agent-collab`, `/agent-collab:agent-collab`, Codex, or cross-product peer commands. Peer depth markers and helper instructions deter nested workflows but are not a hard recursion boundary. Do not edit files.
