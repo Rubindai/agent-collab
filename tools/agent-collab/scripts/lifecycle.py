@@ -770,8 +770,10 @@ def _cancel_locked(args: argparse.Namespace, context: RUNS.RunContext) -> tuple[
         return 0, output
 
     current = ARTIFACTS.read_json_if_exists(run_dir / "host-result.json")
-    if current is not None and current.get("phase") == "done":
-        raise ValueError("completed runs cannot be cancelled")
+    job = state.find_job(run_root, request["run_id"])
+    if (current is not None and current.get("phase") == "done") or (
+            job is not None and job["status"] in {"completed", "failed"}):
+        raise ValueError("completed runs cannot be cancelled; retry complete after an interrupted completion")
     _, active_guard = REGISTRY.require_workspace_guard_owner(peer_repo_root, request["run_id"], owner=process_info)
     pid = int(process_info["pid"])
     reason = str(getattr(args, "reason", "") or "").strip() or "user_cancelled"

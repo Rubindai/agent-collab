@@ -11,7 +11,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import TestCase, mock, skipUnless
 
-import test_agent_collab_runtime as fixtures
+import agent_collab_test_support as fixtures
 import test_agent_collab_simplification as compact
 
 setUpModule = fixtures.setUpModule

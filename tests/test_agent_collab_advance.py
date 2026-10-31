@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import TestCase, mock
 
-import test_agent_collab_runtime as fixtures
+import agent_collab_test_support as fixtures
 import test_agent_collab_simplification as compact
 
 setUpModule = fixtures.setUpModule

@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 from unittest import TestCase, mock
 
-import test_agent_collab_runtime as fixtures
+import agent_collab_test_support as fixtures
 
 setUpModule = fixtures.setUpModule
 tearDownModule = fixtures.tearDownModule

@@ -369,7 +369,12 @@ scripts/sync-packages.sh                          Package synchronization and by
 scripts/release-check.sh                          Every release verification step
 scripts/ci-provider-checks.sh                     Independent no-auth provider validators and isolated installs
 scripts/install-linux-isolation-deps.sh           Linux isolated-workspace dependencies
-tests/test_agent_collab_runtime.py                Runtime and package tests, plus shared fixtures
+tests/agent_collab_test_support.py               Shared fixtures and hermetic test setup
+tests/test_agent_collab_availability.py           Exact-pair probes and bounded capture
+tests/test_agent_collab_launch.py                 Peer launch, output and supervision
+tests/test_agent_collab_lifecycle.py              Host lifecycle and run ownership
+tests/test_agent_collab_packaging.py              Package, manifest and schema contracts
+tests/test_agent_collab_workspace.py              Workspace selection and isolation
 tests/test_agent_collab_safety.py                 Process, recursion, snapshot, and strict-JSON safety tests
 tests/test_agent_collab_hardening.py              Isolation boundary, Codex policy, snapshot, schema-parity, and lifecycle hardening tests
 tests/test_agent_collab_lifecycle_audit.py        Lifecycle and guard transition tests

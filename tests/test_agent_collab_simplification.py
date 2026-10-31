@@ -9,7 +9,7 @@ from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
 from unittest import TestCase, mock
 
-import test_agent_collab_runtime as fixtures
+import agent_collab_test_support as fixtures
 import test_agent_collab_lifecycle_audit as lifecycle
 
 setUpModule = fixtures.setUpModule
@@ -279,6 +279,26 @@ class CompactWorkflowTests(TestCase):
         with self.assertRaisesRegex(ValueError, 'completed runs'):
             self.invoke('cancel')
         self.assertEqual(before, {p.name: p.read_bytes() for p in self.run.glob('*.json')})
+
+    def test_interrupted_completion_cannot_be_replaced_by_cancel(self):
+        result = self.finish()
+        authored = self.author(result)
+        write = self.host.CONFIG.STRICT_JSON.write
+
+        def interrupt_done(path, value, **kwargs):
+            if path.name == 'host-result.json' and value.get('phase') == 'done':
+                raise OSError('interrupted after completion state')
+            return write(path, value, **kwargs)
+
+        with mock.patch.object(self.host.CONFIG.STRICT_JSON, 'write', side_effect=interrupt_done):
+            with self.assertRaises(OSError):
+                self.invoke('complete', '--synthesis', authored)
+        with self.assertRaisesRegex(ValueError, 'completed runs'):
+            self.invoke('cancel')
+        self.assertTrue(self.guard.exists())
+        self.assertFalse((self.run / 'cancel-result.json').exists())
+        self.invoke('complete', '--synthesis', authored)
+        self.assertFalse(self.guard.exists())
 
     def test_lifecycle_cli_validates_request_first_with_exit_two(self):
         (self.run / 'host-request.json').write_text('{broken')

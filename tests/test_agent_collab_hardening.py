@@ -10,7 +10,7 @@ from unittest import TestCase, mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import test_agent_collab_runtime as fixtures
+import agent_collab_test_support as fixtures
 
 setUpModule = fixtures.setUpModule
 tearDownModule = fixtures.tearDownModule

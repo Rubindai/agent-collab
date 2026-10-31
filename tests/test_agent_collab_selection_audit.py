@@ -10,7 +10,7 @@ from unittest import TestCase, mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import test_agent_collab_runtime as fixtures
+import agent_collab_test_support as fixtures
 
 setUpModule = fixtures.setUpModule
 tearDownModule = fixtures.tearDownModule
@@ -30,7 +30,7 @@ class SelectionAuditTests(TestCase):
             ('claude-opus-5-5', {'effort': 'xhigh', 'modelUsage': {'claude-opus-5-5': {'effortLevel': 'low'}}}),
             ('claude-haiku-4-5', {'modelUsage': {'claude-haiku-4-5': {}, 'claude-haiku-9-9': {}}}),
         ):
-            original = fixtures.AvailabilityTests().claude_runner(model, 'xhigh')
+            original = fixtures.claude_probe_runner(model, 'xhigh')
             def runner(*args, **kwargs):
                 result = original(*args, **kwargs)
                 result.stdout = json.dumps({'type': 'result', **envelope})
