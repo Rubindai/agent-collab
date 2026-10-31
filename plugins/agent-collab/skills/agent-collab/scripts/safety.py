@@ -675,10 +675,36 @@ def claude_agent_guard_args(counter_path: Path, limit: int) -> list[str]:
     ]
 
 
-def claude_agent_guard_settings(
+def claude_environment(model: str, effective_effort: str, timeout_seconds: float) -> dict[str, str]:
+    # Apply in both the process environment and command-line-priority settings:
+    # ordinary settings env entries otherwise replace inherited shell values.
+    return {
+        "CLAUDE_CODE_EFFORT_LEVEL": effective_effort,
+        "CLAUDE_CODE_SUBAGENT_MODEL": model,
+        "CLAUDE_CODE_SUBAGENT_MODEL_FORCE": "1",
+        "CLAUDE_CODE_FORK_SUBAGENT": "0",
+        "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "1",
+        "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0",
+        "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+        # Bound idle background waiting; provider exceptions for running main
+        # commands never extend Agent Collab's absolute process deadline.
+        "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS": str(
+            max(1, int(timeout_seconds * 1000))
+        ),
+        "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING": "0",
+        "CLAUDE_CODE_DISABLE_THINKING": "0",
+        "MAX_THINKING_TOKENS": "",
+        "CLAUDE_CODE_DISABLE_WORKFLOWS": "1",
+    }
+
+
+def claude_launch_settings(
     counter_path: Path,
     limit: int,
     model: str,
+    effective_effort: str,
+    timeout_seconds: float,
+    stop_hook: dict[str, Any],
 ) -> dict[str, Any]:
     if not isinstance(model, str) or not model.strip():
         raise ValueError("Claude model must be a non-empty exact identifier")
@@ -687,13 +713,10 @@ def claude_agent_guard_settings(
         "fallbackModel": [],
         "switchModelsOnFlag": False,
         "crossSessionInbound": "refuse",
-        "disableWorkflows": True,
-        "ultracode": False,
-        # Prior auto-memory notes would leak earlier conclusions into an
-        # independent peer review.
-        "autoMemoryEnabled": False,
+        "env": claude_environment(model, effective_effort, timeout_seconds),
         "disableAllHooks": False,
         "hooks": {
+            "Stop": [{"hooks": [stop_hook]}],
             "PreToolUse": [
                 {
                     "matcher": "Agent",

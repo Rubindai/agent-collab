@@ -66,12 +66,6 @@ MAX_PEER_OUTPUT_BYTES = 16 * 1024 * 1024
 # covers that snapshot plus margin; it is checked again at provider launch.
 MAX_AVAILABILITY_ATTESTATION_AGE_SECONDS = 600
 WEB_TOOLS = ("WebSearch", "WebFetch")
-CLAUDE_EFFORT_ENV_OVERRIDES = (
-    "CLAUDE_CODE_EFFORT_LEVEL",
-    "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING",
-    "CLAUDE_CODE_DISABLE_THINKING",
-    "MAX_THINKING_TOKENS",
-)
 ROLE_BY_MODE = {
     "debug": "You are an independent root-cause investigator.",
     "design": "You are an independent software architect.",
@@ -656,31 +650,6 @@ def claude_tools_for_request(claude_tools: str, online_research: bool) -> str:
     return "default" if claude_tools == "default" else ",".join(tools)
 
 
-def claude_helper_environment(request: dict[str, Any]) -> dict[str, str]:
-    # Apply in both the process environment and command-line-priority settings:
-    # ordinary settings env entries otherwise replace inherited shell values.
-    return {
-        "CLAUDE_CODE_EFFORT_LEVEL": AVAILABILITY.effective_claude_effort(
-            request["peer_effort"]
-        ),
-        "CLAUDE_CODE_SUBAGENT_MODEL": request["peer_model"],
-        "CLAUDE_CODE_SUBAGENT_MODEL_FORCE": "1",
-        "CLAUDE_CODE_FORK_SUBAGENT": "0",
-        "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "1",
-        "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0",
-        "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
-        # Print mode otherwise drops background helper results after ten idle
-        # minutes; the absolute peer deadline remains the liveness bound.
-        "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS": str(
-            max(1, int(float(request["peer_timeout_seconds"]) * 1000))
-        ),
-        "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING": "0",
-        "CLAUDE_CODE_DISABLE_THINKING": "0",
-        "MAX_THINKING_TOKENS": "",
-        "CLAUDE_CODE_DISABLE_WORKFLOWS": "1",
-    }
-
-
 def build_peer_command(
     request: dict[str, Any],
     prompt: str,
@@ -708,21 +677,15 @@ def build_peer_command(
             if request["local_subagents_allowed"]
             else 0
         )
-        claude_settings = SAFETY.claude_agent_guard_settings(
-            output_path.parent / "claude-agent-calls.count",
-            agent_limit,
-            request["peer_model"],
+        claude_settings = SAFETY.claude_launch_settings(
+            output_path.parent / "claude-agent-calls.count", agent_limit, request["peer_model"],
+            AVAILABILITY.effective_claude_effort(request["peer_effort"]), request["peer_timeout_seconds"],
+            {"type": "command", "command": sys.executable,
+             "args": CLAUDE_TELEMETRY.capture_args(
+                 output_path.with_name("claude-effort.json"), request["run_id"],
+                 AVAILABILITY.effective_claude_effort(request["peer_effort"])),
+             "timeout": SAFETY.CLAUDE_HOOK_TIMEOUT_SECONDS},
         )
-        claude_settings["env"] = claude_helper_environment(request)
-        claude_settings["hooks"]["Stop"] = [{"hooks": [{
-            "type": "command",
-            "command": sys.executable,
-            "args": CLAUDE_TELEMETRY.capture_args(
-                output_path.with_name("claude-effort.json"), request["run_id"],
-                AVAILABILITY.effective_claude_effort(request["peer_effort"]),
-            ),
-            "timeout": SAFETY.CLAUDE_HOOK_TIMEOUT_SECONDS,
-        }]}]
         args = [
             "claude",
             "-p",
@@ -1577,9 +1540,8 @@ def execute_peer(request: dict[str, Any], repo_root: Path, effective_env: dict[s
 
     peer_env = dict(effective_env)
     if request["peer"] == "claude":
-        for key in CLAUDE_EFFORT_ENV_OVERRIDES:
-            peer_env.pop(key, None)
-        peer_env.update(claude_helper_environment(request))
+        peer_env.update(SAFETY.claude_environment(request["peer_model"],
+            AVAILABILITY.effective_claude_effort(request["peer_effort"]), request["peer_timeout_seconds"]))
     peer_env["AGENT_COLLAB_PEER_ONLY"] = "true"
     peer_env["AGENT_COLLAB_CROSS_AGENT_DEPTH"] = "1"
     peer_env["AGENT_COLLAB_MAX_CROSS_AGENT_DEPTH"] = "1"

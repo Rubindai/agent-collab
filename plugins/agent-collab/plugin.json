@@ -18,7 +18,7 @@
       "interface": {
         "displayName": "Agent Collab",
         "shortDescription": "Cross-check with Claude/Codex",
-        "longDescription": "Run peer-first Claude and Codex collaboration with exact model attestation, strict schema 2.0 run artifacts, independent analysis, and evidence-backed synthesis.",
+        "longDescription": "Run peer-first Claude and Codex collaboration with exact model attestation, strict schema 3.0 run artifacts, independent analysis, and evidence-backed synthesis.",
         "developerName": "Agent Collab",
         "logo": "./assets/logo.svg",
         "composerIcon": "./assets/composer-icon.svg",
@@ -33,7 +33,8 @@
           "Use Agent Collab to critique this plan.",
           "Use Agent Collab with Fable 5 Max to verify this fix."
         ]
-      }
+      },
+      "requires_local_executor": true
     }
   }
 }

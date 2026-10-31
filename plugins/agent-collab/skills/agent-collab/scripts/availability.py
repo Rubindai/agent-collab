@@ -51,18 +51,6 @@ DEFAULT_TIMEOUT_SECONDS = 30.0
 MAX_TIMEOUT_SECONDS = 60.0
 MAX_PROBE_OUTPUT_BYTES = 16 * 1024 * 1024
 EXIT_CODES = {"available": 0, "unavailable": 2, "unknown": 3}
-CLAUDE_EFFORT_ENV_OVERRIDES = (
-    "CLAUDE_CODE_EFFORT_LEVEL",
-    "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING",
-    "CLAUDE_CODE_DISABLE_THINKING",
-    "MAX_THINKING_TOKENS",
-)
-CLAUDE_KNOWN_MODEL_EFFORTS = (
-    ("claude-opus-5-5", ("low", "medium", "high", "xhigh", "max", "ultracode")),
-    ("claude-opus-5", ("low", "medium", "high", "xhigh", "max", "ultracode")),
-    ("claude-opus-4-8", ("low", "medium", "high", "xhigh", "max", "ultracode")),
-    ("claude-fable-5", ("low", "medium", "high", "xhigh", "max", "ultracode")),
-)
 CLAUDE_AUXILIARY_MODEL_PREFIXES = ("claude-haiku-",)
 
 
@@ -281,16 +269,6 @@ def validate_result(output: dict[str, Any], *, require_available: bool = False) 
             raise ValueError("available Claude result must use a documented CLI effort choice")
 
 
-def known_claude_efforts(model: str) -> tuple[str, ...] | None:
-    normalized = model.casefold()
-    for model_prefix, efforts in CLAUDE_KNOWN_MODEL_EFFORTS:
-        if normalized == model_prefix or normalized.startswith(f"{model_prefix}-") or normalized.startswith(
-            f"{model_prefix}["
-        ):
-            return efforts
-    return None
-
-
 def static_failure(peer: str, model: str, effort: str) -> dict[str, Any] | None:
     report = partial(result, peer=peer, model=model, effort=effort, source="request_contract", cli_version=None)
     if not isinstance(model, str) or not model.strip():
@@ -319,14 +297,6 @@ def static_failure(peer: str, model: str, effort: str) -> dict[str, Any] | None:
             details="requested effort is not a documented Claude Code effort choice",
             evidence=f"unsupported Claude effort: {effort}",
             supported_efforts=sorted(CLAUDE_EFFORT_CHOICES),
-        )
-    known_efforts = known_claude_efforts(model) if peer == "claude" else None
-    if known_efforts is not None and effort not in known_efforts:
-        return report(
-            status="unavailable",
-            details="requested effort is known to be unsupported by this exact Claude model family",
-            evidence=f"known unsupported model/effort pair: {model}/{effort}",
-            supported_efforts=list(known_efforts),
         )
     return None
 
@@ -603,10 +573,6 @@ def claude_availability(
 ) -> dict[str, Any]:
     report = partial(result, peer="claude", model=model, effort=effort, source="claude_cli_probe", cli_version=cli_version)
     probe_env = dict(os.environ if env is None else env)
-    for key in CLAUDE_EFFORT_ENV_OVERRIDES:
-        probe_env.pop(key, None)
-    # Exercise the same effective-effort pin used by the peer and its helpers.
-    probe_env["CLAUDE_CODE_EFFORT_LEVEL"] = effective_claude_effort(effort)
     with tempfile.TemporaryDirectory(prefix="agent-collab-availability-") as temp_dir:
         effort_capture_path = Path(temp_dir) / "stop.json"
         probe_env["AGENT_COLLAB_EFFORT_CAPTURE"] = str(effort_capture_path)
@@ -624,20 +590,11 @@ def claude_availability(
             )
             return {"type": "command", "command": sys.executable, "args": ["-c", capture_code]}
 
-        settings = {
-            "availableModels": [model],
-            "fallbackModel": [],
-            "switchModelsOnFlag": False,
-            "autoMemoryEnabled": False,
-            "disableAllHooks": False,
-            "hooks": {
-                "Stop": [
-                    {
-                        "hooks": [capture_hook("AGENT_COLLAB_EFFORT_CAPTURE")]
-                    }
-                ],
-            },
-        }
+        settings = SAFETY.claude_launch_settings(
+            Path(temp_dir) / "agent-calls.count", 0, model, effective_claude_effort(effort),
+            timeout_seconds, capture_hook("AGENT_COLLAB_EFFORT_CAPTURE"),
+        )
+        probe_env.update(settings["env"])
         command = [
             "claude",
             "-p",
@@ -654,7 +611,7 @@ def claude_availability(
             "",
             "--strict-mcp-config",
             "--disallowedTools",
-            "mcp__*",
+            "mcp__*,Agent,Workflow",
             "--settings",
             json.dumps(settings, separators=(",", ":")),
             "--output-format",

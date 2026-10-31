@@ -13,6 +13,7 @@ from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "tools/agent-collab/scripts"))
 
 
 def load_module(name: str, relative_path: str):
@@ -133,10 +134,10 @@ class SafetyTests(unittest.TestCase):
             self.assertEqual(target.read_text(encoding="utf-8"), "0")
 
     def test_claude_guard_settings_pin_model_disable_fallbacks_and_bound_depth(self):
-        settings = safety.claude_agent_guard_settings(
+        settings = safety.claude_launch_settings(
             Path("/tmp/agent-calls.count"),
             8,
-            "claude-opus-5",
+            "claude-opus-5", "xhigh", 2700, {"type": "command", "command": "capture"},
         )
         self.assertEqual(settings["availableModels"], ["claude-opus-5"])
         self.assertEqual(settings["fallbackModel"], [])
@@ -150,7 +151,7 @@ class SafetyTests(unittest.TestCase):
             "provider_enforced",
         )
         with self.assertRaisesRegex(ValueError, "non-empty exact identifier"):
-            safety.claude_agent_guard_settings(Path("/tmp/count"), 1, "")
+            safety.claude_launch_settings(Path("/tmp/count"), 1, "", "xhigh", 2700, {})
 
     def test_codex_fanout_overrides_are_late_enforceable_controls(self):
         overrides = safety.codex_fanout_overrides(

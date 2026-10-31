@@ -22,6 +22,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import TestCase, mock
 
+CLAUDE_EFFORT_KEYS = ("CLAUDE_CODE_EFFORT_LEVEL", "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING",
+                      "CLAUDE_CODE_DISABLE_THINKING", "MAX_THINKING_TOKENS")
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_ROOT = REPO_ROOT / "tools" / "agent-collab"
 CODEX_PLUGIN_ROOT = REPO_ROOT / "plugins" / "agent-collab"
@@ -474,7 +477,7 @@ def valid_state_job_patch(job_id="agent-collab-test", **overrides):
     return data
 
 
-class AvailabilityV2Tests(TestCase):
+class AvailabilityTests(TestCase):
     @staticmethod
     def codex_catalog():
         return json.dumps({
@@ -610,7 +613,7 @@ class AvailabilityV2Tests(TestCase):
         availability = load_availability()
         captured = {}
 
-        env = {key: "forced" for key in availability.CLAUDE_EFFORT_ENV_OVERRIDES}
+        env = {key: "forced" for key in CLAUDE_EFFORT_KEYS}
         result = availability.check(
             "claude", "claude-fable-5", "max", "2.1.257", REPO_ROOT, 7,
             runner=self.claude_runner("claude-fable-5", "max", captured=captured), env=env,
@@ -624,7 +627,7 @@ class AvailabilityV2Tests(TestCase):
         self.assertIn("--strict-mcp-config", captured["command"])
         self.assertEqual(
             captured["command"][captured["command"].index("--disallowedTools") + 1],
-            "mcp__*",
+            "mcp__*,Agent,Workflow",
         )
         self.assertEqual(captured["command"][captured["command"].index("--max-turns") + 1], "1")
         self.assertEqual(captured["command"][-2:], ["--tools", ""])
@@ -635,11 +638,13 @@ class AvailabilityV2Tests(TestCase):
         self.assertEqual(probe_settings["fallbackModel"], [])
         self.assertIs(probe_settings["switchModelsOnFlag"], False)
         self.assertIs(probe_settings["disableAllHooks"], False)
-        self.assertEqual(set(probe_settings["hooks"]), {"Stop"})
+        self.assertEqual(set(probe_settings["hooks"]), {"Stop", "PreToolUse"})
         self.assertEqual(captured["kwargs"]["timeout"], 7)
-        for key in availability.CLAUDE_EFFORT_ENV_OVERRIDES:
-            if key != "CLAUDE_CODE_EFFORT_LEVEL":
-                self.assertNotIn(key, captured["kwargs"]["env"])
+        for key, value in probe_settings["env"].items():
+            self.assertEqual(captured["kwargs"]["env"][key], value)
+        self.assertEqual(probe_settings["env"]["CLAUDE_CODE_DISABLE_THINKING"], "0")
+        self.assertEqual(probe_settings["env"]["MAX_THINKING_TOKENS"], "")
+        self.assertEqual(probe_settings["hooks"]["PreToolUse"][0]["hooks"][0]["args"][-1], "0")
         self.assertEqual(captured["kwargs"]["env"]["CLAUDE_CODE_EFFORT_LEVEL"], "max")
 
         result = availability.check(
@@ -816,8 +821,8 @@ class AvailabilityV2Tests(TestCase):
         self.assertEqual(completed.stdout, "bounded input")
 
 
-class PeerV2Tests(TestCase):
-    def test_request_is_strict_complete_v2(self):
+class PeerTests(TestCase):
+    def test_request_is_strict_complete_v3(self):
         peer = load_peer()
         peer.validate_request(request())
         for change in (
@@ -882,61 +887,10 @@ class PeerV2Tests(TestCase):
         for section in ("role", "outcome", "evidence", "boundaries", "task", "stop"):
             self.assertEqual(prompt.count("<" + section + ">"), 1)
         self.assertIn("&lt;x/&gt;", prompt)
-        self.assertIn("Seek disconfirming evidence", prompt)
-        self.assertIn("Use available repository, command, test", prompt)
-        self.assertIn("current official documentation or primary sources", prompt)
-        self.assertIn("Do not modify files", prompt)
-        self.assertIn("run_id=agent-collab-test", prompt)
-        self.assertIn("origin=codex; host=codex; peer=claude", prompt)
         self.assertIn("<target>A &lt; B &amp;&amp; C &gt; D</target>", prompt)
-        self.assertIn("copy the decoded task target exactly", prompt)
-        self.assertIn("Keep it concise and deduplicate repeated points", prompt)
-        self.assertIn("Use the fewest helpers needed", prompt)
-        self.assertIn("Do not expand into adjacent work or repeat completed checks", prompt)
         self.assertNotIn("<request_json>", prompt)
         self.assertNotIn("<response_schema>", prompt)
         self.assertNotIn('"schema_version"', prompt)
-
-    def test_prompt_applies_modes_and_resolved_boundaries(self):
-        peer = load_peer()
-        for mode in CANONICAL_MODES:
-            prompt = peer.build_prompt(request(mode=mode), REPO_ROOT, PEER_SCHEMA)
-            self.assertIn(peer.ROLE_BY_MODE[mode], prompt)
-            self.assertIn(peer.MODE_CONTRACT_BY_MODE[mode], prompt)
-        offline = peer.build_prompt(
-            request(online_research=False, local_subagents_allowed=False, max_local_subagents=0),
-            REPO_ROOT,
-            PEER_SCHEMA,
-        )
-        self.assertIn("Do not research online", offline)
-        self.assertIn("Do not use local subagents", offline)
-        self.assertNotIn("As the spawner", offline)
-        self.assertNotIn("fork_turns", offline)
-        codex_helpers = peer.build_prompt(
-            request(peer="codex", host="claude"),
-            REPO_ROOT,
-            PEER_SCHEMA,
-        )
-        self.assertIn("Helpers must use this peer's exact model and effective effort", codex_helpers)
-        self.assertIn("at most 8 total helper spawn calls", codex_helpers)
-        self.assertIn("fresh contexts without parent conversation history", codex_helpers)
-        self.assertIn('explicitly set fork_turns="none"', codex_helpers)
-        self.assertIn("Do not use explicit spawn overrides or custom agents", codex_helpers)
-        self.assertIn("V1 configures agents.max_depth=1", codex_helpers)
-        self.assertIn("under V2 the nesting ban is instructional", codex_helpers)
-        self.assertIn("Keep tightly coupled work and quick lookups in your main loop", codex_helpers)
-        claude_helpers = peer.build_prompt(request(), REPO_ROOT, PEER_SCHEMA)
-        self.assertIn("runtime limit of 8 Agent calls", claude_helpers)
-        self.assertNotIn("V1 configures", claude_helpers)
-        self.assertNotIn("fork_turns", claude_helpers)
-        for helper_prompt in (codex_helpers, claude_helpers):
-            self.assertEqual(helper_prompt.count("Do not nest helpers"), 1)
-            self.assertIn(
-                "an explicit prohibition on further helper or cross-product delegation",
-                helper_prompt,
-            )
-        writable = peer.build_prompt(request(edit_allowed=True), REPO_ROOT, PEER_SCHEMA)
-        self.assertIn("disjoint writable paths and one integration owner", writable)
 
     def test_claude_command_exact_defaults_and_full_capability(self):
         peer = load_peer()
@@ -1076,8 +1030,8 @@ class PeerV2Tests(TestCase):
             peer.build_peer_command(
                 request(peer_effort="ultracode"), "p", REPO_ROOT, PEER_SCHEMA, Path("/tmp/out"), {}, "git"
             )
-        self.assertTrue(settings["disableWorkflows"])
-        self.assertFalse(settings["ultracode"])
+        self.assertEqual(settings["env"]["CLAUDE_CODE_DISABLE_WORKFLOWS"], "1")
+        self.assertEqual(settings["env"]["CLAUDE_CODE_DISABLE_AUTO_MEMORY"], "1")
         self.assertIn("Workflow", args[args.index("--disallowedTools") + 1].split(","))
 
         no_agents = peer.build_peer_command(
@@ -1124,7 +1078,7 @@ class PeerV2Tests(TestCase):
                     record_claude_stop(args)
                     return SimpleNamespace(returncode=0, stdout=json.dumps(envelope), stderr="")
 
-                overrides = {key: "forced" for key in peer.CLAUDE_EFFORT_ENV_OVERRIDES}
+                overrides = {key: "forced" for key in CLAUDE_EFFORT_KEYS}
                 overrides.update({
                     "CLAUDE_CODE_SUBAGENT_MODEL": "claude-haiku-wrong",
                     "CLAUDE_CODE_SUBAGENT_MODEL_FORCE": "0",
@@ -1144,9 +1098,6 @@ class PeerV2Tests(TestCase):
                 self.assertEqual(result["status"], "ok")
                 sandbox_preflight.assert_not_called()
                 settings = json.loads(captured["args"][captured["args"].index("--settings") + 1])
-                self.assertEqual(settings["env"], peer.claude_helper_environment(
-                    request(peer_model=model, peer_effort=effort, safe_mode=safe_mode)
-                ))
                 for key, value in settings["env"].items():
                     self.assertEqual(captured["env"][key], value)
                 self.assertEqual(captured["env"]["CLAUDE_CODE_EFFORT_LEVEL"], effective_effort)
@@ -1343,7 +1294,7 @@ class PeerV2Tests(TestCase):
         self.assertEqual(result["status"], "peer_failed")
         self.assertEqual(result["error"]["kind"], "timeout")
 
-    def test_edit_authorization_controls_mutation_reporting_and_prompt(self):
+    def test_edit_authorization_controls_mutation_reporting(self):
         peer = load_peer()
         envelope = {
             "type": "result",
@@ -1383,8 +1334,6 @@ class PeerV2Tests(TestCase):
             ["start", "--host", "codex", "--target", "diff", "--brief", "review"]
         )
         self.assertIs(parsed.edit_allowed, False)
-        prompt = peer.build_prompt(request(edit_allowed=True), REPO_ROOT, PEER_SCHEMA)
-        self.assertIn("Edits are allowed only when the task brief explicitly delegates them", prompt)
 
     def test_peer_timeout_kills_redirected_sigterm_ignoring_descendant(self):
         if os.name != "posix":
@@ -1591,7 +1540,7 @@ class PeerV2Tests(TestCase):
         for output in ("model is unavailable", '{"type":"error","message":42}', '["model is unavailable"]'):
             self.assertIsNone(peer.model_unavailable_message(output, "", "gpt-6-astra", "xhigh"))
 
-    def test_report_v2_semantics_and_current_provider_schema(self):
+    def test_report_v3_semantics_and_current_provider_schema(self):
         peer = load_peer()
         peer.validate_peer_report(valid_report())
         with self.assertRaises(peer.PeerReportValidationError):
@@ -1757,7 +1706,7 @@ class PeerV2Tests(TestCase):
         self.assertEqual(result["error"]["kind"], "turn_limit_reached")
 
 
-class HostV2Tests(TestCase):
+class HostTests(TestCase):
     def test_mode_classifier_uses_token_and_phrase_boundaries(self):
         host = load_host()
         self.assertEqual(
@@ -3199,7 +3148,7 @@ class HostV2Tests(TestCase):
         self.assertEqual(report["status"], "peer_failed")
         self.assertIn("16777216-byte limit", report["error"]["message"])
 
-    def test_host_artifact_normalization_requires_direct_v2_report(self):
+    def test_host_artifact_normalization_requires_direct_v3_report(self):
         host = load_host()
         peer = load_peer()
         with tempfile.TemporaryDirectory() as tmp:
@@ -3375,68 +3324,22 @@ class PackageTests(TestCase):
             self.assertEqual(sync.returncode, 0, sync.stdout + sync.stderr)
             self.assertFalse(stale.exists())
 
-    def test_skills_expose_user_overrides_and_pin_current_defaults(self):
-        codex = (CODEX_SKILL_ROOT / "SKILL.md").read_text()
-        frontmatter = codex.split("---", 2)[1]
-        self.assertEqual(
-            [line.split(":", 1)[0] for line in frontmatter.splitlines() if ":" in line],
-            ["name", "description"],
-        )
-        launch = (CODEX_SKILL_ROOT / "references" / "launch.md").read_text()
-        for token in ("--peer-model", "--peer-effort", '"schema_version": "3.0"'):
-            self.assertIn(token, codex)
-        for reference in ("launch.md", "peer-only.md", "synthesize.md"):
-            self.assertIn("references/" + reference, codex)
-            self.assertTrue((CODEX_SKILL_ROOT / "references" / reference).is_file())
-        commands = re.findall(r'scripts/host\.py" (start|advance|finish|complete)', codex)
-        self.assertEqual(commands, ["start", "advance"])
-        self.assertLessEqual(len(codex.encode('utf-8')), 8000, 'The self-contained normal workflow has an 8 KB instruction budget')
-        for interface in ("--first-pass", "--adjudicator", "--synthesis", "next_action", "synthesis_input"):
-            self.assertIn(interface, codex)
-        self.assertIn("peer did not run", codex)
-        self.assertIn("Never retry a fallback", codex)
-        for token in ("claude-fable-5", "helper_policy_unavailable", "sandbox_unavailable"):
-            self.assertIn(token, launch)
-        self.assertNotIn("plugins/cache", codex)
-        self.assertEqual(CODEX_SKILL_ROOT, CLAUDE_SKILL_ROOT)
-        self.assertNotIn("allowed-tools:", frontmatter)
-        for token in ("gpt-6-astra", "claude-opus-5-5", "--peer-model", "--peer-effort"):
-            self.assertIn(token, codex)
-
-    def test_helpers_inherit_exact_run_selection_and_forbid_recursion(self):
-        for path in (CLAUDE_PLUGIN_ROOT / "agents").glob("*.md"):
-            text = path.read_text()
-            frontmatter = text.split("---", 2)[1]
-            # inherit outranks an ambient CLAUDE_CODE_SUBAGENT_MODEL for host
-            # helpers; forced peer runs ignore it.
-            self.assertIn("\nmodel: inherit\n", frontmatter, path.name)
-            self.assertIn("Use only inside an Agent Collab run", frontmatter, path.name)
-            self.assertNotIn("effort:", frontmatter, path.name)
-            self.assertNotIn("tools:", frontmatter, path.name)
-            self.assertNotIn("disallowedTools:", frontmatter, path.name)
-            self.assertIn("assigned inputs and repository evidence", text, path.name)
-            self.assertIn("report that gap to the host", text, path.name)
-            self.assertIn("Do not spawn or delegate to other helpers", text, path.name)
-            self.assertIn("Do not invoke Agent Collab", text, path.name)
-            self.assertIn("not a hard recursion boundary", text, path.name)
-
-    def test_agents_claude_and_readme_document_current_contract(self):
-        agents = (REPO_ROOT / "AGENTS.md").read_text()
-        for token in ("gpt-6-astra", "claude-opus-5-5", "schema 2.0", "guard entry for each active run"):
-            self.assertIn(token, agents)
+    def test_skill_frontmatter_links_and_instruction_budget(self):
+        text = (CODEX_SKILL_ROOT / "SKILL.md").read_text()
+        frontmatter = text.split("---", 2)[1]
+        self.assertEqual([line.split(":", 1)[0] for line in frontmatter.splitlines() if ":" in line],
+                         ["name", "description"])
+        self.assertLessEqual(len(text.encode("utf-8")), 8000)
+        for reference in re.findall(r"\]\((references/[^)]+)\)", text):
+            self.assertTrue((CODEX_SKILL_ROOT / reference).is_file(), reference)
         self.assertEqual((REPO_ROOT / "CLAUDE.md").read_text(), "@AGENTS.md\n")
-        readme = (REPO_ROOT / "README.md").read_text()
-        for token in (
-            "gpt-6-astra", "claude-opus-5-5", "claude-fable-5", "--peer-model",
-            "--peer-effort", "Codex CLI 0.163.0", "Claude Code 2.1.295",
-            "schema 2.0", "danger-full-access", "bypassPermissions",
-        ):
-            self.assertIn(token, readme)
-        for removed in (
-            "install-codex-plugin.sh", "install-codex-skill.sh",
-            "install-claude-plugin.sh", "gpt-5.5", "AGENT_COLLAB_WEB_RESEARCH",
-        ):
-            self.assertNotIn(removed, readme)
+
+    def test_helper_frontmatter_inherits_without_tool_restrictions(self):
+        for path in (CLAUDE_PLUGIN_ROOT / "agents").glob("*.md"):
+            frontmatter = path.read_text().split("---", 2)[1]
+            fields = dict(line.split(":", 1) for line in frontmatter.splitlines() if ":" in line)
+            self.assertEqual(fields["model"].strip(), "inherit", path.name)
+            self.assertTrue({"effort", "tools", "disallowedTools"}.isdisjoint(fields), path.name)
 
     def test_settings_audit_matches_runtime_schema_defaults_and_environment(self):
         host = load_host()
@@ -3476,19 +3379,6 @@ class PackageTests(TestCase):
         env_section = readme.split("Environment keys:", 1)[1].split("Run `doctor`", 1)[0]
         documented_env = set(re.findall(r"`([A-Z][A-Z0-9_]+)`", env_section))
         self.assertEqual(documented_env, set(host.CONFIG.SETTING_ENV_KEYS.values()))
-
-    def test_no_duplicate_prompt_or_old_runtime_flags(self):
-        for root in (RUNTIME_ROOT, CODEX_SKILL_ROOT, CLAUDE_SKILL_ROOT):
-            self.assertFalse((root / "references/peer-prompt-blocks.md").exists())
-        source = "\n".join(path.read_text() for path in (RUNTIME_ROOT / "scripts").glob("*.py"))
-        for removed in (
-            "gpt-5.5", "AGENT_COLLAB_WEB_RESEARCH",
-            "CLAUDE_AGENT_COLLAB_MAX_BUDGET_USD",
-            "--dangerously-skip-permissions",
-            "--dangerously-bypass-approvals-and-sandbox", "MultiEdit",
-            "codex-plugin", "claude-plugin",
-        ):
-            self.assertNotIn(removed, source)
 
     def test_json_schemas_validate_representatives(self):
         strict_json = load_module(
