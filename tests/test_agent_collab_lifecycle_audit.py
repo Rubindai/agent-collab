@@ -83,8 +83,8 @@ class LifecycleAuditTests(TestCase):
         req = fixtures.request()
         run_dir.mkdir(parents=True)
         host.REGISTRY.acquire_workspace_guard(root, req["run_id"], "codex", run_dir)
+        host.CONFIG.STRICT_JSON.write(run_dir / "host-request.json", req)
         for name, data in {
-            "host-request.json": req,
             "peer-process.json": fixtures.valid_peer_process(run_dir, root, guard),
             "provider-process.json": fixtures.valid_provider_process(),
             "peer-report.json": fixtures.valid_report(),
@@ -130,7 +130,7 @@ class LifecycleAuditTests(TestCase):
     def test_complete_one_run_preserves_another_hosts_active_run(self):
         host = fixtures.load_host()
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             run_root = root / "runs"
             run_dir = run_root / fixtures.request()["run_id"]
             other_dir = root / "other-host-runs" / "other-run"

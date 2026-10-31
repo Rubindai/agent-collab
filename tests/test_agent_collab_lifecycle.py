@@ -443,8 +443,8 @@ class HostTests(TestCase):
             self.assertTrue(start_output['host_policy']['local_subagents_allowed'])
             action_args = host.build_parser().parse_args(start_output['next_action']['command'][2:])
             self.assertEqual(action_args.command, 'advance')
-            self.assertEqual(action_args.run, str(run_root / 'override'))
-            self.assertEqual(action_args.repo_root, root)
+            self.assertEqual(action_args.run, str((run_root / 'override').resolve()))
+            self.assertEqual(action_args.repo_root, root.resolve())
             self.assertEqual(action_args.first_pass, Path(start_output['next_action']['input_path']))
             private_modes = {
                 "run_dir": stat.S_IMODE((run_root / "override").stat().st_mode),
@@ -566,7 +566,7 @@ class HostTests(TestCase):
                 with mock.patch.object(host.CONFIG.SAFETY, "process_identity_state", return_value="dead_or_replaced"):
                     host.REGISTRY.acquire_workspace_guard(root, "stale", "codex", root / "new" / "stale")
                 self.assertEqual(set(host.REGISTRY.read_workspace_guards(root)[1]), {"stale", "other"})
-                self.assertEqual(host.REGISTRY.read_workspace_guard(root, "stale")[1]["run_dir"], str(root / "new" / "stale"))
+                self.assertEqual(host.REGISTRY.read_workspace_guard(root, "stale")[1]["run_dir"], str((root / "new" / "stale").resolve()))
                 host.REGISTRY.update_workspace_guard(root, "stale", owner=host.REGISTRY.read_workspace_guard(root, "stale")[1], phase="peer_running", peer_identity=valid_process_identity())
                 with mock.patch.object(host.CONFIG.SAFETY, "process_identity_state", return_value="dead_or_replaced"):
                     with self.assertRaisesRegex(SystemExit, "already active"):

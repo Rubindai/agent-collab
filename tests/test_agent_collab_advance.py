@@ -289,7 +289,7 @@ class GuidedCliSmokeTests(TestCase):
     def test_execute_returned_argv_through_real_cli_with_a_finished_fixture_peer(self):
         host = fixtures.load_host()
         with tempfile.TemporaryDirectory() as tmp:
-            base = Path(tmp)
+            base = Path(tmp).resolve()
             repo, run = base / 'workspace', base / 'runs/cli-smoke'
             repo.mkdir(); run.mkdir(parents=True)
             (repo / 'source.txt').write_text('fixture input\n')

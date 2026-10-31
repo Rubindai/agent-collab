@@ -189,7 +189,7 @@ class AuditRegressionTests(TestCase):
     def test_exact_active_id_precedes_local_prefix_and_historical_same_id(self):
         host = fixtures.load_host()
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             local, other = root / 'local', root / 'other'
             for name in ('review', 'review-next'):
                 run = local / name
@@ -270,7 +270,7 @@ class AuditRegressionTests(TestCase):
     def test_cli_normalizes_explicit_git_subdirectory(self):
         host = fixtures.load_host()
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             subprocess.run(['git', 'init', '-q', str(root)], check=True)
             sub = root / 'sub'
             sub.mkdir()
